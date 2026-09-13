@@ -3,9 +3,10 @@
     Stage the Python app + built React UI for bundling.
 
 .DESCRIPTION
-    Copies the repo-root app tree (main.py, api\, core\, utils\, services\,
-    __init__.py) and frontend\dist\ into src-tauri\vendor\app, which
-    tauri.conf.json's bundle.resources maps to "app" inside the install.
+    Stages the app into src-tauri\vendor\app (which tauri.conf.json's
+    bundle.resources maps to "app" inside the install) as a GIT CHECKOUT of the
+    committed tree - so the installed app can self-update with `git pull` - then
+    overlays the built frontend\dist\, boot.py and a vendored ffmpeg.exe.
 
     The staged tree MIRRORS the repo's FLAT layout:
 
@@ -54,40 +55,38 @@ if (-not (Test-Path -LiteralPath (Join-Path $srcUi "index.html"))) {
 }
 
 if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
-New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $stageDir) -Force | Out-Null
 
-# State files and secrets: never shipped. The installed app starts empty and
-# creates its own data\ tree under the (per-user, writable) install directory.
-$excludeFiles = @(".env", "config.json", ".storage_secret", "*.db", "*.db-wal", "*.db-shm", "*.log")
+# The staged app is a GIT CHECKOUT, not a file copy, so the installed app can
+# self-update in place with `git pull` (Settings > Updates). Cloning the local
+# repo ships exactly the committed tree - uncommitted work and every ignored
+# file (venv, data\, .env, *.db, node_modules, dist\) never reach an installer -
+# and leaves the working tree pristine, which a fast-forward pull requires: a
+# partial file copy would read as local deletions and block every update.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$originUrl = (& git -C $repoRoot remote get-url origin 2>&1 | Out-String).Trim()
+$originOk  = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEap
+if (-not $originOk -or -not $originUrl -or $originUrl -notmatch '^(https?://|git@)') {
+    throw "the repo has no 'origin' remote - push it to GitHub first (self-update pulls from origin)"
+}
 
-# Dev debris, runtime output and the shell itself. Names are RELATIVE (bare) so
-# robocopy /XD matches at ANY depth: an absolute path matches only the top
-# level, which lets every subpackage's __pycache__ ship from the dev checkout
-# into the install - where the uninstaller then leaves them behind.
-$excludeDirs = @(
-    "desktop",            # the shell itself - never recurse into it
-    "frontend",           # copied separately as frontend\dist only
-    "venv", ".venv",
-    "__pycache__", ".pytest_cache", ".ruff_cache",
-    "tests",
-    "data",               # runtime state: db, projects, cache, logs, temp
-    "assets",             # runtime output: finished\, temp\
-    "node_modules",
-    ".git", ".github", ".claude",
-    "dist", "build"
-)
+$ErrorActionPreference = "Continue"
+& git clone --quiet $repoRoot $stageDir 2>&1 | Out-Null
+$cloneOk = ($LASTEXITCODE -eq 0)
+if ($cloneOk) {
+    # Point the install at the real remote, not the developer's local path.
+    & git -C $stageDir remote set-url origin $originUrl 2>&1 | Out-Null
+    $cloneOk = ($LASTEXITCODE -eq 0)
+}
+$stagedRev = (& git -C $stageDir rev-parse --short HEAD 2>&1 | Out-String).Trim()
+$ErrorActionPreference = $prevEap
+if (-not $cloneOk) { throw "git clone of the repo into the staging tree failed" }
+Ok "staged a git checkout of $stagedRev tracking $originUrl"
 
-# robocopy: mirror a clean tree, /XD and /XF do the excluding. Exit codes 0-7
-# are success (8+ is a real failure) - a quirk worth pinning, because treating
-# any non-zero as failure makes every build look broken.
-$roboArgs = @($repoRoot, $stageDir, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-foreach ($d in $excludeDirs)  { $roboArgs += @("/XD", $d) }
-foreach ($f in $excludeFiles) { $roboArgs += @("/XF", $f) }
-& robocopy @roboArgs | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "robocopy failed staging the app (exit $LASTEXITCODE)" }
-
-# The built SPA, at app\frontend\dist - the shape api\app.py expects (see the
-# .DESCRIPTION note above).
+# The built SPA is gitignored (absent from the clone); place it at
+# app\frontend\dist - the shape api\app.py expects (see the .DESCRIPTION note).
 New-Item -ItemType Directory -Path $stageUi -Force | Out-Null
 & robocopy $srcUi $stageUi "/E" "/NFL" "/NDL" "/NJH" "/NJS" "/NP" | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed staging the UI (exit $LASTEXITCODE)" }
@@ -96,6 +95,27 @@ if ($LASTEXITCODE -ge 8) { throw "robocopy failed staging the UI (exit $LASTEXIT
 # runtime's ._pth replaces sys.path outright, so without this the server cannot
 # import api.app whatever working directory it is given. See desktop\boot.py.
 Copy-Item -LiteralPath (Join-Path $desktopDir "boot.py") -Destination (Join-Path $stageDir "boot.py") -Force
+
+# ffmpeg: the engine invokes it BY NAME and a customer machine has none on PATH.
+# moviepy's imageio-ffmpeg dependency vendors the binary (under a versioned
+# name) into the runtime's site-packages; ship it as app\bin\ffmpeg.exe and
+# boot.py puts app\bin on PATH. ffprobe is not bundled - the engine degrades
+# gracefully where it is optional (e.g. the re-voice pad falls back to apad).
+$vendorPy = Join-Path $desktopDir "src-tauri\vendor\python\python.exe"
+if (Test-Path -LiteralPath $vendorPy) {
+    $ErrorActionPreference = "Continue"
+    $ffSrc = (& $vendorPy -B -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())" 2>&1 | Out-String).Trim()
+    $ffOk  = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevEap
+    if ($ffOk -and $ffSrc -and (Test-Path -LiteralPath $ffSrc)) {
+        $binDir = Join-Path $stageDir "bin"
+        New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+        Copy-Item -LiteralPath $ffSrc -Destination (Join-Path $binDir "ffmpeg.exe") -Force
+        Ok ("vendored ffmpeg -> app\bin\ffmpeg.exe (" + [math]::Round((Get-Item -LiteralPath $ffSrc).Length / 1MB) + " MB)")
+    } else {
+        Warn "imageio-ffmpeg not found in the vendored runtime - the install will need ffmpeg on PATH"
+    }
+}
 
 # Belt and braces: prove nothing sensitive slipped through. A rename or a new
 # state file would otherwise be caught only by a customer.

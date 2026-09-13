@@ -33,6 +33,12 @@ data/*
 Thumbs.db
 *.log
 
+# ---- Installed-app overlays (the install is a git checkout of this repo; these
+# are staged in by desktop/scripts/stage-app.ps1 and must not dirty `git status`
+# there) ----
+/bin/
+/boot.py
+
 # ---- Desktop shell (Tauri): vendored runtime, staged app tree, Rust build ----
 desktop/node_modules/
 desktop/src-tauri/vendor/

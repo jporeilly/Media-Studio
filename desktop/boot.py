@@ -75,6 +75,18 @@ def main():
     sys.path.insert(0, app_dir)
     os.chdir(app_dir)
 
+    # Vendored ffmpeg: stage-app.ps1 ships imageio-ffmpeg's binary as
+    # app/bin/ffmpeg.exe because the engine invokes "ffmpeg" by name and a
+    # customer machine has none on PATH. Put app/bin FIRST so those calls (and
+    # moviepy, via IMAGEIO_FFMPEG_EXE) resolve to the binary the app was tested
+    # with, whatever else the machine has installed.
+    bin_dir = os.path.join(app_dir, "bin")
+    if os.path.isdir(bin_dir):
+        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+        ffmpeg_exe = os.path.join(bin_dir, "ffmpeg.exe")
+        if os.path.isfile(ffmpeg_exe):
+            os.environ.setdefault("IMAGEIO_FFMPEG_EXE", ffmpeg_exe)
+
     # The Tauri shell is the UI; never pop a browser tab. main.py honours this
     # env var, and setting it keeps any code path that consults it in agreement.
     os.environ.setdefault("MEDIA_STUDIO_NO_BROWSER", "1")
