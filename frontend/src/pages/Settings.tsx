@@ -44,7 +44,9 @@ export default function SettingsPage() {
   const update = useQuery({
     queryKey: ["system-update"],
     queryFn: () => api.get<UpdateState>("/api/system/update"),
-    staleTime: 60_000,
+    // Always re-check on a visit to Settings: a cached (possibly stale) result
+    // here misleads — e.g. an "upstream" error that has since been fixed.
+    staleTime: 0,
   });
 
   const apply = useMutation({
