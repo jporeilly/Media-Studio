@@ -1,0 +1,32 @@
+# ---- Python (backend) ----
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# ---- Node (frontend) ----
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-error.log*
+
+# ---- Runtime data (per-deployment; never committed) ----
+data/*
+!data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+.storage_secret
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

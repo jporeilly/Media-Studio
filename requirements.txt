@@ -1,0 +1,43 @@
+# ── Web backend (FastAPI + React) ────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+bcrypt>=4.1.0
+shortuuid>=1.0.11
+httpx>=0.27.0
+
+# ── Video engine (reused from the SlideStudio desktop edition) ────────
+python-pptx>=0.6.21
+pywin32>=306
+Pillow>=10.0.0
+moviepy>=2.0.0
+pydub>=0.25.1
+numpy>=1.24.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+edge-tts>=6.1.0
+faster-whisper>=1.0.0
+pymupdf>=1.24.0          # provides `fitz` for PDF import (core/pdf_reader.py, core/pptx_exporter.py)
+
+# Kokoro TTS (local, offline provider). kokoro-onnx pulls espeakng-loader,
+# onnxruntime and phonemizer-fork transitively; phonemizer-fork is imported
+# directly by core/kokoro_tts_generator.py and soundfile is used directly for
+# WAV output, so both are declared explicitly. onnxruntime is the runtime engine.
+kokoro-onnx>=0.5.0
+espeakng-loader>=0.2.4
+phonemizer-fork>=3.3.2
+onnxruntime>=1.24.4
+soundfile>=0.14.0
+
+# Python 3.13+ compatibility (pydub uses the removed `audioop` module)
+audioop-lts>=0.2.1; python_version>='3.13'
+
+# Enterprise extras
+psutil>=5.9.0
+
+# GPU transcription (optional). Whisper runs ~9x faster on an NVIDIA GPU via
+# CTranslate2, which needs the CUDA 12 cuBLAS + cuDNN 9 runtime DLLs. The engine
+# falls back to CPU without them:
+#   pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+
+# NOTE: torch, argostranslate and stanza are intentionally NOT included.
