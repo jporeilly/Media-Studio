@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Clapperboard, FolderOpen, Languages, Upload, type LucideIcon } from "lucide-react";
 import { api } from "../api/client";
-import { Button, Card, EmptyState, PageHeader } from "../components/ui";
+import { Button, Card, EmptyState, ErrorBox, PageHeader } from "../components/ui";
 
 interface Health { status: string; version: string }
 
@@ -21,22 +21,12 @@ export default function DashboardPage() {
     staleTime: 30_000,
   });
 
-  const status = health.data?.status;
-  const version = health.data?.version;
-  const chipColor = health.isError ? "var(--bad)" : status === "ok" ? "var(--good)" : "var(--muted)";
-  const chipText = health.isLoading
-    ? "Checking..."
-    : health.isError
-      ? "API offline"
-      : `${status || "unknown"}${version ? ` v${version}` : ""}`;
-
   return (
     <>
-      <PageHeader
-        title="Media Studio Enterprise"
-        subtitle="Create narrated and translated videos from your slide decks."
-        actions={<span className="os-chip" style={{ background: chipColor }}>{chipText}</span>}
-      />
+      <PageHeader title="Media Studio Enterprise" subtitle="Create narrated and translated videos from your slide decks." />
+      {/* Quiet when healthy: the backend's version lives in the sidebar and Settings.
+          Only an unreachable API is worth a word here. */}
+      {health.isError && <ErrorBox message="The API isn't responding — the backend may still be starting, or has stopped." />}
       <div className="os-grid os-grid-4">
         {FEATURES.map((f) => {
           const Icon = f.icon;
