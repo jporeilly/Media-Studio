@@ -7,6 +7,7 @@ import LoginPage from "./pages/Login";
 import DashboardPage from "./pages/Dashboard";
 
 /* Login and the Dashboard ship in the main bundle; the placeholder pages are route-level chunks fetched on first visit. */
+const ProjectsPage = lazy(() => import("./pages/Projects"));
 const DocsPage = lazy(() => import("./pages/Docs"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 
@@ -29,6 +30,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route element={<RequireAuth><Shell /></RequireAuth>}>
         <Route index element={<DashboardPage />} />
+        <Route path="/projects" element={<Lazy><ProjectsPage /></Lazy>} />
         <Route path="/docs" element={<Lazy><DocsPage /></Lazy>} />
         <Route path="/settings" element={<Lazy><SettingsPage /></Lazy>} />
         <Route path="*" element={<Navigate to="/" replace />} />

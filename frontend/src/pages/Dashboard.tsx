@@ -1,18 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { Clapperboard, FolderOpen, Languages, Upload, type LucideIcon } from "lucide-react";
 import { api } from "../api/client";
-import { Card, EmptyState, PageHeader } from "../components/ui";
+import { Button, Card, EmptyState, PageHeader } from "../components/ui";
 
 interface Health { status: string; version: string }
 
-const FEATURES: { icon: LucideIcon; title: string; description: string }[] = [
-  { icon: FolderOpen, title: "Projects", description: "Open a slide deck and manage its render jobs." },
-  { icon: Upload, title: "Import Video", description: "Bring in an existing video to re-voice or translate." },
+const FEATURES: { icon: LucideIcon; title: string; description: string; to?: string }[] = [
+  { icon: FolderOpen, title: "Projects", description: "Import a slide deck, PDF, or video and manage it.", to: "/projects" },
+  { icon: Upload, title: "Import Video", description: "Bring in an existing video to re-voice or translate.", to: "/projects" },
   { icon: Clapperboard, title: "Generate Video", description: "Turn a PPTX into a narrated video with generated speech." },
   { icon: Languages, title: "Translate", description: "Produce a localised voice track in another language." },
 ];
 
 export default function DashboardPage() {
+  const navigate = useNavigate();
   const health = useQuery({
     queryKey: ["system-health"],
     queryFn: () => api.get<Health>("/api/system/health"),
@@ -44,7 +46,9 @@ export default function DashboardPage() {
                 icon={<Icon size={30} />}
                 title={f.title}
                 sub={f.description}
-                action={<button className="os-btn os-btn-secondary os-btn-sm" disabled>Coming soon</button>}
+                action={f.to
+                  ? <Button variant="primary" size="sm" onClick={() => navigate(f.to!)}>Open</Button>
+                  : <button className="os-btn os-btn-secondary os-btn-sm" disabled>Coming soon</button>}
               />
             </Card>
           );
