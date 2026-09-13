@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from api.deps import current_user
-from api.schemas import GenerateRequest, TranscribeRequest, TranscriptUpdate
-from services import jobs, projects as store, transcription
+from api.schemas import GenerateRequest, RevoiceRequest, TranscribeRequest, TranscriptUpdate
+from services import jobs, projects as store, revoice, transcription
 from services.output_presets import get_preset
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -129,6 +129,29 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     return {"job_id": job_id}
 
 
+@router.post("/{pid}/revoice")
+def revoice_video(pid: str, body: RevoiceRequest, user: dict = Depends(current_user)):
+    """Re-voice a transcribed video in a new voice (optionally translated).
+
+    Keeps the original frames and swaps the narration track. Returns a job id to
+    poll at /api/jobs/{id}; when the job is done the MP4 is downloadable at
+    /api/projects/{pid}/revoiced-video.
+    """
+    record = store.get_project(pid)
+    if not record:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    if record.get("kind") != "video":
+        raise HTTPException(status_code=400, detail="Only video projects can be re-voiced.")
+    if not record.get("transcript"):
+        raise HTTPException(status_code=400, detail="Transcribe the video first.")
+
+    job_id = jobs.submit(
+        "revoice",
+        lambda progress: revoice.revoice_project(pid, body.voice_id, body.speed, body.language, progress),
+    )
+    return {"job_id": job_id}
+
+
 @router.get("/{pid}/video")
 def get_video(pid: str, user: dict = Depends(current_user)):
     """Stream the generated MP4 for a project, or 404 if none has been made."""
@@ -146,5 +169,25 @@ def get_video(pid: str, user: dict = Depends(current_user)):
     video_path = (base / filename).resolve()
     if base not in video_path.parents or not video_path.is_file():
         raise HTTPException(status_code=404, detail="No generated video for this project.")
+
+    return FileResponse(str(video_path), media_type="video/mp4")
+
+
+@router.get("/{pid}/revoiced-video")
+def get_revoiced_video(pid: str, user: dict = Depends(current_user)):
+    """Stream the re-voiced MP4 for a project, or 404 if none has been made."""
+    record = store.get_project(pid)
+    if not record:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    filename = record.get("revoiced_video")
+    if not filename:
+        raise HTTPException(status_code=404, detail="No re-voiced video for this project.")
+
+    # Same guard as get_video: the resolved path must stay under the project dir.
+    base = (store.PROJECTS_DIR / pid).resolve()
+    video_path = (base / filename).resolve()
+    if base not in video_path.parents or not video_path.is_file():
+        raise HTTPException(status_code=404, detail="No re-voiced video for this project.")
 
     return FileResponse(str(video_path), media_type="video/mp4")

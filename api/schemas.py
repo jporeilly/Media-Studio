@@ -31,3 +31,9 @@ class GenerateRequest(BaseModel):
     voice_id: str
     speed: float = 1.0
     preset: str = "youtube_1080p"
+
+
+class RevoiceRequest(BaseModel):
+    voice_id: str
+    speed: float = 1.0
+    language: str | None = None  # display name from /api/languages; None = keep original

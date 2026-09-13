@@ -34,3 +34,16 @@ def voices(user: dict = Depends(current_user)):
 def output_presets(user: dict = Depends(current_user)):
     """The selectable output presets (resolution + bitrate per delivery target)."""
     return {"presets": list_presets()}
+
+
+@router.get("/languages")
+def languages(user: dict = Depends(current_user)):
+    """Target languages for re-voice translation (via the local Ollama model)."""
+    from core.translator import get_available_languages
+
+    return {
+        "languages": [
+            {"name": name, "subtag": subtag}
+            for name, subtag in get_available_languages().items()
+        ]
+    }

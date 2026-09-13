@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, FileText, Film, Presentation, Save, Wand2 } from "lucide-react";
+import { ArrowLeft, Download, FileText, Film, Mic, Presentation, Save, Wand2 } from "lucide-react";
 import { api, errorMessage } from "../api/client";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { duration, relativeTime } from "../lib/format";
@@ -24,9 +24,12 @@ interface Project {
   duration?: number;
   transcribed_device?: string;
   output_video?: string;
+  revoiced_video?: string;
+  revoiced_language?: string;
 }
 interface Job {
   id: string;
+  kind: string;
   status: string;
   progress: number;
   message: string;
@@ -36,6 +39,10 @@ interface Voice {
   voice_id: string;
   name: string;
   category: string;
+}
+interface Lang {
+  name: string;
+  subtag: string;
 }
 interface Preset {
   id: string;
@@ -78,6 +85,7 @@ export default function ProjectDetailPage() {
   const [voiceId, setVoiceId] = useState("");
   const [speed, setSpeed] = useState(1.0);
   const [presetId, setPresetId] = useState("youtube_1080p");
+  const [language, setLanguage] = useState("");
 
   const project = useQuery({
     queryKey: ["project", id],
@@ -86,22 +94,31 @@ export default function ProjectDetailPage() {
 
   // Decks and PDFs generate a video; videos are transcribed and re-voiced.
   const canGenerate = project.data?.kind === "deck" || project.data?.kind === "pdf";
+  const isVideo = project.data?.kind === "video";
 
   // Keep the editable copy in sync with the saved transcript.
   useEffect(() => {
     if (project.data?.transcript) setSegments(project.data.transcript);
   }, [project.data?.transcript]);
 
+  // Voices are needed by both the deck Generate card and the video Re-voice card.
   const voices = useQuery({
     queryKey: ["voices"],
     queryFn: () => api.get<{ voices: Voice[] }>("/api/voices"),
-    enabled: canGenerate,
+    enabled: canGenerate || isVideo,
     staleTime: Infinity,
   });
   const presets = useQuery({
     queryKey: ["output-presets"],
     queryFn: () => api.get<{ presets: Preset[] }>("/api/output-presets"),
     enabled: canGenerate,
+    staleTime: Infinity,
+  });
+  // Target languages for the optional re-voice translation.
+  const languages = useQuery({
+    queryKey: ["languages"],
+    queryFn: () => api.get<{ languages: Lang[] }>("/api/languages"),
+    enabled: isVideo,
     staleTime: Infinity,
   });
 
@@ -121,6 +138,11 @@ export default function ProjectDetailPage() {
 
   const generate = useMutation({
     mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/generate`, { voice_id: voiceId, speed, preset: presetId }),
+    onSuccess: (r) => setJobId(r.job_id),
+  });
+
+  const revoice = useMutation({
+    mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/revoice`, { voice_id: voiceId, speed, language }),
     onSuccess: (r) => setJobId(r.job_id),
   });
 
@@ -170,6 +192,17 @@ export default function ProjectDetailPage() {
   const voiceOptions = voices.data?.voices ?? [];
   const presetOptions = presets.data?.presets ?? [];
   const presetHint = presetOptions.find((x) => x.id === presetId)?.description;
+  const languageOptions = languages.data?.languages ?? [];
+
+  // Only one job runs at a time; its kind tells which video card owns the
+  // progress bar / error, so the transcript editor stays put during a re-voice.
+  const activeKind = job.data?.kind;
+  const jobActive = jobStatus === "queued" || jobStatus === "running";
+  const jobErrText = jobStatus === "error" ? job.data?.error || job.data?.message : null;
+  const transcribing = transcribe.isPending || (jobActive && activeKind === "transcribe");
+  const revoicing = revoice.isPending || (jobActive && activeKind === "revoice");
+  const transcribeError = transcribe.isError ? errorMessage(transcribe.error) : activeKind === "transcribe" ? jobErrText : null;
+  const revoiceError = revoice.isError ? errorMessage(revoice.error) : activeKind === "revoice" ? jobErrText : null;
 
   return (
     <>
@@ -241,7 +274,7 @@ export default function ProjectDetailPage() {
                 <div style={{ display: "grid", gap: 10 }}>
                   <video controls src={`/api/projects/${id}/video`} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
                   <div>
-                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/video`}>
+                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/video`} download={`${p.name}.mp4`}>
                       <Download size={15} /> Download video
                     </a>
                   </div>
@@ -254,9 +287,9 @@ export default function ProjectDetailPage() {
 
       {p.kind === "video" && (
         <Card title="Transcript" style={{ marginTop: 16 }}>
-          {jobError && <ErrorBox message={jobError} />}
+          {transcribeError && <ErrorBox message={transcribeError} />}
 
-          {running ? (
+          {transcribing ? (
             <JobProgress job={job.data} />
           ) : segments && segments.length > 0 ? (
             <div style={{ display: "grid", gap: 10 }}>
@@ -280,6 +313,67 @@ export default function ProjectDetailPage() {
             <div style={{ display: "grid", gap: 12, justifyItems: "start" }}>
               <div style={{ color: "var(--muted)" }}>No transcript yet. Transcribe the audio to get an editable transcript.</div>
               <Button variant="primary" icon={<Wand2 size={16} />} onClick={() => transcribe.mutate()}>Transcribe audio</Button>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {isVideo && segments && segments.length > 0 && (
+        <Card title="Re-voice" subtitle="Regenerate the narration in a new voice (and optionally a language), keeping the original video." style={{ marginTop: 16 }}>
+          {revoiceError && <ErrorBox message={revoiceError} />}
+
+          {revoicing ? (
+            <JobProgress job={job.data} />
+          ) : (
+            <div style={{ display: "grid", gap: 16 }}>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
+                <Field label="Voice">
+                  <Select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} disabled={voiceOptions.length === 0}>
+                    {voiceOptions.length === 0 && <option value="">No voices available</option>}
+                    {voiceOptions.map((v) => (
+                      <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Speed">
+                  <Input
+                    type="number"
+                    step={0.05}
+                    min={0.5}
+                    max={2}
+                    value={speed}
+                    onChange={(e) => setSpeed(Number(e.target.value))}
+                    style={{ width: 100 }}
+                  />
+                </Field>
+                <Field label="Language">
+                  <Select value={language} onChange={(e) => setLanguage(e.target.value)}>
+                    <option value="">Keep original language</option>
+                    {languageOptions.map((l) => (
+                      <option key={l.subtag} value={l.name}>{l.name}</option>
+                    ))}
+                  </Select>
+                </Field>
+                <Button
+                  variant="primary"
+                  icon={<Mic size={16} />}
+                  disabled={!voiceId || revoice.isPending}
+                  onClick={() => revoice.mutate()}
+                >
+                  {p.revoiced_video ? "Re-voice again" : "Re-voice"}
+                </Button>
+              </div>
+
+              {p.revoiced_video && (
+                <div style={{ display: "grid", gap: 10 }}>
+                  <video controls src={`/api/projects/${id}/revoiced-video`} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                  <div>
+                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/revoiced-video`} download={`${p.name}-revoiced.mp4`}>
+                      <Download size={15} /> Download re-voiced video
+                    </a>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </Card>
