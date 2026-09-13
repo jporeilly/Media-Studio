@@ -1,0 +1,38 @@
+[package]
+name = "media-studio-desktop"
+version = "0.1.0"
+description = "Desktop shell for Media Studio Enterprise"
+edition = "2021"
+rust-version = "1.77"
+
+[[bin]]
+name = "media-studio-desktop"
+path = "src/main.rs"
+
+# The installer already carries a vendored Python runtime; keep our own
+# contribution small.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+tauri-plugin-opener = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Job objects: the crash-safety net that stops a leaked uvicorn from holding
+# the port and the SQLite/state files after we die. See src/server.rs.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",          # CreateJobObjectW takes SECURITY_ATTRIBUTES
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

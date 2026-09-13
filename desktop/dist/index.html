@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Media Studio Enterprise</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    font: 15px/1.55 "Segoe UI", system-ui, sans-serif;
+    color: #e6edf3;
+    /* 2026 branding: BLACK, same as pentaho.com - the wordmark carries the
+       brand. No red, no swirl: the accent is a neutral breathing bar. */
+    background: radial-gradient(940px 640px at 50% 105%, #101216 0%, #0a0a0c 55%, #000 100%);
+  }
+  .stage { width: min(600px, 90vw); }
+
+  header { margin-bottom: 1.5rem; }
+  /* The wordmark: white Pentaho, capital P (the swirl is retired). The bar
+     beneath draws in on load and keeps breathing while the checks run. */
+  .brandword {
+    font: 650 2.15rem/1.1 "Segoe UI Semibold", "Segoe UI", system-ui, sans-serif;
+    letter-spacing: .012em; color: #fff; display: inline-block;
+  }
+  .brandbar {
+    display: block; height: 4px; width: 0; margin-top: .42rem;
+    background: #e6edf3; border-radius: 2px;
+    box-shadow: 0 0 14px rgba(230,237,243,.35);
+    animation: bardraw 2.2s cubic-bezier(.35,.6,.3,1) forwards,
+               breathe 2.6s ease-in-out 2.2s infinite alternate;
+  }
+  @keyframes bardraw { to { width: 100%; } }
+  @keyframes breathe { from { opacity: .5; } to { opacity: 1; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 .15rem; letter-spacing: .015em; }
+  .sub { color: #9aa7b4; margin: 0; font-size: .9rem; }
+  /* Sourced from the SHELL, not the backend: on a startup failure the backend
+     is exactly what is missing, and "which build is this?" is the first
+     question asked. */
+  .ver { font-size: .72rem; font-weight: 500; color: #8a97a4; letter-spacing: .02em;
+         border: 1px solid rgba(255,255,255,.15); border-radius: 999px;
+         padding: .12rem .45rem; vertical-align: middle; margin-left: .35rem; }
+
+  /* The checks. Each row is driven by a real signal, never a timer. */
+  ul.checks { list-style: none; margin: 0 0 1.15rem; padding: 0; }
+  ul.checks li {
+    display: flex; align-items: center; gap: .7rem;
+    padding: .38rem .1rem; font-size: .93rem; color: #6f7d8c;
+    transition: color .25s ease;
+  }
+  li.active { color: #e6edf3; }
+  li.done   { color: #9aa7b4; }
+  li.failed { color: #ff7b72; }
+  .dot { flex: 0 0 16px; height: 16px; position: relative; }
+  .dot::before {
+    content: ""; position: absolute; inset: 3px; border-radius: 50%;
+    background: rgba(255,255,255,.14);
+  }
+  li.active .dot::before {
+    inset: 0; background: none;
+    border: 2px solid rgba(230,237,243,.2); border-top-color: #e6edf3; border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  li.done .dot::after {
+    content: ""; position: absolute; left: 4px; top: 1px; width: 5px; height: 10px;
+    border: solid #2ea043; border-width: 0 2px 2px 0; transform: rotate(42deg);
+  }
+  li.done .dot::before { background: none; }
+  li.failed .dot::after {
+    content: "!"; position: absolute; inset: 0; text-align: center;
+    font-weight: 700; font-size: 12px; color: #ff7b72; line-height: 16px;
+  }
+  li.failed .dot::before { background: none; }
+  .note { margin-left: auto; font-size: .78rem; color: #5c6874; }
+
+  /* What is actually happening: the backend's own stdout/stderr, live. */
+  .console {
+    height: 118px; overflow-y: auto;
+    background: rgba(0,0,0,.34); border: 1px solid rgba(255,255,255,.07);
+    border-radius: 7px; padding: .55rem .7rem;
+    font: 11.5px/1.55 Consolas, "Cascadia Mono", monospace; color: #8fa0b2;
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 100%);
+            mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 100%);
+    scrollbar-width: none;
+  }
+  .console::-webkit-scrollbar { display: none; }
+  .console div { white-space: pre-wrap; word-break: break-word; }
+  .console .err { color: #ff9d96; }
+  .console .muted { color: #4f5d6c; }
+
+  .ident { margin-top: .85rem; display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; }
+  .chip {
+    font-size: .74rem; letter-spacing: .01em; padding: .2rem .55rem;
+    border-radius: 999px; border: 1px solid rgba(255,255,255,.13);
+    color: #9aa7b4; background: rgba(255,255,255,.035);
+  }
+  .chip.path { font-family: Consolas, monospace; font-size: .70rem; color: #6f7d8c; }
+
+  .setup {
+    margin-top: .7rem; font-size: .84rem; color: #d9a640;
+    border-left: 2px solid rgba(210,153,34,.5); padding-left: .6rem; display: none;
+  }
+
+  .foot { margin-top: .55rem; font-size: .8rem; color: #5c6874; text-align: right; }
+
+  /* The failure panel can be far taller than the window - a real traceback is
+     40 lines - and the startup view deliberately does not scroll. Without this
+     the buttons end up below the fold with no way to reach them. */
+  body.errored { align-items: flex-start; overflow-y: auto; padding: 2rem 0; }
+  body.errored .stage { margin: auto 0; }
+  body.errored::-webkit-scrollbar { width: 10px; }
+  body.errored::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.16); border-radius: 5px;
+  }
+  body.errored::-webkit-scrollbar-track { background: rgba(0,0,0,.25); }
+
+  .error { display: none; }
+  .error h2 { font-size: 1rem; color: #ff7b72; margin: 0 0 .35rem; }
+  .lead { color: #cfd8e3 !important; margin: 0 0 .9rem !important; font-size: .92rem !important; }
+  .error p { color: #9aa7b4; margin: 0 0 .55rem; font-size: .89rem; }
+  pre { background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.08);
+        border-radius: 7px; padding: .7rem; overflow: auto; max-height: 150px;
+        font: 11.5px/1.5 Consolas, monospace; color: #c9d1d9; }
+
+  .support { margin-top: .9rem; }
+  .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .actions button {
+    font: 600 .84rem/1 "Segoe UI", system-ui, sans-serif;
+    padding: .52rem .9rem; border-radius: 6px; cursor: pointer;
+    color: #0a0a0c; background: #e6edf3; border: 1px solid #c3ccd6;
+  }
+  .actions button:hover { background: #ffffff; }
+  .actions button.ghost { color: #e6edf3; background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.18); }
+  .actions button.ghost:hover { background: rgba(255,255,255,.12); }
+  .hint { margin: .55rem 0 0; font-size: .8rem; color: #7ee29a; min-height: 1.1em; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <header>
+    <div class="brandword" aria-hidden="true">Pentaho<span class="brandbar"></span></div>
+    <h1 style="margin-top:.9rem">Media Studio Enterprise <span class="ver" id="ver"></span></h1>
+    <p class="sub">Turn slides into narrated video</p>
+  </header>
+
+  <div id="live">
+    <ul class="checks" id="checks"></ul>
+    <div class="console" id="console"><div class="muted">waiting for the backend...</div></div>
+    <div class="setup" id="setup"></div>
+    <div class="ident" id="ident"></div>
+    <div class="foot" id="foot"></div>
+  </div>
+
+  <div class="error" id="error">
+    <h2>The local server did not start</h2>
+    <p class="lead" id="lead"></p>
+    <!--
+      The backend's own output comes FIRST. Every path check can pass while the
+      server still dies - which is exactly what a verbatim \\?\ working directory
+      did - so the resolved paths are the second question, not the first.
+    -->
+    <p>What the backend said before it stopped:</p>
+    <pre id="log">collecting...</pre>
+    <p>What the shell resolved:</p>
+    <pre id="diag">collecting...</pre>
+    <p>If <code>main_py_found</code> or <code>vendored_python</code> is false, the install is
+       incomplete - reinstall, or run the app from a checkout with <code>python main.py</code>.</p>
+
+    <div class="support">
+      <div class="actions">
+        <button id="retryBtn">Try again</button>
+        <button id="copyBtn" class="ghost">Copy details</button>
+        <button id="saveBtn" class="ghost">Save report</button>
+        <button id="folderBtn" class="ghost">Open data folder</button>
+      </div>
+      <p class="hint" id="supportHint"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Two thresholds, because "slow" and "broken" are different states.
+  //
+  // SLOW_MS  - say it is taking longer than usual, and keep waiting. A first
+  //            launch genuinely can take this long: the media stack (onnxruntime,
+  //            moviepy, faster-whisper) is heavy to import.
+  // DEADLINE - give up and offer the report. Deliberately far out, because a
+  //            failure panel shown to someone whose app was merely late generates
+  //            exactly the enquiries it is meant to prevent.
+  //
+  // Neither matters when the backend has actually DIED: server_alive reports
+  // that directly, and the panel appears immediately.
+  var SLOW_MS = 45000;
+  var DEADLINE_MS = 240000;
+  var started = Date.now();
+  var seen = 0;
+
+  var consoleEl = document.getElementById('console');
+  var footEl    = document.getElementById('foot');
+
+  // Every step is driven by a REAL signal: a line the backend printed, or a
+  // successful health check. Nothing here advances on a timer.
+  var STEPS = [
+    { id: 'shell',   label: 'Locating the application',       match: null },
+    { id: 'python',  label: 'Starting the bundled Python',    match: /Started server process|Uvicorn running/i },
+    { id: 'engine',  label: 'Loading the media engine',       match: /Waiting for application startup/i },
+    { id: 'ready',   label: 'Starting the web server',        match: /Application startup complete/i },
+    { id: 'connect', label: 'Opening Media Studio',           match: null }
+  ];
+
+  var ul = document.getElementById('checks');
+  STEPS.forEach(function (s) {
+    var li = document.createElement('li');
+    li.id = 'step-' + s.id;
+    li.innerHTML = '<span class="dot"></span><span>' + s.label + '</span>' +
+                   '<span class="note" id="note-' + s.id + '"></span>';
+    ul.appendChild(li);
+  });
+
+  function setState(id, state, note) {
+    var li = document.getElementById('step-' + id);
+    if (!li) return;
+    li.className = state;
+    if (note !== undefined) { document.getElementById('note-' + id).textContent = note; }
+  }
+  function stateOf(id) { return (document.getElementById('step-' + id) || {}).className || ''; }
+
+  // MONOTONIC. uvicorn prints "Uvicorn running on ..." last, but that line also
+  // matches the Python step's pattern, so a naive setter walked the list
+  // backwards and re-span a spinner on a step that had already finished.
+  var reached = 0;
+
+  function advanceTo(index) {
+    if (index <= reached) { return; }
+    reached = index;
+    var bar = document.querySelector('.brandbar');
+    if (bar) {
+      var left = Math.max(0, STEPS.length - index) / STEPS.length;
+      bar.style.animationDuration = '2.2s, ' + (1.2 + left * 2.6).toFixed(1) + 's';
+    }
+    for (var i = 0; i < STEPS.length; i++) {
+      if (i < index) { if (stateOf(STEPS[i].id) !== 'failed') setState(STEPS[i].id, 'done'); }
+      else if (i === index) { if (stateOf(STEPS[i].id) !== 'failed') setState(STEPS[i].id, 'active'); }
+    }
+  }
+
+  setState('shell', 'active');
+  advanceTo(1);
+  setState('shell', 'done');
+
+  var placeholderCleared = false;
+
+  function pushLines(lines) {
+    if (!placeholderCleared && lines.length > 0) {
+      consoleEl.innerHTML = '';
+      placeholderCleared = true;
+    }
+    for (var i = seen; i < lines.length; i++) {
+      var raw = lines[i];
+      var d = document.createElement('div');
+      // The tag the Rust side prefixes: [out] / [err]. Strip it for display but
+      // use it to colour genuine error output.
+      var isErr = /^\[err\]/.test(raw) && /error|traceback|exception/i.test(raw);
+      d.textContent = raw.replace(/^\[(out|err)\]\s?/, '');
+      if (isErr) { d.className = 'err'; }
+      consoleEl.appendChild(d);
+
+      for (var s = 0; s < STEPS.length; s++) {
+        if (STEPS[s].match && STEPS[s].match.test(raw)) { advanceTo(s + 1); }
+      }
+      if (/Traceback|ModuleNotFoundError|Error:/i.test(raw)) {
+        for (var k = 0; k < STEPS.length; k++) {
+          if (stateOf(STEPS[k].id) === 'active') { setState(STEPS[k].id, 'failed'); break; }
+        }
+      }
+    }
+    if (lines.length > seen) {
+      seen = lines.length;
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+      while (consoleEl.childElementCount > 80) { consoleEl.removeChild(consoleEl.firstChild); }
+    }
+  }
+
+  // The Tauri bridge only exists inside the app window. Opened in a plain
+  // browser - which is how anyone would try to preview this page - every call
+  // throws and the screen sits there frozen, looking like the bug it is not.
+  var HAS_TAURI = !!(window.__TAURI__ && window.__TAURI__.core);
+
+  function invoke(cmd) {
+    if (!HAS_TAURI) { return Promise.reject(new Error('no tauri bridge')); }
+    return window.__TAURI__.core.invoke(cmd);
+  }
+
+  function previewMode() {
+    consoleEl.innerHTML = '';
+    ['Preview only - this page is open in a browser, not in the app window.',
+     'window.__TAURI__ is absent, so there is no backend to talk to and',
+     'no log to stream. Launch the app to see the real thing.'
+    ].forEach(function (t) {
+      var d = document.createElement('div');
+      d.className = 'muted';
+      d.textContent = t;
+      consoleEl.appendChild(d);
+    });
+    setState('shell', 'done', 'preview');
+    setState('python', 'active', 'waiting');
+    footEl.textContent = 'preview mode';
+  }
+
+  function chip(text, cls) {
+    var el = document.createElement('span');
+    el.className = 'chip' + (cls ? ' ' + cls : '');
+    el.textContent = text;
+    document.getElementById('ident').appendChild(el);
+  }
+
+  function showVersion(r) {
+    if (r && r.version) { document.getElementById('ver').textContent = 'v' + r.version; }
+  }
+
+  function showIdentity() {
+    invoke('env_report').then(function (r) {
+      showVersion(r);
+      var ident = document.getElementById('ident');
+      ident.innerHTML = '';
+      if (r.data_dir) { chip(r.data_dir, 'path'); }
+    }).catch(function () { /* preview, or an older shell: just omit the strip */ });
+  }
+
+  // What KIND of failure this is, from evidence the shell already has.
+  function classify(log) {
+    var text = (log || []).join('\n');
+    var answered = /200 OK/.test(text);
+    var traceback = /Traceback|ModuleNotFoundError|ImportError/i.test(text);
+    var addrInUse = /address already in use|10048/i.test(text);
+
+    if (traceback) {
+      return { title: 'The backend stopped with an error',
+               lead: 'Python raised while starting. The last lines below name the cause.' };
+    }
+    if (addrInUse) {
+      return { title: 'The port was already taken',
+               lead: 'Another copy of the app is probably still running. Close it, or sign out and back in.' };
+    }
+    if (answered) {
+      return { title: 'The server started, but the window could not reach it',
+               lead: 'The log shows it answering requests, so the backend is healthy - something ' +
+                     'between the window and it is not. This is worth reporting: it is not a ' +
+                     'broken install.' };
+    }
+    if (!log || !log.length) {
+      return { title: 'The backend produced no output at all',
+               lead: 'It did not get far enough to say anything. Usually an incomplete install - ' +
+                     'check the two values below.' };
+    }
+    return { title: 'The local server did not start',
+             lead: 'It started but never became ready. The last output is below.' };
+  }
+
+  function fail() {
+    document.getElementById('live').style.display = 'none';
+    document.getElementById('error').style.display = 'block';
+    document.body.classList.add('errored');
+
+    var settled = false;
+    setTimeout(function () {
+      if (settled) { return; }
+      document.getElementById('log').textContent =
+        'The shell did not answer within 5 seconds - it is wedged, not merely slow.';
+      document.getElementById('diag').textContent =
+        'Close the window and relaunch. If it recurs, run scripts\\check-environment.ps1.';
+    }, 5000);
+
+    invoke('diagnostics').then(function (d) {
+      settled = true;
+      var log = d.server_log || [];
+      delete d.server_log;
+      var kind = classify(log);
+      document.querySelector('#error h2').textContent = kind.title;
+      document.getElementById('lead').textContent = kind.lead;
+      document.getElementById('log').textContent =
+        log.length ? log.join('\n') : 'nothing - the backend produced no output at all.';
+      document.getElementById('diag').textContent = JSON.stringify(d, null, 2);
+    }).catch(function (e) {
+      settled = true;
+      document.getElementById('log').textContent = 'The shell could not be reached.';
+      document.getElementById('diag').textContent = String(e);
+    });
+  }
+
+  var finished = false;
+
+  function tickClock() {
+    if (finished) { return; }
+    var ms = Date.now() - started;
+    var secs = Math.round(ms / 1000);
+    footEl.textContent = secs > 3 ? secs + 's elapsed' : '';
+
+    if (ms > SLOW_MS) {
+      var s = document.getElementById('setup');
+      if (s.dataset.slow !== '1' && s.style.display !== 'block') {
+        s.dataset.slow = '1';
+        s.textContent = 'Still starting. A first launch can take a couple of minutes while the '
+                      + 'media engine loads - the log below is live.';
+        s.style.display = 'block';
+      }
+    }
+    if (ms > DEADLINE_MS) { die(); }
+  }
+
+  var clock = setInterval(tickClock, 1000);
+
+  function die() {
+    if (finished) { return; }
+    finished = true;
+    clearInterval(clock);
+    fail();
+  }
+
+  function poll() {
+    if (finished) { return; }
+
+    invoke('server_log').then(pushLines).catch(function () {});
+
+    // A process that has exited is never going to answer.
+    invoke('server_alive').then(function (alive) {
+      if (alive === false) { die(); }
+    }).catch(function () {});
+
+    // Readiness is asked of the SHELL, not fetched from here: this page is on a
+    // tauri:// origin, so fetch() to the backend is cross-origin and the webview
+    // will not hand the response to JavaScript. Rust has no same-origin rule.
+    // The top-level navigation below is unaffected - navigating IS allowed.
+    invoke('server_url').then(function (url) {
+      if (!url) { setTimeout(poll, 350); return; }
+      invoke('server_ready').then(function (ready) {
+        if (!ready) { setTimeout(poll, 400); return; }
+        finished = true;
+        clearInterval(clock);
+        advanceTo(STEPS.length);
+        setState('connect', 'done');
+        setTimeout(function () { window.location.replace(url); }, 420);
+      }).catch(function () { setTimeout(poll, 400); });
+    }).catch(function () { setTimeout(poll, 400); });
+  }
+
+  // ---- support actions -----------------------------------------------------
+  var reportText = '';
+  var reportPath = '';
+
+  function hint(msg, ok) {
+    var el = document.getElementById('supportHint');
+    el.textContent = msg;
+    el.style.color = ok === false ? '#ff9d96' : '#7ee29a';
+  }
+
+  function report() {
+    if (reportText) { return Promise.resolve({ text: reportText, path: reportPath }); }
+    return invoke('save_report').then(function (r) {
+      reportText = r.text; reportPath = r.path;
+      return r;
+    });
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(function () { return legacyCopy(text); });
+    }
+    return legacyCopy(text);
+  }
+
+  function legacyCopy(text) {
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error('copy refused'));
+    });
+  }
+
+  // Retry restarts the backend IN PLACE. Everyone closes and relaunches after a
+  // failed start; the app may as well do it, and a port clash or a file briefly
+  // held by antivirus clears on a second attempt.
+  var retryBtn = document.getElementById('retryBtn');
+  retryBtn.onclick = function () {
+    retryBtn.disabled = true;
+    retryBtn.textContent = 'Restarting...';
+    invoke('restart_server').then(function (ok) {
+      if (!ok) {
+        hint('The backend would not restart. The report below is unchanged.', false);
+        retryBtn.disabled = false;
+        retryBtn.textContent = 'Try again';
+        return;
+      }
+      document.getElementById('error').style.display = 'none';
+      document.getElementById('live').style.display = '';
+      document.body.classList.remove('errored');
+      retryBtn.disabled = false;
+      retryBtn.textContent = 'Try again';
+      clearInterval(clock);
+      started = Date.now();
+      finished = false;
+      reached = 0;
+      seen = 0;
+      placeholderCleared = false;
+      consoleEl.innerHTML = '';
+      STEPS.forEach(function (st) { setState(st.id, '', ''); });
+      setState('shell', 'done');
+      advanceTo(1);
+      clock = setInterval(tickClock, 1000);
+      poll();
+    }).catch(function (e) {
+      hint('Could not restart: ' + e, false);
+      retryBtn.disabled = false;
+      retryBtn.textContent = 'Try again';
+    });
+  };
+
+  document.getElementById('folderBtn').onclick = function () {
+    invoke('open_state_dir').then(function (dir) {
+      if (window.__TAURI__.opener) {
+        window.__TAURI__.opener.openPath(dir).catch(function () {});
+      }
+      hint('Your data lives in ' + dir);
+    }).catch(function (e) { hint('Could not open the folder: ' + e, false); });
+  };
+
+  document.getElementById('copyBtn').onclick = function () {
+    report().then(function (r) { return copyText(r.text); })
+      .then(function () { hint('Copied. Paste it into a support message.'); })
+      .catch(function (e) { hint('Could not copy: ' + e + ' - use Save report instead.', false); });
+  };
+
+  document.getElementById('saveBtn').onclick = function () {
+    report().then(function (r) {
+      hint('Saved to ' + r.path);
+      if (window.__TAURI__.opener) {
+        window.__TAURI__.opener.revealItemInDir(r.path).catch(function () {});
+      }
+    }).catch(function (e) { hint('Could not save the report: ' + e, false); });
+  };
+
+  if (HAS_TAURI) { showIdentity(); poll(); } else { previewMode(); }
+</script>
+</body>
+</html>

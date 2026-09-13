@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The shell needs its own commands, plus opener to reveal the startup report in Explorer and open the data folder when a support email is being put together. The UI itself is served over http from the local backend and needs no Tauri APIs.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "opener:allow-open-url",
+    "opener:allow-open-path"
+  ]
+}
