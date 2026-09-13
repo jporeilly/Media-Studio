@@ -132,10 +132,22 @@ if ($LASTEXITCODE -ne 0) { Warn "the media stack did not fully import - video/tr
 & $py -c "import win32com.client; print('pywin32 ok')" 2>$null
 if ($LASTEXITCODE -ne 0) { Warn "pywin32/win32com did not import cleanly - PowerPoint COM export may need pywin32_postinstall" }
 
-# ffmpeg is a RUNTIME dependency of moviepy/pydub and is NOT a pip wheel here
-# (requirements.txt ships neither static-ffmpeg nor imageio-ffmpeg). Rendering
-# needs ffmpeg on PATH. Flag it so it is not discovered at render time.
-Warn "ffmpeg is not vendored - video rendering needs ffmpeg on PATH (or add imageio-ffmpeg to requirements)"
+# ffmpeg is a RUNTIME dependency of moviepy/pydub. requirements.txt ships no
+# standalone ffmpeg wheel, but moviepy depends on imageio-ffmpeg, which vendors
+# the binary into site-packages; stage-app.ps1 then ships it as app\bin\ffmpeg.exe
+# (boot.py puts app\bin on PATH). Confirm it is here now, so a missing binary is
+# discovered at build time and not at first render on a customer machine.
+$ffPy = Join-Path (Split-Path -Parent $PSScriptRoot) "src-tauri\vendor\python\python.exe"
+$prevEapFf = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$ffExe = (& $ffPy -B -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())" 2>&1 | Out-String).Trim()
+$ffOk  = ($LASTEXITCODE -eq 0 -and $ffExe -and (Test-Path -LiteralPath $ffExe))
+$ErrorActionPreference = $prevEapFf
+if ($ffOk) {
+    Ok "imageio-ffmpeg present - stage-app.ps1 ships it as app\bin\ffmpeg.exe (ffprobe is not bundled)"
+} else {
+    Warn "imageio-ffmpeg not found in the runtime - video rendering will need ffmpeg on PATH"
+}
 
 Set-Content -LiteralPath $stampFile -Value $stamp -Encoding ASCII
 $size = [math]::Round(((Get-ChildItem -LiteralPath $vendorDir -Recurse -File |
