@@ -25,3 +25,9 @@ class TranscriptSegment(BaseModel):
 
 class TranscriptUpdate(BaseModel):
     transcript: list[TranscriptSegment]
+
+
+class GenerateRequest(BaseModel):
+    voice_id: str
+    speed: float = 1.0
+    preset: str = "youtube_1080p"

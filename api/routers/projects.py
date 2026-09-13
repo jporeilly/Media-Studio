@@ -3,10 +3,12 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from api.deps import current_user
-from api.schemas import TranscribeRequest, TranscriptUpdate
+from api.schemas import GenerateRequest, TranscribeRequest, TranscriptUpdate
 from services import jobs, projects as store, transcription
+from services.output_presets import get_preset
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -77,3 +79,72 @@ def update_transcript(pid: str, body: TranscriptUpdate, user: dict = Depends(cur
     if updated is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     return updated
+
+
+@router.post("/{pid}/generate")
+def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)):
+    """Render a deck (or PDF) project into a narrated MP4.
+
+    Returns a job id to poll at /api/jobs/{id}; when the job is done the video
+    is downloadable at /api/projects/{pid}/video.
+    """
+    record = store.get_project(pid)
+    if not record:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    if record.get("kind") not in ("deck", "pdf"):
+        raise HTTPException(status_code=400, detail="Only deck and PDF projects can generate a video.")
+
+    preset = get_preset(body.preset)
+
+    def work(progress):
+        # Imported lazily so the media engine and its heavy deps load only when a
+        # generation actually runs, keeping the web process light on startup.
+        from services import file_item as file_item_module
+        from services import processing
+        from utils.helpers import get_output_filename
+
+        output_dir = store.PROJECTS_DIR / pid
+        source_path = output_dir / record["source_filename"]
+
+        fi = file_item_module.FileItem(source_path, projects_base=output_dir)
+        if record.get("kind") == "pdf":
+            fi.load_pdf()
+        else:
+            fi.load()
+
+        processor = processing.VideoProcessor(
+            voice_id=body.voice_id,
+            resolution=tuple(preset["resolution"]),
+            speed=body.speed,
+            video_bitrate=preset["video_bitrate"],
+        )
+        processor.process_files([fi], output_dir=output_dir, progress=progress)
+
+        video_path = get_output_filename(source_path, output_dir)
+        record["output_video"] = video_path.name
+        store.save_project(record)
+        return {"video": video_path.name}
+
+    job_id = jobs.submit("generate", work)
+    return {"job_id": job_id}
+
+
+@router.get("/{pid}/video")
+def get_video(pid: str, user: dict = Depends(current_user)):
+    """Stream the generated MP4 for a project, or 404 if none has been made."""
+    record = store.get_project(pid)
+    if not record:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    filename = record.get("output_video")
+    if not filename:
+        raise HTTPException(status_code=404, detail="No generated video for this project.")
+
+    # Resolve the path and confirm it stays under the project directory, so a
+    # tampered ``output_video`` can never read a file outside the store.
+    base = (store.PROJECTS_DIR / pid).resolve()
+    video_path = (base / filename).resolve()
+    if base not in video_path.parents or not video_path.is_file():
+        raise HTTPException(status_code=404, detail="No generated video for this project.")
+
+    return FileResponse(str(video_path), media_type="video/mp4")

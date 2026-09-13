@@ -439,6 +439,7 @@ class VideoCreator:
     def __init__(
         self,
         resolution: Tuple[int, int] = (1920, 1080),
+        video_bitrate: str = "",
         fps: int = 2,
         transition_pause: float = 1.0,
         transition_sound_path: Optional[Path] = None,
@@ -459,6 +460,7 @@ class VideoCreator:
         voice_start_delay: float = 1.0,
     ):
         self.resolution = resolution
+        self.video_bitrate = video_bitrate
         self.fps = fps
         self.transition_pause = transition_pause
         self.voice_start_delay = voice_start_delay
@@ -1043,6 +1045,7 @@ class VideoCreator:
                 codec="libx264",
                 audio_codec="aac",
                 preset="ultrafast",
+                bitrate=self.video_bitrate or None,
                 threads=0,
                 logger=enc_logger,
                 temp_audiofile_path=str(temp_dir) + "/",

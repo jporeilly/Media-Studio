@@ -182,6 +182,7 @@ class VideoProcessor:
         stability: float = 0.5,
         similarity_boost: float = 0.75,
         style: float = 0.0,
+        video_bitrate: str = "",
     ):
         self.voice_id = voice_id
         self.resolution = resolution
@@ -191,6 +192,7 @@ class VideoProcessor:
         self.stability = stability
         self.similarity_boost = similarity_boost
         self.style = style
+        self.video_bitrate = video_bitrate
         self.cancel_requested = False
 
     def _create_tts_generator(self):
@@ -975,6 +977,7 @@ class VideoProcessor:
 
             creator = VideoCreator(
                 resolution=self.resolution,
+                video_bitrate=self.video_bitrate,
                 transition_pause=config.transition_pause,
                 transition_sound_path=self.transition_sound_path,
                 background_music_paths=self.background_music_paths,

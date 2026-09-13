@@ -55,7 +55,8 @@ def _slide_count(kind: str, path: Path) -> int | None:
         from core.pptx_reader import PPTXReader
 
         reader = PPTXReader(path)
-        return reader.slide_count() if reader.load() else None
+        # slide_count is a @property on PPTXReader — not a method.
+        return reader.slide_count if reader.load() else None
     except Exception:
         return None
 
