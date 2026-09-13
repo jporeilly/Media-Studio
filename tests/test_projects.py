@@ -74,3 +74,26 @@ def test_list_get_delete_cycle():
 
 def test_list_projects_empty_when_dir_absent():
     assert projects.list_projects() == []
+
+
+def test_invalid_pid_cannot_escape_the_store(tmp_projects_dir):
+    # A crafted id (".." / traversal) must be rejected before any path join,
+    # so get/delete can never read or rmtree outside PROJECTS_DIR.
+    assert projects._valid_pid("..") is False
+    assert projects._valid_pid("../../etc") is False
+    assert projects._valid_pid("deadbeef") is False  # not 12 hex chars
+    assert projects.get_project("..") is None
+    assert projects.get_project("../../secrets") is None
+    assert projects.delete_project("..") is False
+    assert projects.set_transcript("..", []) is None
+
+    real = projects.import_upload("a.pptx", b"x")
+    assert projects._valid_pid(real["id"]) is True
+
+
+def test_set_transcript_saves_and_missing_returns_none():
+    rec = projects.import_upload("clip.mp4", b"v")
+    updated = projects.set_transcript(rec["id"], [{"start": 0.0, "end": 1.0, "text": "hi"}])
+    assert updated["transcript"] == [{"start": 0.0, "end": 1.0, "text": "hi"}]
+    assert projects.get_project(rec["id"])["transcript"][0]["text"] == "hi"
+    assert projects.set_transcript("aabbccddeeff", []) is None  # valid shape, absent

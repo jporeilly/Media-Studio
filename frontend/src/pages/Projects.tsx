@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Film, FolderOpen, Presentation, Trash2, Upload } from "lucide-react";
 import { api, errorMessage } from "../api/client";
@@ -61,6 +62,7 @@ export default function ProjectsPage() {
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.delete(`/api/projects/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+    onError: (e) => setNotice(errorMessage(e)),
   });
 
   const pick = () => fileRef.current?.click();
@@ -93,6 +95,8 @@ export default function ProjectsPage() {
       {notice && (
         <div
           className="os-card"
+          role="status"
+          aria-live="polite"
           style={{ padding: "10px 14px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}
         >
           <span>{notice}</span>
@@ -124,7 +128,7 @@ export default function ProjectsPage() {
               return (
                 <tr key={p.id}>
                   <td style={{ fontWeight: 500 }}>
-                    {p.name}
+                    <Link to={`/projects/${p.id}`}>{p.name}</Link>
                     <div style={{ ...muted, fontSize: 12 }}>{p.source_filename}</div>
                   </td>
                   <td>

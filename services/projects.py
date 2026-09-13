@@ -7,6 +7,7 @@ to a project id.
 """
 
 import json
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +20,15 @@ DECK_SUFFIXES = {".pptx"}
 PDF_SUFFIXES = {".pdf"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 ALLOWED_SUFFIXES = DECK_SUFFIXES | PDF_SUFFIXES | VIDEO_SUFFIXES
+
+# Project ids are minted as uuid4().hex[:12]. Validate any caller-supplied id
+# against that shape BEFORE joining it to a path, so a crafted id (e.g. ".." or
+# "%2e%2e") can never escape PROJECTS_DIR (a delete would otherwise rmtree data/).
+_PID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _valid_pid(pid: str) -> bool:
+    return bool(_PID_RE.fullmatch(pid or ""))
 
 
 def kind_for_suffix(suffix: str) -> str | None:
@@ -67,6 +77,8 @@ def list_projects() -> list[dict]:
 
 
 def get_project(pid: str) -> dict | None:
+    if not _valid_pid(pid):
+        return None
     meta = _meta_path(pid)
     if not meta.is_file():
         return None
@@ -105,8 +117,25 @@ def import_upload(filename: str, data: bytes) -> dict:
 
 def delete_project(pid: str) -> bool:
     """Delete a project and its files. Returns False if it did not exist."""
+    if not _valid_pid(pid):
+        return False
     pdir = PROJECTS_DIR / pid
     if not pdir.exists():
         return False
     shutil.rmtree(pdir, ignore_errors=True)
     return True
+
+
+def save_project(record: dict) -> None:
+    """Persist a full project record back to its project.json."""
+    _meta_path(record["id"]).write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+
+def set_transcript(pid: str, transcript: list[dict]) -> dict | None:
+    """Replace a project's transcript segments. Returns the updated record, or None."""
+    record = get_project(pid)
+    if record is None:
+        return None
+    record["transcript"] = transcript
+    save_project(record)
+    return record
