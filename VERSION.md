@@ -1,6 +1,6 @@
 # Version
 
-**Current version:** 0.1.0
+**Current version:** 0.2.0
 **Status:** 0.x, in progress — the first slices are shipped (Projects, transcription,
 generate, re-voice, self-update, the Windows desktop installer; see CHANGELOG.md).
 The NiceGUI Slide Studio Enterprise remains the shipping product until parity.
@@ -13,15 +13,15 @@ Cargo.toml still carries an older number alongside the current one.
 
 | File | Form |
 |------|------|
-| `__init__.py` | `__version__ = "0.1.0"` — **source of truth** (`api.__version__`; reported by `/api/system/health` and the Settings chip) |
-| `frontend/package.json` | `"version": "0.1.0"` |
-| `desktop/package.json` | `"version": "0.1.0"` |
-| `desktop/src-tauri/tauri.conf.json` | `"version": "0.1.0"` — the installer's file name and the Add/Remove Programs entry |
-| `desktop/src-tauri/Cargo.toml` | `version = "0.1.0"` — the shell exe's file version |
+| `__init__.py` | `__version__ = "x.y.z"` — **source of truth** (`api.__version__`; reported by `/api/system/health` and the Settings chip) |
+| `frontend/package.json` | `"version": "x.y.z"` |
+| `desktop/package.json` | `"version": "x.y.z"` |
+| `desktop/src-tauri/tauri.conf.json` | `"version": "x.y.z"` — the installer's file name and the Add/Remove Programs entry |
+| `desktop/src-tauri/Cargo.toml` | `version = "x.y.z"` — the shell exe's file version |
 | `desktop/src-tauri/Cargo.lock` | the `media-studio-desktop` entry (cargo rewrites it on the next build, so bump it with the others or the tree is dirty after a build) |
-| `README.md` | the `<b>Version 0.1.0</b>` line |
+| `README.md` | the `<b>Version x.y.z</b>` line |
 | `VERSION.md` | `**Current version:**` — this file |
-| `CHANGELOG.md` | release header `## [0.1.0] - YYYY-MM-DD` |
+| `CHANGELOG.md` | release header `## [x.y.z] - YYYY-MM-DD` |
 
 ### The desktop exe's version is compile-time
 

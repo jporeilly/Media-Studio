@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] - 2026-09-14
+
+The first release with the whole studio in place: projects, transcription, generate with
+Vimeo presets, re-voice with translation, accounts with a configurable password policy,
+self-update from Git, and the Windows desktop installer.
+
 ### Added
 
 - [scaffold] Initial React + FastAPI skeleton for **Media Studio Enterprise**, the successor to Slide Studio Enterprise (NiceGUI). FastAPI backend (app factory, `/api/system/health`, session-cookie auth skeleton) reusing the carried-over Python media engine (`core/`, `utils/`, `services/processing.py`); React + Vite + TypeScript frontend on the OpenSight design system (theme tokens, shell, primitives, fetch client) with a login page and a dashboard landing state. Torch/Argos-free — translation runs on Ollama, transcription on faster-whisper/CTranslate2 — #rebuild
