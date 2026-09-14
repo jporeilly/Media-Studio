@@ -526,10 +526,14 @@
 
   document.getElementById('folderBtn').onclick = function () {
     invoke('open_state_dir').then(function (dir) {
-      if (window.__TAURI__.opener) {
-        window.__TAURI__.opener.openPath(dir).catch(function () {});
-      }
-      hint('Your data lives in ' + dir);
+      if (!window.__TAURI__.opener) { hint('Your data lives in ' + dir); return; }
+      // A rejection here is almost always the opener scope (capabilities/default.json)
+      // not covering the data directory; say so instead of pretending it opened.
+      window.__TAURI__.opener.openPath(dir).then(function () {
+        hint('Opened ' + dir);
+      }).catch(function (e) {
+        hint('Your data lives in ' + dir + ' - could not open it from here: ' + e, false);
+      });
     }).catch(function (e) { hint('Could not open the folder: ' + e, false); });
   };
 

@@ -13,7 +13,9 @@ build/
 
 # ---- Node (frontend) ----
 frontend/node_modules/
-frontend/dist/
+# frontend/dist/ is COMMITTED on purpose: the installed app is a git checkout that
+# updates itself with `git pull`, so the built UI must travel with the source
+# (tests/test_frontend_dist.py keeps it in step with frontend/src).
 frontend/.vite/
 npm-debug.log*
 yarn-error.log*
@@ -25,6 +27,12 @@ data/*
 *.db-wal
 *.db-shm
 .storage_secret
+# utils/config.py reads APP_DIR/.env for provider keys; a committed one would ship
+# in the installer's git history forever.
+.env
+# The engine's default output folder (utils/config.py: assets/finished, assets/temp);
+# every render would otherwise dirty the installed checkout.
+/assets/
 
 # ---- Editor / OS ----
 .vscode/

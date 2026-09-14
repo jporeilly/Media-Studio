@@ -6,7 +6,8 @@
     Stages the app into src-tauri\vendor\app (which tauri.conf.json's
     bundle.resources maps to "app" inside the install) as a GIT CHECKOUT of the
     committed tree - so the installed app can self-update with `git pull` - then
-    overlays the built frontend\dist\, boot.py and a vendored ffmpeg.exe.
+    overlays boot.py and a vendored ffmpeg.exe. The built UI (frontend\dist) is
+    COMMITTED and arrives with the clone, so a pull updates the UI too.
 
     The staged tree MIRRORS the repo's FLAT layout:
 
@@ -28,7 +29,11 @@
     Windows PowerShell 5.1+. ASCII-only on purpose.
 #>
 [CmdletBinding()]
-param()
+param(
+    # Build even when the tree is dirty or HEAD is not on a pushed branch. The
+    # installer then ships something self-update cannot fast-forward from.
+    [switch]$Force
+)
 
 $ErrorActionPreference = "Stop"
 # Without this an undefined variable expands to empty and robocopy just returns
@@ -37,7 +42,6 @@ Set-StrictMode -Version Latest
 
 $desktopDir = Split-Path -Parent $PSScriptRoot
 $repoRoot   = Split-Path -Parent $desktopDir
-$srcUi      = Join-Path $repoRoot "frontend\dist"
 $stageDir   = Join-Path $desktopDir "src-tauri\vendor\app"
 $stageUi    = Join-Path $stageDir "frontend\dist"
 
@@ -50,8 +54,32 @@ Write-Host "  Staging the app" -ForegroundColor Cyan
 if (-not (Test-Path -LiteralPath (Join-Path $repoRoot "main.py"))) {
     throw "main.py not found - is $repoRoot the repo root?"
 }
-if (-not (Test-Path -LiteralPath (Join-Path $srcUi "index.html"))) {
-    throw "frontend\dist\index.html not found - run 'npm run build' in frontend\ first"
+
+# The install can only fast-forward from what it ships when the staged commit is
+# already on its pushed upstream branch. A build from an unpushed commit or a
+# side branch ships something the remote does not have; a dirty tree ships HEAD
+# while the developer believes the working copy went out. Checked BEFORE the
+# previous stage is removed, so a refused build has no side effects.
+$prevEapGate = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$branch  = (& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>&1 | Out-String).Trim()
+$dirty   = (& git -C $repoRoot status --porcelain 2>&1 | Out-String).Trim()
+$ahead   = (& git -C $repoRoot rev-list --count "@{u}..HEAD" 2>&1 | Out-String).Trim()
+$aheadOk = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEapGate
+if ($dirty) {
+    $dirty -split "`n" | ForEach-Object { Warn ("uncommitted: " + $_.Trim()) }
+    if (-not $Force) { throw "the working tree is dirty - the clone ships HEAD, not these changes; commit or stash them (or -Force to build anyway)" }
+    Warn "-Force: building from a dirty tree (the installer ships HEAD only)"
+}
+if (-not $aheadOk) {
+    if (-not $Force) { throw "branch '$branch' has no upstream - push it first (self-update pulls from origin/$branch)" }
+    Warn "-Force: branch '$branch' has no upstream - the install will not be able to self-update"
+} elseif ([int]$ahead -gt 0) {
+    if (-not $Force) { throw "HEAD is $ahead commit(s) ahead of its upstream - push first, or the install can never fast-forward" }
+    Warn "-Force: HEAD is $ahead commit(s) ahead of its upstream"
+} else {
+    Ok "HEAD is on '$branch', pushed, tree clean"
 }
 
 if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
@@ -85,11 +113,12 @@ $ErrorActionPreference = $prevEap
 if (-not $cloneOk) { throw "git clone of the repo into the staging tree failed" }
 Ok "staged a git checkout of $stagedRev tracking $originUrl"
 
-# The built SPA is gitignored (absent from the clone); place it at
-# app\frontend\dist - the shape api\app.py expects (see the .DESCRIPTION note).
-New-Item -ItemType Directory -Path $stageUi -Force | Out-Null
-& robocopy $srcUi $stageUi "/E" "/NFL" "/NDL" "/NJH" "/NJS" "/NP" | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "robocopy failed staging the UI (exit $LASTEXITCODE)" }
+# The built SPA is committed, so the clone already has it at app\frontend\dist -
+# the shape api\app.py expects (see the .DESCRIPTION note). Its absence means a
+# source-only commit: tests/test_frontend_dist.py would have failed too.
+if (-not (Test-Path -LiteralPath (Join-Path $stageUi "index.html"))) {
+    throw "the committed tree has no frontend\dist\index.html - run 'npm run build' in frontend\ and COMMIT frontend\dist (it ships with the checkout so git pull updates the UI)"
+}
 
 # boot.py puts the app root on sys.path before importing it. The embeddable
 # runtime's ._pth replaces sys.path outright, so without this the server cannot
@@ -190,7 +219,7 @@ $count = (Get-ChildItem -LiteralPath $stageDir -Recurse -File).Count
 Ok "staged $count file(s) to src-tauri\vendor\app"
 Write-Host ""
 
-# robocopy returns 1 for "files were copied"; PowerShell surfaces the LAST
-# native exit code as the script's, so a successful run would look like a failure
+# git and python leave their own exit codes behind; PowerShell surfaces the LAST
+# native exit code as the script's, so a successful run could look like a failure
 # to npm and abort the tauri build.
 exit 0

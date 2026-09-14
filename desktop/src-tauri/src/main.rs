@@ -64,32 +64,47 @@ fn strip_verbatim(p: &Path) -> PathBuf {
 /// Dev (`npm run tauri:dev`): walk up to the checkout root and use it in place,
 /// so there is no build step between editing Python and seeing the change.
 fn app_dir(handle: &tauri::AppHandle) -> PathBuf {
-    if let Ok(res) = handle.path().resource_dir() {
-        let packaged = strip_verbatim(&res.join("app"));
-        if packaged.join("main.py").is_file() {
-            return packaged;
+    let packaged = handle
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|res| strip_verbatim(&res.join("app")));
+    if let Some(p) = &packaged {
+        if p.join("main.py").is_file() {
+            return p.clone();
         }
     }
-    // src-tauri -> desktop -> repo root
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    // Dev build only: src-tauri -> desktop -> repo root. A release binary must
+    // never fall back to the developer's checkout path baked in at compile time:
+    // an incomplete install should report the packaged location it looked in.
+    #[cfg(debug_assertions)]
+    let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    #[cfg(not(debug_assertions))]
+    let fallback = packaged.unwrap_or_else(|| PathBuf::from("app"));
+    fallback
 }
 
 /// boot.py - staged beside the app tree, or taken from the checkout in dev.
 /// Mirrors app_dir()'s packaged-then-checkout resolution deliberately: one rule,
 /// applied twice, beats two rules that can disagree about which tree is live.
 fn boot_py(handle: &tauri::AppHandle) -> PathBuf {
-    if let Ok(res) = handle.path().resource_dir() {
-        let packaged = strip_verbatim(&res.join("app").join("boot.py"));
-        if packaged.is_file() {
-            return packaged;
+    let packaged = handle
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|res| strip_verbatim(&res.join("app").join("boot.py")));
+    if let Some(p) = &packaged {
+        if p.is_file() {
+            return p.clone();
         }
     }
-    // src-tauri -> desktop/boot.py
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("boot.py")
+    // Dev build only: src-tauri -> desktop/boot.py (see app_dir for why release
+    // builds report the packaged path instead).
+    #[cfg(debug_assertions)]
+    let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("boot.py");
+    #[cfg(not(debug_assertions))]
+    let fallback = packaged.unwrap_or_else(|| PathBuf::from("app").join("boot.py"));
+    fallback
 }
 
 /// Where the app writes its data. Media Studio's config/store resolve this as
@@ -133,7 +148,11 @@ fn server_alive(state: State<'_, AppState>) -> bool {
 
 /// True once the backend answers /api/system/health. See server::http_ok for
 /// why this cannot be a fetch() from the splash.
-#[tauri::command]
+///
+/// `async`: the probe can block for seconds (connect + read timeout), and a
+/// plain sync command runs on the main thread - the splash would freeze for
+/// exactly as long as the check it is animating.
+#[tauri::command(async)]
 fn server_ready(state: State<'_, AppState>) -> bool {
     let Ok(guard) = state.server.lock() else { return false };
     match guard.as_ref() {
@@ -163,7 +182,10 @@ fn env_report(handle: tauri::AppHandle) -> serde_json::Value {
 /// well do it. A port already in use, an antivirus holding a file for a moment,
 /// a service starting slowly: all clear on a second attempt, and none of them
 /// deserve a reinstall.
-#[tauri::command]
+///
+/// `async` for the same reason as server_ready: kill + wait + spawn takes long
+/// enough to freeze the splash if it ran on the main thread.
+#[tauri::command(async)]
 fn restart_server(handle: tauri::AppHandle, state: State<'_, AppState>) -> bool {
     let resource_dir = strip_verbatim(&handle.path().resource_dir().unwrap_or_default());
     let app_dir = app_dir(&handle);

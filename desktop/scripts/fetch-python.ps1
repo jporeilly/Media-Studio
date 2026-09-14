@@ -128,9 +128,16 @@ if ($LASTEXITCODE -ne 0) { throw "the vendored runtime cannot import uvicorn/fas
 if ($LASTEXITCODE -ne 0) { Warn "the media stack did not fully import - video/transcription features may be degraded" }
 
 # pywin32 (PowerPoint COM export) often needs its DLLs discoverable. Report, do
-# not fail: COM export is one feature, not the whole app.
-& $py -c "import win32com.client; print('pywin32 ok')" 2>$null
-if ($LASTEXITCODE -ne 0) { Warn "pywin32/win32com did not import cleanly - PowerPoint COM export may need pywin32_postinstall" }
+# not fail: COM export is one feature, not the whole app. The stderr redirect
+# must run with ErrorActionPreference "Continue": under "Stop", PS 5.1 turns the
+# first stderr line of a native command into a terminating error, which would
+# abort this >1 GB step just before its stamp is written.
+$prevEapWin = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $py -c "import win32com.client; print('pywin32 ok')" 2>&1 | Out-Null
+$winOk = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEapWin
+if (-not $winOk) { Warn "pywin32/win32com did not import cleanly - PowerPoint COM export may need pywin32_postinstall" }
 
 # ffmpeg is a RUNTIME dependency of moviepy/pydub. requirements.txt ships no
 # standalone ffmpeg wheel, but moviepy depends on imageio-ffmpeg, which vendors

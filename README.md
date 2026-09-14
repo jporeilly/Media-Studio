@@ -8,10 +8,12 @@ Kokoro narration, faster-whisper transcription, moviepy/ffmpeg assembly, Ollama-
 notes/QA/translation — behind a modern SPA that shares the **OpenSight** design system so
 the whole app suite looks and feels the same.
 
-> **Status: scaffold / in progress.** The backend skeleton, the design-system frontend
-> shell, auth, and a dashboard landing state are in place. Screens (sidebar, preview/editor,
-> generation, settings, admin) are being ported from the NiceGUI app. Until parity, the
-> NiceGUI app at `C:\Projects\slidestudio_enterprise` remains the shipping product.
+> **Status: in progress — the first slices are shipped.** Projects (import decks, PDFs and
+> videos), video transcription with an editable transcript, narrated-video generation with
+> Vimeo output presets, re-voicing in a new voice or a translated language, self-update from
+> Git, and a Windows desktop installer are in (see [CHANGELOG.md](CHANGELOG.md)). The
+> remaining NiceGUI screens are still being ported; until parity, the NiceGUI app at
+> `C:\Projects\slidestudio_enterprise` remains the shipping product.
 
 ## Stack
 
@@ -26,23 +28,45 @@ python -m venv venv
 venv\Scripts\python -m pip install -r requirements.txt
 venv\Scripts\python main.py --no-browser
 
-# Frontend (port 5273, proxies /api -> 5680)
+# Frontend (port 5681, proxies /api -> 5680)
 cd frontend
 npm install
 npm run dev
 ```
 
-Open http://localhost:5273. Default login is `admin` / `admin` (change it).
+Open http://localhost:5681. Default login is `admin` / `admin`; a fresh database asks you to set a
+new password at first login before anything else works. Admins create further accounts under
+Settings › Accounts and set the password rules under Settings › Password policy.
 
 ## Build (production)
 
 ```bash
-cd frontend && npm run build      # emits frontend/dist
+cd frontend && npm run build      # emits frontend/dist (+ build-info.json) — committed, see below
 cd .. && venv\Scripts\python main.py   # FastAPI serves the SPA on port 5680
 ```
 
+The built UI is **tracked in git**: the installed desktop app is a git checkout that updates
+itself with `git pull`, so the build has to travel with the source. After changing anything
+under `frontend/`, run `npm run build` there and commit `frontend/dist` with the change.
+`npm run build` records a fingerprint of the source in `frontend/dist/build-info.json`, and
+`tests/test_frontend_dist.py` fails when the committed build does not match the committed
+source.
+
+## Desktop edition
+
+`desktop/` builds a Windows installer — `dist\Media Studio Enterprise_<version>_x64-setup.exe`:
+a small Tauri/WebView2 shell with a vendored Python runtime and ffmpeg, so a machine needs
+nothing pre-installed. It installs per-user into `%LOCALAPPDATA%\Media Studio Enterprise\`
+(no admin rights), and the app inside is a git checkout, so **Settings › Updates** can pull
+new commits — backend and UI — and restart in place on a machine that has `git` and access
+to the repo. Data and rendered videos live inside that folder (`app\data\`,
+`app\assets\finished\`) and survive an uninstall. [INSTALL.md](INSTALL.md) covers install,
+first launch, updating and uninstall; [desktop/README.md](desktop/README.md) covers the build.
+
 ## Documentation
 
+- [INSTALL.md](INSTALL.md) — install, update and uninstall the Windows desktop edition
 - [VERSION.md](VERSION.md) — version carriers and bump policy
 - [CHANGELOG.md](CHANGELOG.md) — changes
 - [CLAUDE.md](CLAUDE.md) — the development workflow and architecture
+- [desktop/README.md](desktop/README.md) — building the desktop installer, and how the shell works

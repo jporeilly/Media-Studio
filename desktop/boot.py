@@ -53,6 +53,21 @@ def _plain(path):
     return p
 
 
+def _put_first_on_path(directory, environ=None):
+    """Prepend ``directory`` to PATH unless it already leads it.
+
+    The environment is inherited across in-app restarts (the backend relaunches
+    itself after an update), so an unconditional prepend would add one more
+    copy per restart.
+    """
+    env = os.environ if environ is None else environ
+    current = env.get("PATH", "")
+    if current.split(os.pathsep)[0].lower() == directory.lower():
+        return current
+    env["PATH"] = directory + os.pathsep + current if current else directory
+    return env["PATH"]
+
+
 def main():
     ap = argparse.ArgumentParser(description="Start the Media Studio Enterprise backend.")
     ap.add_argument("--port", type=int, default=5680)
@@ -82,7 +97,7 @@ def main():
     # with, whatever else the machine has installed.
     bin_dir = os.path.join(app_dir, "bin")
     if os.path.isdir(bin_dir):
-        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+        _put_first_on_path(bin_dir)
         ffmpeg_exe = os.path.join(bin_dir, "ffmpeg.exe")
         if os.path.isfile(ffmpeg_exe):
             os.environ.setdefault("IMAGEIO_FFMPEG_EXE", ffmpeg_exe)

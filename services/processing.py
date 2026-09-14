@@ -946,8 +946,6 @@ class VideoProcessor:
             logger.info("Est. video duration: %.1fs  (%d frames at 2fps)", video_duration, total_frames)
 
             # Assembly progress — show which slide moviepy is processing
-            total_slides = len(clip_infos)
-
             def _on_assembly_progress(slide_num: int, total: int, msg: str):
                 if progress:
                     frac = 0.80 + 0.05 * slide_num / max(total, 1)

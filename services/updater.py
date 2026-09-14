@@ -26,10 +26,17 @@ REQUIREMENTS = ROOT / "requirements.txt"
 
 
 def _git(*args: str, timeout: int = 120) -> tuple[int, str, str]:
-    """Run a git command in the repo root; never raises on a non-zero exit."""
+    """Run a git command in the repo root; never raises on a non-zero exit.
+
+    Git — and Git Credential Manager — must never open a prompt: this process
+    has no console and, in the desktop app, no visible window to answer it in,
+    so a fetch against a private remote with no stored credential would hang
+    until the timeout. With prompts off it fails fast with a clear message.
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
     try:
         r = subprocess.run(
-            ["git", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=timeout,
+            ["git", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=timeout, env=env,
         )
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -68,7 +75,9 @@ def check_for_update() -> dict:
     if state["error"]:
         return {**state, "update_available": False, "behind": 0, "latest": None}
 
-    rc, _, err = _git("fetch", "--quiet")
+    # Runs on every visit to Settings, so an unreachable remote must not hold
+    # the page for two minutes.
+    rc, _, err = _git("fetch", "--quiet", timeout=45)
     if rc != 0:
         return {**state, "update_available": False, "behind": 0, "latest": None,
                 "error": f"Could not reach the Git remote: {err or 'fetch failed'}"}

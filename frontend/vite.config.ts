@@ -42,10 +42,12 @@ function vendorChunk(id: string, getModuleInfo: GetModuleInfo): string | undefin
 
 // Dev server proxies API and uploads to the FastAPI backend (python main.py, port 5680).
 // changeOrigin stays false so the session cookie ("ms_session") is preserved across the proxy.
+// 5681 pairs with the 5680 backend; 5273 (the previous choice) collided with the Pentaho
+// Content Editor's Vite on the same machine.
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5273,
+    port: 5681,
     proxy: {
       "/api": { target: "http://127.0.0.1:5680", changeOrigin: false },
       "/uploads": { target: "http://127.0.0.1:5680", changeOrigin: false },

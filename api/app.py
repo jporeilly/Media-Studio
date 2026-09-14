@@ -23,10 +23,10 @@ FRONTEND_DIST = APP_DIR / "frontend" / "dist"
 # The engine Config has no public getter, so read optional web keys from its
 # backing dict (an admin can add "brand_name"/"cors_origins" to data/config.json).
 BRAND_NAME = config._config.get("brand_name") or "Media Studio Enterprise"
-# Default to the frontend dev server (port 5273 per CLAUDE.md; 5173 is Vite's own
+# Default to the frontend dev server (port 5681 per CLAUDE.md; 5173 is Vite's own
 # default) so cross-origin dev requests are allowed; override via config.json.
 CORS_ORIGINS = config._config.get("cors_origins") or [
-    "http://localhost:5273", "http://127.0.0.1:5273",
+    "http://localhost:5681", "http://127.0.0.1:5681",
     "http://localhost:5173", "http://127.0.0.1:5173",
 ]
 

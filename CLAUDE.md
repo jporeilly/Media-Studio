@@ -62,7 +62,7 @@ Frontend lint:   eslint — from frontend/: npm run lint  (build is typecheck-ga
 Version:         hand-kept; see VERSION.md. Keep __init__.py, frontend/package.json,
                  CHANGELOG.md and VERSION.md in agreement.
 Dev run:         backend  python main.py --no-browser   (port 5680)
-                 frontend cd frontend && npm run dev     (port 5273, proxies /api -> 5680)
+                 frontend cd frontend && npm run dev     (port 5681, proxies /api -> 5680)
 Prod:            npm --prefix frontend run build  then  python main.py  (FastAPI serves frontend/dist)
 Live check:      UI behaviour is verified in the browser by the owner, not the agents — say so in reports.
 ```

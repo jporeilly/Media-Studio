@@ -33,8 +33,9 @@ if (Test-Path -LiteralPath $initFile) {
 if (-not $want) { Write-Error "could not read __version__ from $initFile"; exit 1 }
 
 if ($exe.Name -notmatch [regex]::Escape($want)) {
-    Write-Error ("installer '{0}' is not version {1} - the build FAILED and left an " +
-                 "older artifact behind; fix the build rather than shipping this" -f $exe.Name, $want)
+    # -f binds tighter than +, so the format must wrap the whole concatenation.
+    Write-Error (("installer '{0}' is not version {1} - the build FAILED and left an " +
+                  "older artifact behind; fix the build rather than shipping this") -f $exe.Name, $want)
     exit 1
 }
 $age = (Get-Date) - $exe.LastWriteTime

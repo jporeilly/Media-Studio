@@ -35,10 +35,32 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$script:Checks   = @()
-$script:Failures = 0
-$script:Warnings = 0
-$script:Fixes    = @()
+$script:Checks    = @()
+$script:Failures  = 0
+$script:Warnings  = 0
+$script:Fixes     = @()
+$script:ProbeExit = 0
+
+function Invoke-Probe {
+    # Run a native command with its stderr captured WITHOUT this script's
+    # ErrorActionPreference "Stop" turning the first stderr line into a
+    # terminating NativeCommandError (PS 5.1) - which would abort the check on
+    # exactly the failures it exists to report (a missing import prints a
+    # traceback to stderr). Sets $script:ProbeExit to the command's exit code.
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [string[]]$Arguments = @()
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $out = (& $Exe @Arguments 2>&1 | Out-String)
+        $script:ProbeExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return $out.Trim()
+}
 
 function Say {
     param([string]$Text = "", [string]$Colour = "Gray")
@@ -126,7 +148,7 @@ if (-not $script:PyExe) {
     Report "Python 3.11+" "FAIL" "no interpreter found, bundled or on PATH" `
         "reinstall the app, or install Python: winget install -e --id Python.Python.3.12"
 } else {
-    $ver = & $script:PyExe -c "import sys;print('.'.join(map(str,sys.version_info[:3])))" 2>$null
+    $ver = Invoke-Probe $script:PyExe @("-c", "import sys;print('.'.join(map(str,sys.version_info[:3])))")
     if ($bundled) {
         Report "Python (bundled)" "OK" ("" + $ver + " - shipped with the app, nothing to install")
     } else {
@@ -135,8 +157,8 @@ if (-not $script:PyExe) {
 
     # The imports the shell actually needs to serve the UI. This is the failure
     # this whole check exists for; confirming python.exe merely EXISTS misses it.
-    $probe = & $script:PyExe -c "import uvicorn,fastapi;print('ok')" 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    $null = Invoke-Probe $script:PyExe @("-c", "import uvicorn,fastapi;print('ok')")
+    if ($script:ProbeExit -eq 0) {
         Report "Python core deps" "OK" "uvicorn, fastapi"
     } elseif ($bundled) {
         Report "Python core deps" "FAIL" "the bundled runtime cannot import uvicorn/fastapi" `
@@ -147,8 +169,8 @@ if (-not $script:PyExe) {
     }
 
     # The media stack: heavier, optional at the "does the app open" level.
-    $media = & $script:PyExe -c "import numpy,PIL,moviepy,pydub,faster_whisper,onnxruntime;print('ok')" 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    $null = Invoke-Probe $script:PyExe @("-c", "import numpy,PIL,moviepy,pydub,faster_whisper,onnxruntime;print('ok')")
+    if ($script:ProbeExit -eq 0) {
         Report "Media stack" "OK" "numpy, moviepy, pydub, faster-whisper, onnxruntime"
     } else {
         Report "Media stack" "WARN" "not fully importable - transcription/rendering may be degraded" `
@@ -156,13 +178,34 @@ if (-not $script:PyExe) {
     }
 }
 
-# ffmpeg: a RUNTIME dependency of moviepy/pydub, not a pip wheel here.
-$ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-if ($ffmpeg) {
-    Report "ffmpeg" "OK" ("on PATH: " + $ffmpeg.Source)
+# ffmpeg: a RUNTIME dependency of moviepy/pydub. The installer vendors it as
+# <app root>\bin\ffmpeg.exe (stage-app.ps1) and boot.py puts that directory on
+# PATH at launch - so the vendored copy is the FIRST place to look; checking
+# PATH alone reports a failure on every correct install, and a check that
+# cries wolf gets ignored.
+$appRoot  = Resolve-AppRoot $PSScriptRoot
+$vendored = $null
+if ($appRoot) { $vendored = Join-Path $appRoot "bin\ffmpeg.exe" }
+if ($vendored -and (Test-Path -LiteralPath $vendored)) {
+    Report "ffmpeg" "OK" ("vendored: " + $vendored)
 } else {
-    Report "ffmpeg" "WARN" "not on PATH - video rendering will fail" `
-        "winget install -e --id Gyan.FFmpeg   (or add imageio-ffmpeg to requirements)"
+    $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+    if ($ffmpeg) {
+        Report "ffmpeg" "OK" ("on PATH: " + $ffmpeg.Source)
+    } else {
+        Report "ffmpeg" "WARN" "neither vendored (app\bin\ffmpeg.exe) nor on PATH - video rendering will fail" `
+            "reinstall the app (the installer vendors ffmpeg), or: winget install -e --id Gyan.FFmpeg"
+    }
+}
+
+# git: Settings > Updates pulls new commits from the app's Git remote. Without
+# git the app still runs; it just cannot update itself in place.
+$gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($gitCmd) {
+    Report "git (self-update)" "OK" ("on PATH: " + $gitCmd.Source)
+} else {
+    Report "git (self-update)" "WARN" "not on PATH - Settings > Updates cannot pull updates" `
+        "winget install -e --id Git.Git"
 }
 
 # -- data directory ----------------------------------------------------------
