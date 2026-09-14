@@ -140,6 +140,7 @@ def test_generate_on_deck_renders_and_saves_output_video(client, monkeypatch):
     assert r.status_code == 200
     job = _wait_job(client, r.json()["job_id"])
     assert job["status"] == "done", job
+    assert job["project_id"] == pid, "the job is attached to its project (the slide editor refuses writes meanwhile)"
 
     # The preset's resolution and bitrate reached the processor, and with no
     # provider named the job runs on the configured one (Edge by default).

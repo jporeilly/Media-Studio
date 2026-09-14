@@ -1,11 +1,25 @@
 """Project manager for saving and loading render state."""
 
 import json
+import os
 import shutil
-from dataclasses import dataclass, asdict
+import time
+import uuid
+from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
+
+
+class ProjectStateError(RuntimeError):
+    """A project.json exists but cannot be read (bad JSON, the wrong shape, a
+    field of the wrong type).
+
+    Raised instead of returning None so that no caller mistakes an unreadable
+    project for a missing one and recreates it from the deck - which would
+    silently erase every edit (notes, overrides, undo history). The message
+    names the folder, never an absolute path: it is shown to the user.
+    """
 
 
 @dataclass
@@ -54,6 +68,33 @@ class ProjectState:
     def __post_init__(self):
         if self.slides is None:
             self.slides = []
+
+
+def _replace_file(src: Path, dst: Path, attempts: int = 10, delay: float = 0.05) -> None:
+    """``os.replace`` with a short retry: on Windows the move is refused while
+    another thread still has the target open for reading (a few milliseconds
+    for a project.json), and a save must not fail for that."""
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
+def _known_fields(cls, data: dict) -> dict:
+    """``data`` restricted to the fields ``cls`` declares.
+
+    ``save()`` writes every field, so a project.json written by a newer edition
+    may carry a key this one does not know; ignoring it keeps the project
+    readable instead of turning the whole file into a load error (which the
+    generate path would answer by recreating the project from the deck and
+    losing every edit).
+    """
+    names = {f.name for f in fields(cls)}
+    return {key: value for key, value in data.items() if key in names}
 
 
 class ProjectManager:
@@ -118,71 +159,73 @@ class ProjectManager:
         return self.state
 
     def load(self) -> Optional[ProjectState]:
-        """Load project state from file."""
+        """Load project state from file.
+
+        Returns None when there is no project.json. A file that exists but
+        cannot be read raises :class:`ProjectStateError` - never None, so no
+        caller recreates the project over the user's edits. Read-only: the
+        predecessor's "one-time cleanup" that cleared ``needs_regeneration`` on
+        slides with cached audio is gone; here ``load()`` runs on every request
+        and it un-flagged every edit before the next generate could see it.
+        """
         if not self.project_file.exists():
             return None
 
         try:
             with open(self.project_file, "r") as f:
                 data = json.load(f)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ProjectStateError(self._unreadable(str(e))) from e
 
-            # Convert slides to SlideRenderState objects
-            slides_data = data.pop("slides", [])
-            slides = [SlideRenderState(**s) for s in slides_data]
+        slides_data = data.get("slides", []) if isinstance(data, dict) else None
+        if (not isinstance(data, dict) or not isinstance(slides_data, list)
+                or any(not isinstance(s, dict) for s in slides_data)):
+            raise ProjectStateError(self._unreadable("it does not have the shape of a saved project"))
 
-            self.state = ProjectState(**data, slides=slides)
+        try:
+            data = dict(data)
+            data.pop("slides", None)
+            slides = [SlideRenderState(**_known_fields(SlideRenderState, s)) for s in slides_data]
+            self.state = ProjectState(**_known_fields(ProjectState, data), slides=slides)
+        except TypeError as e:  # a required field missing
+            raise ProjectStateError(self._unreadable(str(e))) from e
 
-            # One-time cleanup: the old _restore_original_notes() bug (now removed)
-            # set needs_regeneration=True and ai_enhanced=False on every restart.
-            # Clear those stale flags for slides that have valid cached audio and
-            # were NOT genuinely edited (ai_enhanced=False means notes are original).
-            cleaned = False
-            for s in self.state.slides:
-                if (s.needs_regeneration
-                        and not s.ai_enhanced
-                        and s.audio_path
-                        and Path(s.audio_path).exists()):
-                    s.needs_regeneration = False
-                    cleaned = True
-            if cleaned:
-                self.save()
+        return self.state
 
-            return self.state
-
-        except (json.JSONDecodeError, TypeError, KeyError) as e:
-            print(f"Error loading project: {e}")
-            return None
+    def _unreadable(self, reason: str) -> str:
+        return (
+            f"The saved state of this project ({self.PROJECT_FILE} in {self.project_dir.name}) "
+            f"could not be read: {reason}. Nothing was changed - restore the file from a backup, "
+            "or delete that folder to start the project over from the deck."
+        )
 
     def save(self):
-        """Save project state to file."""
+        """Save project state to file.
+
+        Every dataclass field is written (``asdict`` recurses into the slides),
+        so a field added to ``ProjectState`` or ``SlideRenderState`` is
+        persisted without touching this method - the hand-kept key list this
+        replaced silently dropped anything it did not name. Today's fields
+        come out under the same keys as before, so ``load()`` reads old and
+        new files alike.
+
+        The JSON is written to a temporary file beside project.json and moved
+        over it in one step (``os.replace``), so a reader never sees a
+        truncated or half-written file and a failed write leaves the previous
+        state intact.
+        """
         if self.state is None:
             return
 
         self.state.last_modified = datetime.now().isoformat()
 
-        # Convert to dict for JSON serialization
-        data = {
-            "pptx_path": self.state.pptx_path,
-            "project_dir": self.state.project_dir,
-            "created_at": self.state.created_at,
-            "last_modified": self.state.last_modified,
-            "voice_id": self.state.voice_id,
-            "output_video_path": self.state.output_video_path,
-            "transition_pause": self.state.transition_pause,
-            "background_music_path": self.state.background_music_path,
-            "music_volume": self.state.music_volume,
-            "generation_speed": self.state.generation_speed,
-            "generation_stability": self.state.generation_stability,
-            "generation_similarity_boost": self.state.generation_similarity_boost,
-            "generation_style": self.state.generation_style,
-            "slides": [asdict(s) for s in self.state.slides],
-            "slide_order": self.state.slide_order,
-            "source_video_path": self.state.source_video_path,
-            "revoice_sync_mode": self.state.revoice_sync_mode,
-        }
-
-        with open(self.project_file, "w") as f:
-            json.dump(data, f, indent=2)
+        tmp = self.project_dir / f".{self.PROJECT_FILE}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(asdict(self.state), f, indent=2)
+            _replace_file(tmp, self.project_file)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def update_slide_audio(
         self,

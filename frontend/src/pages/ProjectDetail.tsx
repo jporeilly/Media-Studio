@@ -3,8 +3,11 @@ import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Eye, FileText, Film, Mic, Presentation, Save, Wand2 } from "lucide-react";
 import { api, errorMessage } from "../api/client";
+import { JobProgress, type Job } from "../components/project/JobProgress";
+import { SlidesCard } from "../components/project/SlidesCard";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { duration, relativeTime } from "../lib/format";
+import { slidesQueryKey } from "../lib/slides";
 import {
   CARD_DURATION,
   PREVIEW_SECONDS,
@@ -43,14 +46,6 @@ interface Project {
   revoiced_video?: string;
   revoiced_language?: string;
 }
-interface Job {
-  id: string;
-  kind: string;
-  status: string;
-  progress: number;
-  message: string;
-  error?: string | null;
-}
 interface Lang {
   name: string;
   subtag: string;
@@ -87,20 +82,6 @@ function OptionGroup({ title, hint, children }: { title: string; hint?: string; 
         {hint && <div className="os-muted os-small">{hint}</div>}
       </div>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>{children}</div>
-    </div>
-  );
-}
-
-// Shared progress bar for the transcribe and generate jobs (both poll the same job).
-function JobProgress({ job }: { job?: Job }) {
-  const pct = Math.round((job?.progress || 0) * 100);
-  return (
-    <div style={{ display: "grid", gap: 10 }}>
-      <div style={{ color: "var(--muted)" }}>{job?.message || "Starting…"}</div>
-      <div style={{ height: 8, borderRadius: 6, background: "var(--surface-3)", overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: "var(--brand)", transition: "width .3s ease" }} />
-      </div>
-      <div style={{ color: "var(--muted)", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{pct}%</div>
     </div>
   );
 }
@@ -204,10 +185,12 @@ export default function ProjectDetailPage() {
     },
   });
 
-  // When either job finishes, pull the freshly-saved project (transcript or video).
+  // When a job finishes, pull the freshly-saved project (transcript or video)
+  // and the slides (a render-slides job wrote their images).
   useEffect(() => {
     if (job.data?.status === "done") {
       qc.invalidateQueries({ queryKey: ["project", id] });
+      qc.invalidateQueries({ queryKey: slidesQueryKey(id) });
       setJobId(null);
     }
   }, [job.data?.status, id, qc]);
@@ -227,15 +210,14 @@ export default function ProjectDetailPage() {
   const p = project.data;
   const Icon = KIND_ICON[p.kind];
   const jobStatus = job.data?.status;
-  const running = transcribe.isPending || generate.isPending || jobStatus === "queued" || jobStatus === "running";
-  const jobError =
-    jobStatus === "error"
-      ? job.data?.error || job.data?.message
-      : transcribe.isError
-        ? errorMessage(transcribe.error)
-        : generate.isError
-          ? errorMessage(generate.error)
-          : null;
+  // Only one job runs at a time; its kind tells which card owns the progress
+  // bar / error (a render-slides job belongs to the Slides card, a transcribe
+  // or re-voice to the video cards), so the other cards stay put.
+  const activeKind = job.data?.kind;
+  const jobActive = jobStatus === "queued" || jobStatus === "running";
+  const jobErrText = jobStatus === "error" ? job.data?.error || job.data?.message : null;
+  const running = generate.isPending || (jobActive && activeKind === "generate");
+  const jobError = generate.isError ? errorMessage(generate.error) : activeKind === "generate" ? jobErrText : null;
 
   const providerOptions = studio.data?.options.tts_provider.options ?? [];
   const voiceOptions = voiceList ?? [];
@@ -284,11 +266,6 @@ export default function ProjectDetailPage() {
     </>
   );
 
-  // Only one job runs at a time; its kind tells which video card owns the
-  // progress bar / error, so the transcript editor stays put during a re-voice.
-  const activeKind = job.data?.kind;
-  const jobActive = jobStatus === "queued" || jobStatus === "running";
-  const jobErrText = jobStatus === "error" ? job.data?.error || job.data?.message : null;
   const transcribing = transcribe.isPending || (jobActive && activeKind === "transcribe");
   const revoicing = revoice.isPending || (jobActive && activeKind === "revoice");
   const transcribeError = transcribe.isError ? errorMessage(transcribe.error) : activeKind === "transcribe" ? jobErrText : null;
@@ -312,6 +289,18 @@ export default function ProjectDetailPage() {
           {p.transcribed_device && <Meta label="Transcribed on" value={p.transcribed_device.toUpperCase()} />}
         </div>
       </Card>
+
+      {(p.kind === "deck" || p.kind === "pdf") && (
+        <SlidesCard
+          projectId={id}
+          projectName={p.name}
+          projectKind={p.kind}
+          provider={provider}
+          job={job.data}
+          jobActive={jobActive}
+          onJobStarted={setJobId}
+        />
+      )}
 
       {canGenerate && (
         <Card title="Generate video" style={{ marginTop: 16 }}>

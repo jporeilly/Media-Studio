@@ -17,6 +17,7 @@ from typing import List, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.file_item import FileItem, VIDEO_SUFFIXES
+from services.slides import slide_export_lock
 from services.styles import TEMP_DIR
 from utils.config import config, CONFIG_DIR
 from utils.helpers import get_output_filename
@@ -25,7 +26,7 @@ from utils.logger import get_logger
 logger = get_logger("PROC")
 from core.pptx_exporter import PPTXExporter
 from core.tts_provider import TTSProvider, effective_voice
-from core.video_creator import VideoCreator, SlideClipInfo, fps_for_transition
+from core.video_creator import VideoCreator, SlideClipInfo, effective_pause, fps_for_transition
 from core.project_manager import ProjectManager, get_project_dir
 
 
@@ -259,6 +260,11 @@ class VideoProcessor:
         # The sidecar artifacts of the most recent full render, as
         # {"srt"|"vtt"|"webm"|"gif"|"mp3": filename} - files beside the MP4.
         self.outputs: dict = {}
+        # Which backend the most recent slide export of this run used
+        # ("powerpoint", or "pillow" for the title-only fallback); None when
+        # no slides were exported (images were already there). The generate
+        # route records it on the project for the slide editor.
+        self.images_backend: Optional[str] = None
         self.cancel_requested = False
 
     def _create_tts_generator(self):
@@ -316,11 +322,15 @@ class VideoProcessor:
                 if progress:
                     progress((idx + 0.1) / total, f"{label}: Exporting slides...")
                 try:
-                    exporter = PPTXExporter(file_item.path, pm.images_dir)
-                    for exp in exporter.export_slides_as_images():
-                        pm.update_slide_image(exp.index, exp.image_path)
-                        if exp.video_path:
-                            pm.update_slide_video(exp.index, exp.video_path, exp.has_animation)
+                    # One slide export at a time in the process: PowerPoint COM
+                    # is a single instance and two jobs run at once.
+                    with slide_export_lock(progress, (idx + 0.1) / total, label):
+                        exporter = PPTXExporter(file_item.path, pm.images_dir)
+                        for exp in exporter.export_slides_as_images():
+                            pm.update_slide_image(exp.index, exp.image_path)
+                            if exp.video_path:
+                                pm.update_slide_video(exp.index, exp.video_path, exp.has_animation)
+                        self.images_backend = getattr(exporter, "backend", None)
                 except Exception as e:
                     if progress:
                         progress(0, f"Error exporting slides: {e}")
@@ -346,7 +356,7 @@ class VideoProcessor:
                     if budget <= 0:
                         break
                     preview_slide_indices.add(s.index)
-                    budget -= dur + self.transition_pause
+                    budget -= dur + self._pause_after(s)
                 slides_needing = [i for i in slides_needing if i in preview_slide_indices]
 
             logger.info("provider=%s, speed=%s, voice=%s, stab=%s, sim=%s, style=%s", self.provider, self.speed, self.voice_id, self.stability, self.similarity_boost, self.style)
@@ -471,11 +481,13 @@ class VideoProcessor:
                 if progress:
                     progress((idx + 0.1) / total, f"{label}: Exporting slides...")
                 try:
-                    exporter = PPTXExporter(file_item.path, pm.images_dir)
-                    for exp in exporter.export_slides_as_images():
-                        pm.update_slide_image(exp.index, exp.image_path)
-                        if exp.video_path:
-                            pm.update_slide_video(exp.index, exp.video_path, exp.has_animation)
+                    with slide_export_lock(progress, (idx + 0.1) / total, label):
+                        exporter = PPTXExporter(file_item.path, pm.images_dir)
+                        for exp in exporter.export_slides_as_images():
+                            pm.update_slide_image(exp.index, exp.image_path)
+                            if exp.video_path:
+                                pm.update_slide_video(exp.index, exp.video_path, exp.has_animation)
+                        self.images_backend = getattr(exporter, "backend", None)
                 except Exception as e:
                     if progress:
                         progress(0, f"Error exporting slides: {e}")
@@ -552,11 +564,13 @@ class VideoProcessor:
             if not pm.all_images_ready():
                 if progress:
                     progress((idx + 0.2) / total, f"{label}: Re-exporting slides...")
-                exporter = PPTXExporter(file_item.path, pm.images_dir)
-                for exp in exporter.export_slides_as_images():
-                    pm.update_slide_image(exp.index, exp.image_path)
-                    if exp.video_path:
-                        pm.update_slide_video(exp.index, exp.video_path, exp.has_animation)
+                with slide_export_lock(progress, (idx + 0.2) / total, label):
+                    exporter = PPTXExporter(file_item.path, pm.images_dir)
+                    for exp in exporter.export_slides_as_images():
+                        pm.update_slide_image(exp.index, exp.image_path)
+                        if exp.video_path:
+                            pm.update_slide_video(exp.index, exp.video_path, exp.has_animation)
+                    self.images_backend = getattr(exporter, "backend", None)
 
             # Create video + SRT (music is mixed at the video level)
             if progress:
@@ -577,6 +591,11 @@ class VideoProcessor:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _pause_after(self, slide) -> float:
+        """The pause after a slide of the project state: its own
+        ``pause_override`` when set, else this job's transition pause."""
+        return effective_pause(getattr(slide, "pause_override", None), self.transition_pause)
 
     def _sidecar_outputs(
         self, pm: ProjectManager, output_path: Path,
@@ -614,7 +633,12 @@ class VideoProcessor:
         return outputs
 
     def _get_or_create_project(self, file_item: FileItem) -> ProjectManager:
-        """Load an existing project or create a new one."""
+        """Load an existing project or create a new one.
+
+        A project.json that exists but cannot be read raises
+        ``ProjectStateError`` out of the job (``ProjectManager.load``): the
+        project is never recreated from the deck over the user's edits.
+        """
         # Use existing project manager if already set (e.g. video imports)
         if file_item.project_manager and file_item.project_manager.state:
             return file_item.project_manager
@@ -625,7 +649,7 @@ class VideoProcessor:
         if (project_dir / "project.json").exists():
             pm.load()
 
-        # If load() failed (corrupt JSON) or no project.json exists, create fresh
+        # No project.json yet: create it from the deck.
         if pm.state is None:
             reader = file_item.reader
             slide_notes = (
@@ -1023,19 +1047,21 @@ class VideoProcessor:
                     image_path=Path(s.image_path) if s.image_path else None,
                     video_path=video_path,
                     audio_path=audio_path,
+                    # The slide's own pause override (the editor's "Pause after
+                    # slide"); None lets the creator use the job's pause.
+                    pause_after=getattr(s, "pause_override", None),
                 ))
 
                 # Deduct this slide's duration from preview budget
                 slide_dur = s.audio_duration if s.audio_duration > 0 else 5.0
-                preview_budget -= slide_dur + self.transition_pause + self.voice_start_delay
+                preview_budget -= slide_dur + self._pause_after(s) + self.voice_start_delay
             # Calculate total video duration from known slide durations + transitions
             default_dur = 5.0
             video_duration = 0.0
             for s in pm.state.slides:
                 video_duration += (s.audio_duration if s.audio_duration > 0 else default_dur) + self.voice_start_delay
-            # Add transition pauses between slides, and the title cards
-            num_transitions = max(0, len(pm.state.slides) - 1)
-            video_duration += num_transitions * self.transition_pause
+            # Add the pause after every slide but the last, and the title cards
+            video_duration += sum(self._pause_after(s) for s in pm.state.slides[:-1])
             if self.intro_text:
                 video_duration += self.intro_duration
             if self.outro_text:
@@ -1148,9 +1174,10 @@ def _generate_srt(
     Walks slides in order, using actual audio durations for timing, the way
     the master track is laid out: ``intro_offset`` (the intro card, which has
     no narration) first, then per narrated slide ``voice_start_delay`` of
-    silence before its audio, with ``transition_pause`` between slides.
-    Slides without notes are skipped but still advance the timeline.
-    Returns the SRT path, or None when no slide had notes.
+    silence before its audio, with ``transition_pause`` between slides - or
+    a slide's own ``pause_override`` after that slide, as the master track
+    and the chapters use it. Slides without notes are skipped but still
+    advance the timeline. Returns the SRT path, or None when no slide had notes.
     """
     srt_path = video_path.with_suffix(".srt")
     lines: List[str] = []
@@ -1158,9 +1185,10 @@ def _generate_srt(
     sub_index = 1
 
     for slide in pm.state.slides:
+        pause = effective_pause(getattr(slide, "pause_override", None), transition_pause)
         if not slide.speaker_notes.strip():
             current_time += 5.0
-            current_time += transition_pause
+            current_time += pause
             continue
 
         # The master track opens a narrated slide with the voice start delay;
@@ -1179,7 +1207,7 @@ def _generate_srt(
         lines.append("")
         sub_index += 1
 
-        current_time = end + transition_pause
+        current_time = end + pause
 
     if not lines:
         return None

@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 
 from api.deps import current_user
 from api.schemas import GenerateRequest, RevoiceRequest, TranscribeRequest, TranscriptUpdate
-from services import jobs, projects as store, revoice, studio_settings, transcription
+from services import jobs, projects as store, revoice, slides, studio_settings, transcription
 from services.output_presets import get_preset
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -96,6 +96,7 @@ def transcribe(pid: str, body: TranscribeRequest | None = None, user: dict = Dep
     job_id = jobs.submit(
         "transcribe",
         lambda progress: transcription.transcribe_project(pid, model or None, progress),
+        project_id=pid,
     )
     return {"job_id": job_id}
 
@@ -170,6 +171,12 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         rendered = processor.process_files(
             [fi], output_dir=output_dir, progress=progress, preview_seconds=body.preview_seconds,
         )
+        # Where this run's slide images came from (PowerPoint or the title-only
+        # Pillow fallback; a PDF's pages are its own renders), for the slide
+        # editor - recorded even when the encode failed, the images are there.
+        backend = "pdf" if record.get("kind") == "pdf" else getattr(processor, "images_backend", None)
+        if backend:
+            slides.record_images_source(pid, backend)
         if not rendered:
             raise RuntimeError("The video could not be rendered; the server log has the reason.")
 
@@ -195,7 +202,7 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         store.save_project(current)
         return {"video": video_path.name, "outputs": current["outputs"]}
 
-    job_id = jobs.submit("generate", work)
+    job_id = jobs.submit("generate", work, project_id=pid)
     return {"job_id": job_id}
 
 
@@ -221,6 +228,7 @@ def revoice_video(pid: str, body: RevoiceRequest, user: dict = Depends(current_u
         lambda progress: revoice.revoice_project(
             pid, voice_id, body.speed, body.language, progress, provider=provider,
         ),
+        project_id=pid,
     )
     return {"job_id": job_id}
 

@@ -618,3 +618,98 @@ def test_burn_subtitles_uses_the_resolved_ffmpeg(tmp_path, monkeypatch):
     calls = _fake_ffmpeg(monkeypatch, path=None)
     assert subtitle_generator.burn_subtitles(video, srt, tmp_path / "out" / "v_sub2.mp4") is False
     assert calls == [], "no ffmpeg, no attempt"
+
+
+# -- a slide's own pause override reaches the render, everywhere at once ----------------
+
+def test_effective_pause_takes_a_valid_override_else_the_jobs_pause():
+    assert video_creator.effective_pause(2.5, 1.0) == 2.5
+    assert video_creator.effective_pause(0, 1.0) == 0.0, "an explicit zero is a real value"
+    assert video_creator.effective_pause(3, 1.0) == 3.0
+    for bad in (None, True, -1, "3", "x"):
+        assert video_creator.effective_pause(bad, 1.0) == 1.0, bad
+    assert video_creator.pause_after(SlideClipInfo(slide_index=0, pause_after=4.0), 1.0) == 4.0
+    assert video_creator.pause_after(SlideClipInfo(slide_index=0), 1.0) == 1.0
+    assert video_creator.pause_after(object(), 1.0) == 1.0, "a clip without the field"
+
+
+def test_chapter_spans_honour_per_slide_pauses():
+    assert video_creator.chapter_spans([2.0, 2.0, 2.0], 1.0, pauses=[1.0, 3.0, 1.0]) == [(0, 2000), (3000, 5000), (8000, 10000)]
+    assert video_creator.chapter_spans([2.0, 2.0], 1.0, 0.5, pauses=[0.0, 9.0]) == [(500, 2500), (2500, 4500)], "a zero override is no gap"
+    assert video_creator.chapter_spans([2.0, 2.0, 2.0], 1.0, pauses=[3.0]) == [(0, 2000), (5000, 7000), (8000, 10000)], "short list: the rest use the job's"
+    assert video_creator.chapter_spans([2.0, 2.0], 1.0) == video_creator.chapter_spans([2.0, 2.0], 1.0, pauses=None)
+
+
+def test_master_track_srt_and_chapters_agree_when_a_slide_overrides_the_pause(tmp_path, monkeypatch):
+    """Three narrated slides, 0.5 s voice delay, a 1 s pause, and slide 2
+    pausing 3 s after it: the master track, the per-slide SRT and the chapter
+    spans all place slide 3 at 8 s."""
+    _stub_audio(monkeypatch)
+    config._config["tts_provider"] = "edge_tts"
+    clips = []
+    for i in range(3):
+        audio = tmp_path / f"slide_{i:03d}.mp3"
+        audio.write_bytes(b"mp3")
+        clips.append(SlideClipInfo(slide_index=i, audio_path=audio, pause_after=3.0 if i == 1 else None))
+
+    master, durations = video_creator._build_master_audio(clips, voice_start_delay=0.5, transition_pause=1.0)
+    try:
+        assert durations == [2.0, 2.0, 2.0]
+        # (0.5 + 1.5) | 1 s | (0.5 + 1.5) | 3 s | (0.5 + 1.5)
+        assert int(master.read_text()) == 2000 + 1000 + 2000 + 3000 + 2000
+    finally:
+        master.unlink(missing_ok=True)
+
+    pm = _pm(("One.", 1.5), ("Two.", 1.5), ("Three.", 1.5))
+    pm.state.slides[1].pause_override = 3.0
+    text = processing._generate_srt(pm, tmp_path / "deck.mp4", transition_pause=1.0, voice_start_delay=0.5).read_text(encoding="utf-8")
+    assert "00:00:00,500 --> 00:00:02,000\nOne." in text
+    assert "00:00:03,500 --> 00:00:05,000\nTwo." in text
+    assert "00:00:08,500 --> 00:00:10,000\nThree." in text, "3 s after slide two, not 1 s"
+
+    metadata = {}
+
+    def fake_run(cmd, **kwargs):
+        metadata["text"] = Path(cmd[4]).read_text(encoding="utf-8")
+        return types.SimpleNamespace(returncode=1, stderr=b"not really ffmpeg")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", "ffmpeg-test")
+    video = tmp_path / "deck.mp4"
+    video.write_bytes(b"mp4")
+    creator = VideoCreator(transition_pause=1.0, voice_start_delay=0.5)
+    chapter_clips = [SlideClipInfo(slide_index=i, duration=2.0, pause_after=3.0 if i == 1 else None) for i in range(3)]
+    creator._embed_chapters(video, chapter_clips, ["One", "Two", "Three"])
+    assert "START=0\nEND=2000\ntitle=One" in metadata["text"]
+    assert "START=3000\nEND=5000\ntitle=Two" in metadata["text"]
+    assert "START=8000\nEND=10000\ntitle=Three" in metadata["text"]
+
+
+def test_transition_clip_lasts_the_slides_own_pause():
+    creator = VideoCreator(transition_pause=1.0)
+    assert creator.create_transition_clip().duration == 1.0
+    assert creator.create_transition_clip(3.0).duration == 3.0
+    assert creator.create_transition_clip(0.25).duration == 0.25
+
+
+def test_build_video_threads_each_slides_pause_override_into_its_clip(tmp_path, monkeypatch):
+    seen = {}
+
+    class _Creator:
+        def __init__(self, **kwargs):
+            seen["transition_pause"] = kwargs["transition_pause"]
+
+        def create_video(self, slide_clips, **kwargs):
+            seen["pauses"] = [c.pause_after for c in slide_clips]
+            return True
+
+    monkeypatch.setattr(processing, "VideoCreator", _Creator)
+    pm = _pm(("A", 2.0), ("B", 2.0), ("C", 2.0))
+    pm.state.slides[0].pause_override = 2.5
+    pm.state.slides[1].pause_override = None
+    # slide 2 has no pause_override attribute at all (an older state)
+    processor = processing.VideoProcessor(transition_pause=1.0)
+    assert processor._build_video(pm, tmp_path / "out.mp4")
+    assert seen["pauses"] == [2.5, None, None], "the creator falls back to the job's pause for None"
+    assert seen["transition_pause"] == 1.0
+    assert processor._pause_after(pm.state.slides[0]) == 2.5 and processor._pause_after(pm.state.slides[2]) == 1.0

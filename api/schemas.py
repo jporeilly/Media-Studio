@@ -2,7 +2,9 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StringConstraints
+
+from services.slides import MAX_NOTES_CHARS, MAX_PAUSE_SECONDS
 
 # A title-card text: stripped, so a whitespace-only value makes no card, and capped.
 CardText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)]
@@ -147,3 +149,38 @@ class RevoiceRequest(BaseModel):
     voice_id: str | None = None
     speed: float = 1.0
     language: str | None = None  # display name from /api/languages; None = keep original
+
+
+class SlideUpdate(BaseModel):
+    """PATCH /api/projects/{pid}/slides/{index}. Every field is optional: a
+    field left out is left alone, an explicit null clears that override
+    (voice, pause, alt text) back to the studio default; notes are text only.
+    ``provider`` names the narration provider a ``voice_override`` belongs to
+    (edge_tts | kokoro; null = the studio default), so an id from the other
+    provider is refused now, as generate refuses its voice, rather than being
+    dropped silently at render time. An unknown key is a 422, and the pause
+    is strict so a boolean is not coerced to 1.0 (an int is still fine).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    speaker_notes: str | None = Field(None, max_length=MAX_NOTES_CHARS)
+    voice_override: str | None = Field(None, max_length=200)
+    pause_override: StrictFloat | None = Field(None, ge=0, le=MAX_PAUSE_SECONDS)
+    alt_text: str | None = Field(None, max_length=2000)
+    provider: str | None = None
+
+
+class SlideNotesIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index: StrictInt = Field(ge=0)
+    speaker_notes: str = Field(max_length=MAX_NOTES_CHARS)
+
+
+class SlidesBulkUpdate(BaseModel):
+    """PATCH /api/projects/{pid}/slides: the notes of several slides at once."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slides: list[SlideNotesIn] = Field(max_length=2000)

@@ -110,7 +110,8 @@ def test_transcribe_route_resolves_the_model_at_request_time(client, monkeypatch
     url = f"/api/projects/{rec['id']}/transcribe"
 
     config._config["whisper_model"] = "small"  # Settings › Studio
-    assert _wait_job(client, client.post(url, json={}).json()["job_id"])["status"] == "done"
+    first = _wait_job(client, client.post(url, json={}).json()["job_id"])
+    assert first["status"] == "done" and first["project_id"] == rec["id"], "attached to its project"
     assert _wait_job(client, client.post(url, json={"model": "tiny"}).json()["job_id"])["status"] == "done"
     config._config["whisper_model"] = ""
     assert _wait_job(client, client.post(url).json()["job_id"])["status"] == "done"

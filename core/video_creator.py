@@ -40,10 +40,32 @@ def fps_for_transition(slide_transition: str, transition_duration: float = 0.5) 
     return STATIC_FPS
 
 
-def chapter_spans(durations: List[float], transition_pause: float, intro_offset: float = 0.0) -> List[Tuple[int, int]]:
+def effective_pause(override, default: float) -> float:
+    """The pause after one slide: ``override`` when it is a non-negative
+    number (the slide's own ``pause_override``), else ``default`` (the job's
+    transition pause). One rule for the master track, the transition clips,
+    the chapters and the per-slide subtitles, so they always agree."""
+    if isinstance(override, bool) or not isinstance(override, (int, float)) or override < 0:
+        return float(default)
+    return float(override)
+
+
+def pause_after(clip_info, default: float) -> float:
+    """The pause after ``clip_info`` (a ``SlideClipInfo``): its ``pause_after``
+    when set, else ``default``."""
+    return effective_pause(getattr(clip_info, "pause_after", None), default)
+
+
+def chapter_spans(
+    durations: List[float], transition_pause: float, intro_offset: float = 0.0,
+    pauses: Optional[List[float]] = None,
+) -> List[Tuple[int, int]]:
     """``(start_ms, end_ms)`` per slide: the slides run back to back with the
     transition pause between them, all shifted by the intro card's duration
     (``intro_offset``) when there is one - the card has no chapter of its own.
+    ``pauses`` gives the pause after each slide where it differs from
+    ``transition_pause`` (a slide's own override); None means the same
+    pause after every slide.
     """
     spans = []
     current = float(intro_offset)
@@ -51,7 +73,7 @@ def chapter_spans(durations: List[float], transition_pause: float, intro_offset:
         spans.append((int(round(current * 1000)), int(round((current + duration) * 1000))))
         current += duration
         if i < len(durations) - 1:
-            current += transition_pause
+            current += pauses[i] if pauses is not None and i < len(pauses) else transition_pause
     return spans
 
 
@@ -384,10 +406,8 @@ def _build_master_audio(
 
     profile = profile or _active_onset_profile()
     delay_ms = int(voice_start_delay * 1000)
-    pause_ms = int(transition_pause * 1000)
     intro_ms = int(round(max(0.0, intro_offset) * 1000))
     delay_silence = AudioSegment.silent(duration=delay_ms) if delay_ms > 0 else AudioSegment.empty()
-    pause_silence = AudioSegment.silent(duration=pause_ms) if pause_ms > 0 else AudioSegment.empty()
 
     # Load transition sound if available
     trans_sound = None
@@ -402,6 +422,10 @@ def _build_master_audio(
     has_any_audio = False
 
     for i, clip_info in enumerate(slide_clips):
+        # The gap after this slide: its own pause override, else the job's.
+        pause_ms = int(pause_after(clip_info, transition_pause) * 1000)
+        pause_silence = AudioSegment.silent(duration=pause_ms) if pause_ms > 0 else AudioSegment.empty()
+
         audio_path = clip_info.audio_path
         if not audio_path or not Path(audio_path).exists():
             # No audio — use default duration
@@ -489,6 +513,7 @@ class SlideClipInfo:
     video_path: Optional[Path] = None  # For animated slides
     audio_path: Optional[Path] = None
     duration: Optional[float] = None  # If None, uses audio duration
+    pause_after: Optional[float] = None  # Seconds of pause after this slide; None = the creator's transition_pause
 
 
 class VideoCreator:
@@ -630,18 +655,23 @@ class VideoCreator:
             logger.error("Error creating slide clip: %s", e)
             return None
 
-    def create_transition_clip(self) -> any:
-        """Create a transition/pause clip between slides, with optional sound."""
+    def create_transition_clip(self, pause: Optional[float] = None) -> any:
+        """Create a transition/pause clip between slides, with optional sound.
+
+        ``pause`` is the gap after the slide just shown (a slide's own
+        override); None = the creator's ``transition_pause``.
+        """
+        pause = self.transition_pause if pause is None else float(pause)
         bg_color = (255, 255, 255) if self.slide_transition == "fade-to-white" else (0, 0, 0)
         if self._transition_audio:
-            duration = max(self.transition_pause, self._transition_audio.duration)
+            duration = max(pause, self._transition_audio.duration)
             clip = ColorClip(
                 size=self.resolution, color=bg_color, duration=duration,
             ).with_fps(self.fps).with_audio(self._transition_audio)
             return clip
 
         return ColorClip(
-            size=self.resolution, color=bg_color, duration=self.transition_pause
+            size=self.resolution, color=bg_color, duration=pause
         ).with_fps(self.fps)
 
     def _apply_transition_effect(self, clip, slide_index: int, total_slides: int):
@@ -933,8 +963,10 @@ class VideoCreator:
                         pass
                 durations.append(duration)
 
-            # Shifted past the intro card, which has no chapter of its own.
-            spans = chapter_spans(durations, self.transition_pause, self.intro_offset)
+            # Shifted past the intro card, which has no chapter of its own; the
+            # gap after each slide is its own pause override, else the job's.
+            pauses = [pause_after(clip_info, self.transition_pause) for clip_info in slide_clips]
+            spans = chapter_spans(durations, self.transition_pause, self.intro_offset, pauses)
             chapters = [(start_ms, end_ms, title) for (start_ms, end_ms), title in zip(spans, titles)]
 
             if not chapters:
@@ -1047,9 +1079,12 @@ class VideoCreator:
 
                 clips.append(clip)
 
-                # Add transition (except after last slide)
-                if add_transitions and self.transition_pause > 0 and i < total - 1:
-                    clips.append(self.create_transition_clip())
+                # Add transition (except after last slide): the slide's own
+                # pause override, else the job's transition pause - the same
+                # gap the master track left after it.
+                pause = pause_after(clip_info, self.transition_pause)
+                if add_transitions and pause > 0 and i < total - 1:
+                    clips.append(self.create_transition_clip(pause))
 
             if not clips:
                 logger.error("No clips to combine")

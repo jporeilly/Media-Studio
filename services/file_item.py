@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.pptx_reader import PPTXReader
-from core.project_manager import ProjectManager, get_project_dir
+from core.project_manager import ProjectManager, ProjectStateError, get_project_dir
 from utils.config import CONFIG_DIR
 
 
@@ -39,7 +39,15 @@ class FileItem:
         return False
 
     def load_pdf(self) -> bool:
-        """Load a PDF file, converting pages to slide images."""
+        """Load a PDF file, converting pages to slide images.
+
+        An existing project (``project.json``) is kept - its notes, overrides
+        and undo history are what the slide editor writes, and generate calls
+        this on every run - and only the page images are refreshed. The
+        project is created fresh only when there is none, or when its slide
+        count no longer matches the PDF's pages; one that exists but cannot
+        be read raises ``ProjectStateError`` rather than being overwritten.
+        """
         try:
             from core.pdf_reader import PDFReader
             pdf_reader = PDFReader(self.path)
@@ -48,18 +56,24 @@ class FileItem:
             if pdf_reader.load(output_dir=images_dir):
                 self.slide_count = pdf_reader.slide_count
                 self.project_manager = ProjectManager(project_dir)
-                slide_notes = [""] * self.slide_count
-                self.project_manager.create_project(
-                    pptx_path=self.path,
-                    slide_notes=slide_notes,
-                    voice_id="",
-                )
+                if self.project_manager.project_file.exists():
+                    self.project_manager.load()
+                state = self.project_manager.state
+                if state is None or len(state.slides) != self.slide_count:
+                    slide_notes = [""] * self.slide_count
+                    self.project_manager.create_project(
+                        pptx_path=self.path,
+                        slide_notes=slide_notes,
+                        voice_id="",
+                    )
                 for slide_info in pdf_reader.slides:
                     if slide_info.image_path:
                         self.project_manager.update_slide_image(slide_info.index, slide_info.image_path)
                 self.has_project = True
                 self.reader = pdf_reader
                 return True
+        except ProjectStateError:
+            raise
         except Exception as e:
             print(f"Error loading PDF: {e}")
         return False

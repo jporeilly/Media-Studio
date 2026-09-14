@@ -124,6 +124,12 @@ def delete_project(pid: str) -> bool:
     if not pdir.exists():
         return False
     shutil.rmtree(pdir, ignore_errors=True)
+    # The slide editor keeps a per-project lock and a cache of the deck's own
+    # notes; neither has a reason to outlive the project. Imported here: that
+    # module imports this one.
+    from services import slides
+
+    slides.forget(pid)
     return True
 
 

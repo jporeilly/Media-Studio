@@ -110,6 +110,7 @@ def test_revoice_video_with_transcript_runs_and_saves(client, monkeypatch):
     assert r.status_code == 200
     job = _wait_job(client, r.json()["job_id"])
     assert job["status"] == "done", job
+    assert job["project_id"] == pid, "the job is attached to its project"
 
     # The voice and speed reached the processor, on the configured provider.
     assert _FakeVideoProcessor.last.voice_id == "en-US-GuyNeural"

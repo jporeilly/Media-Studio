@@ -52,6 +52,11 @@ class PPTXExporter:
         self._powerpoint = None
         self._presentation = None
         self._we_started_powerpoint = False  # track if we launched PowerPoint
+        # Which backend export_slides_as_images ran: "powerpoint" (real renders,
+        # animations detected) or "pillow" (the title-only fallback), None
+        # before an export. Callers record it so a fallback render is never
+        # mistaken for the real slide (vision features must skip it).
+        self.backend: Optional[str] = None
 
     # ------------------------------------------------------------------
     # PowerPoint COM backend
@@ -435,12 +440,16 @@ class PPTXExporter:
         Uses PowerPoint COM on Windows (best quality, supports animations).
         Falls back to Pillow if PowerPoint is not available.
         """
+        self.backend = None
         if os.name == "nt":
             try:
-                return self._export_via_powerpoint(progress_callback)
+                exported = self._export_via_powerpoint(progress_callback)
+                self.backend = "powerpoint"
+                return exported
             except RuntimeError as e:
                 logger.warning("PowerPoint COM failed: %s — using Pillow fallback", e)
 
+        self.backend = "pillow"
         return self._export_via_pillow(progress_callback)
 
     def _export_via_pillow(
