@@ -4,19 +4,22 @@ The install is expected to be a git checkout of the app repo (the installer lays
 it down that way). ``check_for_update`` fetches and compares HEAD with its
 upstream; ``apply_update`` fast-forwards, reinstalls Python deps into the
 running interpreter (the vendored Python in a packaged install, the venv in
-dev), and reports that a restart is required. ``schedule_restart`` re-execs
-the backend so the new code is served — no reinstall needed.
+dev), and reports that a restart is required. ``schedule_restart`` relaunches
+the backend in place so the new code is served — no reinstall needed.
 
 Both paths degrade with a clear message when the install is not a checkout or
 ``git`` is missing, rather than failing obscurely.
 """
 
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import threading
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIREMENTS = ROOT / "requirements.txt"
@@ -111,15 +114,66 @@ def apply_update(progress=None) -> dict:
             "changed": before != after, "restart_required": True}
 
 
-def schedule_restart(delay_seconds: float = 0.75) -> None:
-    """Re-exec the backend shortly, after the HTTP response has been sent.
+def successor_command() -> list[str]:
+    """The command that relaunches this backend: the same interpreter with the
+    same arguments, so the packaged (vendored Python + boot.py) and dev (venv +
+    main.py) installs restart the same way."""
+    return [sys.executable, *sys.argv]
 
-    ``os.execv`` replaces this process with a fresh ``python main.py …`` using
-    the same interpreter and arguments, so the packaged (vendored-Python) and
-    dev (venv) installs restart the same way.
+
+def _inheritable(stream):
+    """``stream`` if a child process can inherit it, else None.
+
+    Keeping stdout/stderr lets whoever reads this backend's output — the desktop
+    shell drains them into its startup log — keep reading the successor's,
+    instead of losing every line after the first restart. With None, CPython
+    hands the child this process's own standard handle instead, so the shell's
+    pipe is still passed on even when ``sys.stdout`` has been wrapped.
     """
+    try:
+        stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    return stream
 
-    def _restart() -> None:
-        os.execv(sys.executable, [sys.executable, *sys.argv])
 
-    threading.Timer(delay_seconds, _restart).start()
+def respawn() -> None:
+    """Replace this process with a fresh copy of itself. Does not return.
+
+    POSIX: a true ``execv`` — same PID, so a supervisor sees one process.
+
+    Windows: ``os.execv`` is NOT an exec there. The C runtime spawns a new
+    process and joins argv with spaces WITHOUT quoting, so any path containing
+    a space — a profile like ``C:/Users/Jane Doe``, or the packaged install
+    under ``.../Media Studio Enterprise/`` — starts a successor that dies at once
+    with "can't open file", while the caller exits 0 as if all were well. So
+    spawn the successor through ``subprocess`` (which quotes argv correctly),
+    hand it our stdio, and only then exit.
+    """
+    cmd = successor_command()
+    if os.name != "nt":
+        os.execv(cmd[0], cmd)
+        return  # pragma: no cover - execv does not return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+    try:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=_inheritable(sys.stdout),
+            stderr=_inheritable(sys.stderr),
+        )
+    except OSError:
+        # Keep serving on the old code rather than die with nothing to show for
+        # it; the message lands in the shell's log / startup report.
+        log.exception("restart failed: could not start %s", cmd)
+        return
+    os._exit(0)
+
+
+def schedule_restart(delay_seconds: float = 0.75) -> None:
+    """Restart the backend shortly, after the HTTP response has been sent."""
+    threading.Timer(delay_seconds, respawn).start()

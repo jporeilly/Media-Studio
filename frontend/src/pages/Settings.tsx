@@ -28,6 +28,12 @@ interface Health {
 
 const muted = { color: "var(--muted)" } as const;
 
+// The desktop shell gives a cold start of the media stack four minutes before it
+// gives up (desktop/dist/index.html DEADLINE_MS); a post-update start is that same
+// cold start with freshly pulled files. Past this the backend is not coming back,
+// and a spinner that never stops is worse than a message that says so.
+const RESTART_WAIT_MS = 240_000;
+
 export default function SettingsPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
@@ -35,6 +41,7 @@ export default function SettingsPage() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [pollBack, setPollBack] = useState(false);
+  const [restartTimedOut, setRestartTimedOut] = useState(false);
 
   const health = useQuery({
     queryKey: ["system-health"],
@@ -78,7 +85,7 @@ export default function SettingsPage() {
   const back = useQuery({
     queryKey: ["health-after-restart"],
     queryFn: () => api.get<Health>("/api/system/health"),
-    enabled: pollBack,
+    enabled: pollBack && !restartTimedOut,
     retry: false,
     refetchInterval: (q) => (q.state.data?.status === "ok" ? false : 1500),
   });
@@ -88,6 +95,14 @@ export default function SettingsPage() {
       return () => clearTimeout(t);
     }
   }, [pollBack, back.data?.status]);
+  // Bound the wait: a backend that has not answered in RESTART_WAIT_MS is down,
+  // and the page must say so rather than spin until the window is closed.
+  // "Keep waiting" clears the flag, which re-arms this timer for another round.
+  useEffect(() => {
+    if (!restarting || restartTimedOut) return;
+    const t = setTimeout(() => setRestartTimedOut(true), RESTART_WAIT_MS);
+    return () => clearTimeout(t);
+  }, [restarting, restartTimedOut]);
 
   const u = update.data;
   const jobStatus = job.data?.status;
@@ -105,7 +120,17 @@ export default function SettingsPage() {
       />
 
       <Card title="Updates">
-        {restarting ? (
+        {restarting && restartTimedOut && back.data?.status !== "ok" ? (
+          <div style={{ display: "grid", gap: 10, justifyItems: "start" }}>
+            <ErrorBox message="The backend hasn't come back after four minutes. Relaunch Media Studio Enterprise (or restart the server), then return to Settings › Updates to confirm the installed version." />
+            {/* Not a page reload: in the desktop app this page is served by the
+                very backend that is down, so a reload would land on a browser
+                error page. Re-arming the poll keeps the automatic reload path. */}
+            <Button icon={<RefreshCw size={16} />} onClick={() => setRestartTimedOut(false)}>
+              Keep waiting
+            </Button>
+          </div>
+        ) : restarting ? (
           <div style={{ display: "grid", gap: 10 }}>
             <Spinner label={pollBack && back.data?.status === "ok" ? "Back online — reloading…" : "Restarting the backend…"} />
             <div style={{ ...muted, fontSize: 13 }}>This page reloads automatically once the app is back.</div>
@@ -146,6 +171,7 @@ export default function SettingsPage() {
             )}
 
             {applyError && <ErrorBox message={applyError} />}
+            {restart.isError && <ErrorBox message={`Restart failed: ${errorMessage(restart.error)}`} />}
 
             {applying ? (
               <div style={{ display: "grid", gap: 8 }}>

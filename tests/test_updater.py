@@ -1,6 +1,9 @@
 """Tests for the Git self-updater (git and pip mocked — nothing touches the network)."""
 
+import json
 import subprocess
+import sys
+import textwrap
 import types
 
 import pytest
@@ -111,3 +114,61 @@ def test_schedule_restart_uses_a_timer(monkeypatch):
     monkeypatch.setattr(updater.threading, "Timer", _Timer)
     updater.schedule_restart(0.5)
     assert started.timer is not None and started.timer[0] == 0.5
+
+
+def test_successor_command_is_this_interpreter_and_argv():
+    assert updater.successor_command() == [sys.executable, *sys.argv]
+
+
+def _restart_script(root: str, flag: str, marker: str) -> str:
+    """A script that restarts itself once, then records the argv it came back with.
+
+    The generation guard is a FILE, not an environment variable: it cannot be
+    inherited by accident from the test runner (which would skip the restart
+    and pass vacuously) and it caps the chain at exactly one respawn.
+    """
+    return textwrap.dedent(f"""
+        import json, os, sys, time
+        sys.path.insert(0, {root!r})
+        from services import updater
+        if os.path.exists({flag!r}):
+            with open({marker!r}, "w") as fh:
+                json.dump(sys.argv, fh)
+            sys.exit(0)
+        open({flag!r}, "w").close()
+        updater.schedule_restart(0)
+        time.sleep(10)  # the restart ends this process within a second
+        sys.exit(3)  # only reached if the restart never happened
+        """)
+
+
+def _vendored_pythons() -> list[str]:
+    """The packaged app's interpreter (3.12 embeddable), when the desktop runtime
+    has been fetched on this machine — it is the one that actually restarts in
+    the installed app."""
+    exe = updater.ROOT / "desktop" / "src-tauri" / "vendor" / "python" / "python.exe"
+    return [str(exe)] if exe.is_file() else []
+
+
+@pytest.mark.parametrize("interpreter", [sys.executable, *_vendored_pythons()])
+def test_restart_hands_the_successor_its_argv_intact(tmp_path, interpreter):
+    """Regression: ``os.execv`` on Windows joins argv without quoting, so a path
+    with a space (the packaged install lives under ``Media Studio Enterprise``)
+    started a successor that died on "can't open file" while the old process
+    exited 0. Perform a REAL restart from a directory with spaces and check
+    exactly what the successor received."""
+    spaced = tmp_path / "dir with space"
+    spaced.mkdir()
+    marker = spaced / "argv.json"
+    script = spaced / "restart me.py"
+    script.write_text(
+        _restart_script(str(updater.ROOT), str(spaced / "restarted.flag"), str(marker)),
+        encoding="utf-8",
+    )
+    # run() waits for the pipes to close, i.e. for the successor too (it inherits them).
+    proc = subprocess.run(
+        [interpreter, str(script), "an arg with spaces"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert marker.exists(), f"the successor never ran: {proc.stderr[-600:]}"
+    assert json.loads(marker.read_text()) == [str(script), "an arg with spaces"]

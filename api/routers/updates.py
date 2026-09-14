@@ -23,6 +23,6 @@ def apply_update(user: dict = Depends(admin_only)):
 
 @router.post("/restart")
 def restart(user: dict = Depends(admin_only)):
-    """Re-exec the backend so freshly pulled code is served."""
+    """Relaunch the backend in place so freshly pulled code is served."""
     updater.schedule_restart()
     return {"restarting": True}
