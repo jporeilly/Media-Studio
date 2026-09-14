@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional, Dict
 import logging
 
-logger = logging.getLogger("pptx2video.YOUTUBE")
+logger = logging.getLogger("mediastudio.YOUTUBE")
 
 # Scopes needed for upload
 YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
@@ -23,9 +23,9 @@ YOUTUBE_API_VERSION = "v3"
 def check_youtube_dependencies() -> bool:
     """Check if YouTube API dependencies are installed."""
     try:
-        import google.auth
-        import google_auth_oauthlib
-        import googleapiclient
+        import google.auth  # noqa: F401 - availability probe
+        import google_auth_oauthlib  # noqa: F401 - availability probe
+        import googleapiclient  # noqa: F401 - availability probe
         return True
     except ImportError:
         return False

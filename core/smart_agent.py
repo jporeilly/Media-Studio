@@ -19,7 +19,7 @@ import json
 import time
 import logging
 
-logger = logging.getLogger("pptx2video.AGENT")
+logger = logging.getLogger("mediastudio.AGENT")
 
 
 class AgentStep:

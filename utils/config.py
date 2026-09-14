@@ -146,13 +146,13 @@ class Config:
 
     # Environment variable overrides — keys map to config keys
     _ENV_OVERRIDES = {
-        "PPTX2VIDEO_PORT": ("port", int),
-        "PPTX2VIDEO_OLLAMA_URL": ("ollama_url", str),
-        "PPTX2VIDEO_OLLAMA_MODEL": ("ollama_model", str),
-        "PPTX2VIDEO_OLLAMA_ENABLED": ("ollama_enabled", lambda v: v.lower() in ("1", "true", "yes")),
-        "PPTX2VIDEO_EDGE_TTS_VOICE": ("edge_tts_voice", str),
-        "PPTX2VIDEO_MUSIC_VOLUME": ("music_volume", float),
-        "PPTX2VIDEO_TRANSITION_PAUSE": ("transition_pause", float),
+        "MEDIA_STUDIO_PORT": ("port", int),
+        "MEDIA_STUDIO_OLLAMA_URL": ("ollama_url", str),
+        "MEDIA_STUDIO_OLLAMA_MODEL": ("ollama_model", str),
+        "MEDIA_STUDIO_OLLAMA_ENABLED": ("ollama_enabled", lambda v: v.lower() in ("1", "true", "yes")),
+        "MEDIA_STUDIO_EDGE_TTS_VOICE": ("edge_tts_voice", str),
+        "MEDIA_STUDIO_MUSIC_VOLUME": ("music_volume", float),
+        "MEDIA_STUDIO_TRANSITION_PAUSE": ("transition_pause", float),
     }
 
     def __init__(self):

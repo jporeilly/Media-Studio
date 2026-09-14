@@ -14,7 +14,7 @@ pair the chosen language with a matching TTS voice via
 from typing import List, Optional, Callable
 import logging
 
-logger = logging.getLogger("pptx2video.TRANSLATE")
+logger = logging.getLogger("mediastudio.TRANSLATE")
 
 # Curated target languages: display name -> BCP-47 language subtag. The subtag
 # is what pairs the translation with a matching TTS voice (voices carry a locale

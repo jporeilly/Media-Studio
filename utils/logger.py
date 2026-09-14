@@ -33,7 +33,7 @@ _file.setFormatter(logging.Formatter(_FMT, datefmt=_DATE_FMT))
 
 def get_logger(name: str) -> logging.Logger:
     """Get a named logger with console + file handlers pre-attached."""
-    logger = logging.getLogger(f"pptx2video.{name}")
+    logger = logging.getLogger(f"mediastudio.{name}")
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
         logger.addHandler(_console)

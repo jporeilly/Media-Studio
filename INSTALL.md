@@ -26,6 +26,20 @@ run and update it. Building the installer is covered in
 - **Git** (optional): only needed to update the app from inside Settings — see
   [Updating](#updating).
 
+### GPU transcription (optional)
+
+Transcription (Whisper via CTranslate2) runs on an NVIDIA GPU when the CUDA 12 runtime
+libraries are importable; without them the app logs "GPU transcription failed … retrying on
+CPU" and carries on at CPU speed, roughly nine times slower. To enable the GPU, install the
+two runtime wheels (about 1 GB) into the app's own Python and restart the backend
+(Settings › Updates › Restart backend):
+
+```powershell
+& "$env:LOCALAPPDATA\Media Studio Enterprise\python\python.exe" -m pip install -r "$env:LOCALAPPDATA\Media Studio Enterprise\app\requirements-gpu.txt"
+```
+
+For a source checkout: `venv\Scripts\pip install -r requirements-gpu.txt`.
+
 ## Install
 
 1. Run `Media Studio Enterprise_<version>_x64-setup.exe` — the file name carries the

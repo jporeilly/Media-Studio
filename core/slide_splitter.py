@@ -7,7 +7,7 @@ with redistributed notes and suggested titles.
 from typing import List, Dict, Optional
 import logging
 
-logger = logging.getLogger("pptx2video.SPLIT")
+logger = logging.getLogger("mediastudio.SPLIT")
 
 
 def analyze_for_splitting(slides_data: List[Dict],

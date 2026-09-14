@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional, Callable
 import logging
 
-logger = logging.getLogger("pptx2video.ONECLICK")
+logger = logging.getLogger("mediastudio.ONECLICK")
 
 
 def auto_detect_settings(pptx_path: Path, ollama_url: str = "",

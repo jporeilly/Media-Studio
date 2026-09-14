@@ -12,7 +12,7 @@ from pathlib import Path
 import logging
 import json
 
-logger = logging.getLogger("pptx2video.ASSISTANT")
+logger = logging.getLogger("mediastudio.ASSISTANT")
 
 
 # Quick action definitions — displayed as clickable chips

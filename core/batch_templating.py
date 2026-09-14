@@ -11,7 +11,7 @@ import re
 import shutil
 import logging
 
-logger = logging.getLogger("pptx2video.BATCH")
+logger = logging.getLogger("mediastudio.BATCH")
 
 def extract_variables(pptx_path: Path) -> List[str]:
     """Scan a PPTX file for {{variable}} placeholders in speaker notes and slide text.

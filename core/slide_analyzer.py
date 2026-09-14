@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Dict
 import logging
 
-logger = logging.getLogger("pptx2video.ANALYZE")
+logger = logging.getLogger("mediastudio.ANALYZE")
 
 
 def analyze_slide_content(slides_data: List[Dict], ollama_url: str = "",

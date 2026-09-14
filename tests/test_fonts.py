@@ -46,7 +46,7 @@ class _Records(logging.Handler):
 @pytest.fixture
 def records():
     handler = _Records()
-    names = ("pptx2video.FONTS", "pptx2video.VIDEO")
+    names = ("mediastudio.FONTS", "mediastudio.VIDEO")
     for name in names:
         logging.getLogger(name).addHandler(handler)
     yield handler

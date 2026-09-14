@@ -11,7 +11,7 @@ Uses Ollama to adapt content for:
 from typing import List, Optional, Callable
 import logging
 
-logger = logging.getLogger("pptx2video.TONE")
+logger = logging.getLogger("mediastudio.TONE")
 
 TONE_PRESETS = {
     "Technical": {

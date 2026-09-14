@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import logging
 
-logger = logging.getLogger("pptx2video.QA_GEN")
+logger = logging.getLogger("mediastudio.QA_GEN")
 
 
 def generate_qa(

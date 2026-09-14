@@ -13,7 +13,7 @@ from typing import List, Optional, Callable
 import re
 import logging
 
-logger = logging.getLogger("pptx2video.PACING")
+logger = logging.getLogger("mediastudio.PACING")
 
 
 def analyze_pacing(notes: List[str]) -> List[dict]:
