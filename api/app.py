@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import __version__, store
+from services import jobs
 from utils.config import config
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -64,6 +65,13 @@ def create_app() -> FastAPI:
     @app.exception_handler(ValueError)
     async def _value_error(request: Request, exc: ValueError):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    # One job per project at a time (services.jobs.require_idle / start): the
+    # generate, re-voice, transcribe, render and AI routes and every slide
+    # write answer a busy project with the same 409.
+    @app.exception_handler(jobs.ProjectBusy)
+    async def _project_busy(request: Request, exc: jobs.ProjectBusy):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     if FRONTEND_DIST.exists():
         assets = FRONTEND_DIST / "assets"

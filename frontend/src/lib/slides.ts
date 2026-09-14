@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
+import type { QaReview } from "./ai";
 
 /**
  * The slide editor's data (services/slides.py): one entry per slide of a deck or PDF project, the engine's
@@ -35,6 +36,8 @@ export interface SlidesPayload {
   images_source: ImagesSource;
   images_rendered_at: string | null;
   slides_ready: boolean;
+  /** The last AI QA review (lib/ai.ts); null until one has run. Absent from a backend older than the AI assistant. */
+  qa_review?: QaReview | null;
 }
 
 /** Unsaved notes by slide index; a slide without an entry shows its saved notes. */
@@ -182,12 +185,25 @@ export function pauseText(value: number | null | undefined): string {
   return value == null ? "" : String(value);
 }
 
-/** Only a Pillow (fallback) render deserves a word: its previews are each slide's title on white, not the slide. */
+/**
+ * A Pillow (fallback) render deserves a word: its previews are each slide's title on white, not the slide. So do
+ * previews rendered before their source was recorded (the older decks): the AI's vision cannot use them until
+ * they are rendered again ("Render again" in the card's actions).
+ */
 export function imagesNotice(source: ImagesSource, ready: boolean): string | null {
-  if (ready && source === "pillow") {
+  if (!ready) return null;
+  if (source === "pillow") {
     return "PowerPoint was not available on the server, so these previews show each slide's title only.";
   }
+  if (source === null) {
+    return "These previews were rendered before their source was recorded, so the AI cannot use them as images — Render again to enable vision.";
+  }
   return null;
+}
+
+/** True when the previews exist but nobody recorded where they came from: the card offers "Render again". */
+export function needsRenderAgain(source: ImagesSource, ready: boolean): boolean {
+  return ready && source === null;
 }
 
 /** What rendering the previews costs, by kind: a deck goes through PowerPoint, a PDF's pages render in seconds. */

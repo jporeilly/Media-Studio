@@ -131,8 +131,11 @@ export function optionsSummary(options: GenerateOptions, transitions: Option[]):
   return parts.length ? parts.join(" · ") : "Defaults";
 }
 
-/** The sidecar files a generate job records on the project (`outputs`), served by GET /api/projects/{id}/outputs/{kind}. */
-export type OutputKind = "srt" | "vtt" | "webm" | "gif" | "mp3" | "preview";
+/**
+ * The sidecar files a generate job records on the project (`outputs`), served by GET /api/projects/{id}/outputs/{kind};
+ * `qa_doc` is the AI assistant's Q&A document (served by GET /api/projects/{id}/export/qa, shown on the Slides card).
+ */
+export type OutputKind = "srt" | "vtt" | "webm" | "gif" | "mp3" | "preview" | "qa_doc";
 export type Outputs = Partial<Record<OutputKind, string>>;
 
 const DOWNLOADS: { kind: OutputKind; label: string }[] = [

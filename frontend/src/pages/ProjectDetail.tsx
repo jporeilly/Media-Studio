@@ -185,14 +185,18 @@ export default function ProjectDetailPage() {
     },
   });
 
-  // When a job finishes, pull the freshly-saved project (transcript or video)
-  // and the slides (a render-slides job wrote their images).
+  // When a job ends, pull the freshly-saved project (transcript or video) and
+  // the slides (a render-slides job wrote their images; an AI job wrote notes)
+  // - on an error too: an AI job that stopped early keeps what it had written,
+  // and the editor must show those notes, not the ones from before. The job
+  // stays polled on an error so its message stays visible; a done job is dropped.
   useEffect(() => {
-    if (job.data?.status === "done") {
+    const status = job.data?.status;
+    if (status === "done" || status === "error") {
       qc.invalidateQueries({ queryKey: ["project", id] });
       qc.invalidateQueries({ queryKey: slidesQueryKey(id) });
-      setJobId(null);
     }
+    if (status === "done") setJobId(null);
   }, [job.data?.status, id, qc]);
 
   const save = useMutation({
@@ -235,7 +239,10 @@ export default function ProjectDetailPage() {
   const transitionOptions = studioOptions?.slide_transition?.options ?? [];
   const positionOptions = studioOptions?.watermark_position?.options ?? [];
   const problems = options ? optionProblems(options, studioOptions) : [];
-  const canSend = !!provider && !!options && problems.length === 0 && !generate.isPending;
+  // One job per project at a time: the server refuses a generate while any job holds the project (a render
+  // over a running AI job would save its own copy of the notes over the AI's), so the buttons wait too.
+  const canSend = !!provider && !!options && problems.length === 0 && !generate.isPending && !jobActive;
+  const otherJobNotice = jobActive && activeKind ? `A job is running for this project (${activeKind}) — it must finish first.` : null;
   const updateOptions = (patch: Partial<GenerateOptions>) => options && setOptions({ ...options, ...patch });
   const outputLinks = downloadLinks(p.outputs);
   // A re-render keeps the file names, so the players are cache-busted by the render time.
@@ -299,6 +306,8 @@ export default function ProjectDetailPage() {
           job={job.data}
           jobActive={jobActive}
           onJobStarted={setJobId}
+          onVoiceSuggested={setVoiceId}
+          qaDoc={p.outputs?.qa_doc}
         />
       )}
 
@@ -344,6 +353,7 @@ export default function ProjectDetailPage() {
                 </Button>
               </div>
 
+              {otherJobNotice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{otherJobNotice}</div>}
               {voices.data?.notice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{voices.data.notice}</div>}
               {presetHint && <div style={{ color: "var(--muted)", fontSize: 13 }}>{presetHint}</div>}
 
@@ -535,7 +545,10 @@ export default function ProjectDetailPage() {
           ) : (
             <div style={{ display: "grid", gap: 12, justifyItems: "start" }}>
               <div style={{ color: "var(--muted)" }}>No transcript yet. Transcribe the audio to get an editable transcript.</div>
-              <Button variant="primary" icon={<Wand2 size={16} />} onClick={() => transcribe.mutate()}>Transcribe audio</Button>
+              {otherJobNotice && <div className="os-muted os-small">{otherJobNotice}</div>}
+              <Button variant="primary" icon={<Wand2 size={16} />} disabled={transcribe.isPending || jobActive} onClick={() => transcribe.mutate()}>
+                Transcribe audio
+              </Button>
             </div>
           )}
         </Card>
@@ -574,13 +587,14 @@ export default function ProjectDetailPage() {
                 <Button
                   variant="primary"
                   icon={<Mic size={16} />}
-                  disabled={!provider || revoice.isPending}
+                  disabled={!provider || revoice.isPending || jobActive}
                   onClick={() => revoice.mutate()}
                 >
                   {p.revoiced_video ? "Re-voice again" : "Re-voice"}
                 </Button>
               </div>
 
+              {otherJobNotice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{otherJobNotice}</div>}
               {voices.data?.notice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{voices.data.notice}</div>}
 
               {p.revoiced_video && (

@@ -8,12 +8,16 @@ Kokoro narration, faster-whisper transcription, moviepy/ffmpeg assembly, Ollama-
 notes/QA/translation — behind a modern SPA that shares the **OpenSight** design system so
 the whole app suite looks and feels the same.
 
-> **Status: in progress — the first slices are shipped.** Projects (import decks, PDFs and
-> videos), video transcription with an editable transcript, narrated-video generation with
-> Vimeo output presets, re-voicing in a new voice or a translated language, self-update from
-> Git, and a Windows desktop installer are in (see [CHANGELOG.md](CHANGELOG.md)). The
-> remaining NiceGUI screens are still being ported; until parity, the NiceGUI app at
-> `C:\Projects\slidestudio_enterprise` remains the shipping product.
+> **Status: in progress — most of the studio is ported.** Projects (import decks, PDFs and
+> videos), a slide editor (thumbnails, speaker notes with undo, per-slide voice and pause,
+> export of the edited notes back to PPTX), narrated-video generation with transitions,
+> intro/outro cards, watermark, subtitles, extra formats and Vimeo output presets, video
+> transcription with an editable transcript, re-voicing in a new voice or a translated
+> language, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
+> configurable password policy, self-update from Git, and a Windows desktop installer are in
+> (see [CHANGELOG.md](CHANGELOG.md)). Still being ported: the AI assistant (notes, QA, tone,
+> translation), the music library and the administration screens; until parity, the NiceGUI
+> app at `C:\Projects\slidestudio_enterprise` remains the shipping product.
 
 ## Stack
 

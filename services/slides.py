@@ -122,6 +122,18 @@ def _record(pid: str) -> dict:
     return record
 
 
+def project_record(pid: str) -> dict:
+    """The outer record of a deck or PDF project, for the layers built on this
+    one (the AI assistant): ``ProjectNotFound`` / ``ValueError`` as ``_record``."""
+    return _record(pid)
+
+
+def source_path(pid: str) -> Path:
+    """The project's source file (the deck or the PDF)."""
+    record = _record(pid)
+    return _source(pid, record)
+
+
 def _source(pid: str, record: dict) -> Path:
     return store.PROJECTS_DIR / pid / record["source_filename"]
 
@@ -275,16 +287,19 @@ def list_slides(pid: str) -> list[dict]:
 
 def slides_payload(pid: str) -> dict:
     """What ``GET /slides`` answers: the slides plus where the images came from
-    (``powerpoint`` / ``pillow`` / ``pdf``, None = unknown) and whether every
-    slide has one."""
+    (``powerpoint`` / ``pillow`` / ``pdf``, None = unknown), whether every
+    slide has one, and the last QA review (``services.ai_slides``; None until
+    one has run)."""
     with project_lock(pid):
         record, pm = _open(pid)
         source = record.get("images_source")
+        review = record.get("qa_review")
         return {
             "slides": _serialise(pid, record, pm),
             "images_source": source if source in IMAGE_SOURCES else None,
             "images_rendered_at": record.get("images_rendered_at"),
             "slides_ready": _images_ready(record, pm),
+            "qa_review": review if isinstance(review, dict) else None,
         }
 
 
@@ -292,6 +307,22 @@ def images_ready(pid: str) -> bool:
     with project_lock(pid):
         record, pm = _open(pid)
         return _images_ready(record, pm)
+
+
+def slide_context(pid: str) -> list[dict]:
+    """Server-side only (the AI prompts): every slide as ``list_slides`` gives
+    it plus ``image``, the rendered file's path when it exists under the
+    project (None otherwise) - one open of the inner project for the whole
+    deck. The paths never leave the server."""
+    with project_lock(pid):
+        record, pm = _open(pid)
+        base = (store.PROJECTS_DIR / pid).resolve()
+        out = []
+        for item in _serialise(pid, record, pm):
+            path = _image_file(record, pm, item["index"]).resolve()
+            item["image"] = path if base in path.parents and path.is_file() else None
+            out.append(item)
+        return out
 
 
 # -- editing ----------------------------------------------------------------
@@ -353,12 +384,14 @@ def _text_or_none(value, what: str, limit: int = 2000):
 def update_slide(
     pid: str, index: int, *,
     speaker_notes=_UNSET, voice_override=_UNSET, pause_override=_UNSET, alt_text=_UNSET,
-    provider: str | None = None,
+    ai_enhanced=_UNSET, provider: str | None = None,
 ) -> dict:
     """Change one slide. A keyword left out is left alone; ``None`` clears an
     override (voice, pause, alt text) - notes are text only. Notes go through
-    ``update_slide_notes`` (undo history, ``needs_regeneration``). Raises
-    ``ValueError`` for a bad index or value; nothing is written then."""
+    ``update_slide_notes`` (undo history, ``needs_regeneration``).
+    ``ai_enhanced`` (a bool) is the "an AI wrote this text" flag the AI
+    assistant sets beside the notes it writes. Raises ``ValueError`` for a bad
+    index or value; nothing is written then."""
     with project_lock(pid):
         record, pm = _open(pid)
         slide = _slide(pm, index)
@@ -367,17 +400,31 @@ def update_slide(
         voice = _voice(voice_override, provider) if voice_override is not _UNSET else _UNSET
         pause = _pause(pause_override) if pause_override is not _UNSET else _UNSET
         alt = _text_or_none(alt_text, "The alt text") if alt_text is not _UNSET else _UNSET
+        if ai_enhanced is not _UNSET and not isinstance(ai_enhanced, bool):
+            raise ValueError("ai_enhanced must be true or false.")
 
+        # The flag is set before the other writes, which save the file anyway;
+        # it gets a write of its own only when nothing else saved.
+        flag_changed = ai_enhanced is not _UNSET and slide.ai_enhanced != ai_enhanced
+        if flag_changed:
+            slide.ai_enhanced = ai_enhanced
+        saved = False
         if notes is not _UNSET:
-            pm.update_slide_notes(index, notes)
+            saved = slide.speaker_notes != notes
+            pm.update_slide_notes(index, notes)  # saves only when the text changed
         if pause is not _UNSET:
             pm.update_slide_pause(index, pause)
+            saved = True
         if voice is not _UNSET and slide.voice_override != voice:
             slide.voice_override = voice
             slide.needs_regeneration = True
             pm.save()
+            saved = True
         if alt is not _UNSET and slide.alt_text != alt:
             slide.alt_text = alt
+            pm.save()
+            saved = True
+        if flag_changed and not saved:
             pm.save()
         return _serialise(pid, record, pm)[index]
 
@@ -394,13 +441,19 @@ def undo_slide(pid: str, index: int) -> dict | None:
 
 def reset_slide(pid: str, index: int) -> dict:
     """Back to the deck's own notes ("" for a PDF); the current text goes onto
-    the undo history like any edit."""
+    the undo history like any edit. The deck's text is nobody's AI rewrite,
+    so the ``ai_enhanced`` flag comes off with it."""
     with project_lock(pid):
         record, pm = _open(pid)
-        _slide(pm, index)
+        slide = _slide(pm, index)
         info = _deck_info(pid, record)
         original = info[index].speaker_notes if index < len(info) else ""
-        pm.update_slide_notes(index, original)
+        flagged = slide.ai_enhanced
+        slide.ai_enhanced = False
+        changed = slide.speaker_notes != original
+        pm.update_slide_notes(index, original)  # saves only when the text changed
+        if flagged and not changed:
+            pm.save()
         return _serialise(pid, record, pm)[index]
 
 
@@ -437,19 +490,24 @@ def record_images_source(pid: str, source: str) -> None:
     store.save_project(current)
 
 
-def ensure_images(pid: str, progress=None) -> dict:
+def ensure_images(pid: str, progress=None, force: bool = False) -> dict:
     """Render every slide's image: a deck through ``PPTXExporter`` (PowerPoint,
     else the title-only Pillow fallback) behind ``SLIDE_EXPORT_LOCK``, a PDF
     through its page renderer. Idempotent: ``{"cached": True}`` when every
     image is already there - checked again once the export lock is held, in
-    case another export of the same deck just finished. Records
-    ``images_source`` and ``images_rendered_at``. Meant to run in a job."""
+    case another export of the same deck just finished - unless ``force``
+    asks for a fresh export (previews rendered before ``images_source``
+    existed have no recorded source, and vision will not use them until one
+    is). Records ``images_source`` and ``images_rendered_at``. Meant to run
+    in a job."""
 
     def report(fraction: float, message: str) -> None:
         if progress:
             progress(fraction, message)
 
     def cached_or_none():
+        if force:
+            return None
         record, pm = _open(pid)
         if _images_ready(record, pm):
             return {"cached": True, "images_source": record.get("images_source")}

@@ -344,6 +344,30 @@ p { margin: 0 0 8px; }
   .os-slide-thumb { width: 132px; }
 }
 
+/* ── The AI assistant on the slides card: the status line, its toolbar, the result line, the QA rows ──── */
+.os-ai-bar { display: grid; gap: 8px; margin-bottom: 14px; }
+.os-ai-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+.os-ai-status.bad { color: #fca5a5; }
+.os-ai-status.warn { color: var(--warn); }
+.os-ai-status.ok { color: var(--good); }
+[data-theme="light"] .os-ai-status.bad { color: #b91c1c; }
+.os-ai-tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.os-ai-sep { width: 1px; height: 22px; background: var(--border-strong); margin: 0 4px; }
+.os-ai-result { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); background: var(--surface-2); padding: 8px 10px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--border); }
+.os-ai-result > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.os-qa { display: grid; gap: 6px; }
+.os-qa-row { display: grid; grid-template-columns: 88px minmax(0, 1fr) auto; gap: 10px; align-items: center; font-size: 13px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; }
+.os-qa-label { font-weight: 600; color: var(--warn); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.03em; }
+.os-qa-row.fixed .os-qa-label { color: var(--good); }
+.os-qa-issue { color: var(--text-2); overflow-wrap: anywhere; }
+.os-btn-good { background: color-mix(in srgb, var(--good) 22%, transparent); color: var(--good); }
+.os-btn-good:disabled { opacity: 1; cursor: default; }
+.os-analysis { display: grid; gap: 6px; max-height: 40vh; overflow-y: auto; }
+@media (max-width: 600px) {
+  .os-qa-row { grid-template-columns: 1fr auto; }
+  .os-qa-row .os-qa-issue { grid-column: 1 / -1; }
+}
+
 /* ── Phones. The tablet rules above turn the sidebar into a drawer; here it gets a button and a backdrop, the top bar
    tightens, KPI grids drop to two columns, modals rise from the bottom, and touch targets grow on coarse pointers. ── */
 .os-menu-btn { display: none; }

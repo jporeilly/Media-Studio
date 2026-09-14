@@ -2,8 +2,11 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StringConstraints, field_validator
 
+from core.tone_adapter import get_available_tones
+from core.translator import get_available_languages
+from services.ai_slides import CUSTOM_TONE, MAX_ISSUE_CHARS, QA_CRITERIA
 from services.slides import MAX_NOTES_CHARS, MAX_PAUSE_SECONDS
 
 # A title-card text: stripped, so a whitespace-only value makes no card, and capped.
@@ -184,3 +187,105 @@ class SlidesBulkUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slides: list[SlideNotesIn] = Field(max_length=2000)
+
+
+class RenderRequest(BaseModel):
+    """POST /api/projects/{pid}/slides/render: ``force`` exports the previews
+    again even when every image exists (previews rendered before their source
+    was recorded cannot be used by vision until they are)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    force: bool = False
+
+
+# -- the AI assistant (api/routers/ai.py, services/ai_slides.py) -------------
+
+QaCriterion = Literal[QA_CRITERIA]  # grammar | tone | flow | transitions
+
+
+class AiNotesRequest(BaseModel):
+    """POST /ai/notes and /ai/enhance: which slides (``empty`` = those without
+    notes, the default; ``all``), optionally narrowed to ``slide_indexes``,
+    and whether to show the model the slide images (honoured only when the
+    project's previews are real renders - see /ai/status)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["empty", "all"] = "empty"
+    slide_indexes: list[Annotated[StrictInt, Field(ge=0)]] | None = Field(None, max_length=2000)
+    use_vision: bool = False
+
+
+class AiEnhanceRequest(AiNotesRequest):
+    """POST /ai/enhance: as /ai/notes, but every slide by default (``all``)."""
+
+    scope: Literal["empty", "all"] = "all"
+
+
+class AiToneRequest(BaseModel):
+    """POST /ai/tone: a preset from core.tone_adapter, or Custom with its instruction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tone: str = Field(max_length=40)
+    custom_prompt: str | None = Field(None, max_length=2000)
+
+    @field_validator("tone")
+    @classmethod
+    def _known_tone(cls, value: str) -> str:
+        names = list(get_available_tones()) + [CUSTOM_TONE]
+        if value not in names:
+            raise ValueError(f"Unknown tone '{value}'. Choose one of: {', '.join(names)}.")
+        return value
+
+
+class AiTranslateRequest(BaseModel):
+    """POST /ai/translate: a display name from /api/languages; ``match_voice``
+    asks for a voice of ``provider`` (edge_tts | kokoro; null = the configured
+    one) in that language in the job's result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    language: str = Field(max_length=40)
+    match_voice: bool = True
+    provider: str | None = None
+
+    @field_validator("language")
+    @classmethod
+    def _known_language(cls, value: str) -> str:
+        names = list(get_available_languages())
+        if value not in names:
+            raise ValueError(f"Unknown language '{value}'. Choose one of: {', '.join(names)}.")
+        return value
+
+
+class AiPacingRequest(BaseModel):
+    """POST /ai/pacing: the rules alone (instant, no job) or the model per slide (a job)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    use_ai: bool = False
+
+
+class AiQaDocRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    num_questions: StrictInt = Field(10, ge=1, le=50)
+
+
+class AiEnhanceOneRequest(BaseModel):
+    """POST /slides/{i}/ai/enhance: ``notes`` is the editor's current text
+    (an unsaved draft included); null = the saved notes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    use_vision: bool = False
+    notes: str | None = Field(None, max_length=MAX_NOTES_CHARS)
+
+
+class AiQaFixRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    criterion: QaCriterion
+    issue: str = Field(max_length=MAX_ISSUE_CHARS)

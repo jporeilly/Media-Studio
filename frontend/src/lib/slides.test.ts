@@ -15,6 +15,7 @@ import {
   isEdited,
   isSlidesPayload,
   needsCollapse,
+  needsRenderAgain,
   parsePause,
   pauseText,
   renderHint,
@@ -92,8 +93,11 @@ describe("labels", () => {
     expect(imagesNotice("pillow", false)).toBeNull();
     expect(imagesNotice("powerpoint", true)).toBeNull();
     expect(imagesNotice("pdf", true)).toBeNull();
-    expect(imagesNotice(null, true)).toBeNull();
+    expect(imagesNotice(null, true)).toContain("Render again");
     expect(imagesNotice(null, false)).toBeNull();
+    expect(needsRenderAgain(null, true)).toBe(true);
+    expect(needsRenderAgain(null, false)).toBe(false);
+    expect(needsRenderAgain("powerpoint", true)).toBe(false);
   });
   it("names PowerPoint only for a deck's render hint", () => {
     expect(renderHint("deck")).toContain("PowerPoint");

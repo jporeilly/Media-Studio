@@ -41,3 +41,42 @@ def test_job_captures_error_as_status():
 
 def test_get_unknown_job_is_none():
     assert jobs.get("does-not-exist") is None
+
+
+def test_final_message_is_the_summary_reported_at_one_else_complete():
+    job = _wait(jobs.submit("test", lambda progress: progress(0.5, "halfway")))
+    assert job["message"] == "Complete"
+
+    def summing(progress):
+        progress(0.5, "halfway")
+        progress(1.0, "Enhance: 3 of 3 slides")
+        return {"done": 3}
+
+    assert _wait(jobs.submit("test", summing))["message"] == "Enhance: 3 of 3 slides"
+
+
+def test_cancel_raises_the_flag_the_work_can_read_and_marks_the_result():
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    seen = {}
+
+    def work(progress):
+        seen["id"] = jobs.current_job_id()
+        seen["before"] = jobs.cancel_requested_here()
+        started.set()
+        release.wait(5)
+        seen["after"] = jobs.cancel_requested_here()
+        return {"cancelled": seen["after"], "done": 1}
+
+    job_id = jobs.submit("test", work)
+    assert started.wait(5)
+    assert jobs.cancel(job_id)["cancel_requested"] is True
+    release.set()
+    job = _wait(job_id)
+    assert seen == {"id": job_id, "before": False, "after": True}
+    assert job["status"] == "done" and job["message"] == "Cancelled" and job["result"]["cancelled"] is True
+    assert job["cancel_requested"] is True
+    assert jobs.cancel(job_id)["status"] == "done", "a finished job is returned as it is"
+    assert jobs.cancel("does-not-exist") is None
+    assert jobs.current_job_id() is None, "the worker thread's job id never leaks into the caller's thread"

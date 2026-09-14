@@ -93,10 +93,10 @@ def transcribe(pid: str, body: TranscribeRequest | None = None, user: dict = Dep
         model = studio_settings.resolve_whisper_model(body.model if body else None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    job_id = jobs.submit(
+    job_id = jobs.start(
         "transcribe",
         lambda progress: transcription.transcribe_project(pid, model or None, progress),
-        project_id=pid,
+        project_id=pid, user_id=user["id"],
     )
     return {"job_id": job_id}
 
@@ -196,13 +196,17 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             return {"preview": outputs["preview"]}
 
         # A full render replaces every sidecar with what it produced (an
-        # earlier preview file is still there and stays listed).
+        # earlier preview file is still there and stays listed, and so does
+        # the Q&A document the AI assistant wrote - it is not a render output).
         current["output_video"] = video_path.name
-        current["outputs"] = {**({"preview": outputs["preview"]} if "preview" in outputs else {}), **processor.outputs}
+        kept = {kind: outputs[kind] for kind in ("preview", "qa_doc") if kind in outputs}
+        current["outputs"] = {**kept, **processor.outputs}
         store.save_project(current)
         return {"video": video_path.name, "outputs": current["outputs"]}
 
-    job_id = jobs.submit("generate", work, project_id=pid)
+    # One job per project: a render over a running AI job would save its own
+    # stale copy of the notes over everything the AI loop wrote (409 meanwhile).
+    job_id = jobs.start("generate", work, project_id=pid, user_id=user["id"])
     return {"job_id": job_id}
 
 
@@ -223,12 +227,12 @@ def revoice_video(pid: str, body: RevoiceRequest, user: dict = Depends(current_u
         raise HTTPException(status_code=400, detail="Transcribe the video first.")
 
     provider, voice_id = _narration(body.provider, body.voice_id)
-    job_id = jobs.submit(
+    job_id = jobs.start(
         "revoice",
         lambda progress: revoice.revoice_project(
             pid, voice_id, body.speed, body.language, progress, provider=provider,
         ),
-        project_id=pid,
+        project_id=pid, user_id=user["id"],
     )
     return {"job_id": job_id}
 

@@ -7,6 +7,10 @@ export interface Job {
   message: string;
   error?: string | null;
   project_id?: string | null;
+  /** What the work returned once the job is done (its shape is the job kind's). */
+  result?: any;
+  /** True once POST /api/jobs/{id}/cancel was called; the ai-* jobs stop between slides. */
+  cancel_requested?: boolean;
 }
 
 /** The progress bar every card shows for the job it owns (the page polls one job at a time). */
