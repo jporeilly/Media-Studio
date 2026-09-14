@@ -13,7 +13,7 @@ Cargo.toml still carries an older number alongside the current one.
 
 | File | Form |
 |------|------|
-| `__init__.py` | `__version__ = "x.y.z"` — **source of truth** (`api.__version__`; reported by `/api/system/health` and the Settings chip) |
+| `__init__.py` | `__version__ = "x.y.z"` — **source of truth** (`api.__version__`; reported by `/api/system/health` and shown in the sidebar footer from that endpoint — the UI never hard-codes it, `tests/test_version.py` checks) |
 | `frontend/package.json` | `"version": "x.y.z"` |
 | `desktop/package.json` | `"version": "x.y.z"` |
 | `desktop/src-tauri/tauri.conf.json` | `"version": "x.y.z"` — the installer's file name and the Add/Remove Programs entry |

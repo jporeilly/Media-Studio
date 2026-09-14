@@ -60,6 +60,18 @@ def test_no_other_app_version_numbers_in_carriers(rel, pattern):
     assert numbers == {VERSION}, f"{rel} carries {sorted(numbers)}, expected only {VERSION}"
 
 
+def test_frontend_source_never_hard_codes_a_version():
+    """The UI shows the version the API reports (Settings › Updates). A literal in
+    the source is a tenth carrier nobody bumps: the sidebar footer once printed
+    0.1.0 inside the 0.2.0 build."""
+    pattern = re.compile(r"""\bVERSION\s*=\s*["']\d+\.\d+\.\d+["']|["']v\d+\.\d+\.\d+["']""")
+    offenders = []
+    for path in (ROOT / "frontend" / "src").rglob("*"):
+        if path.suffix in {".ts", ".tsx"} and pattern.search(path.read_text(encoding="utf-8", errors="replace")):
+            offenders.append(path.relative_to(ROOT).as_posix())
+    assert offenders == [], f"hard-coded version strings in the frontend source: {offenders}"
+
+
 def test_changelog_has_an_unreleased_section_above_the_release():
     text = _read("CHANGELOG.md")
     unreleased = text.find("## [Unreleased]")

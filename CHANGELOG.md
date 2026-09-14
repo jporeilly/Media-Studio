@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+- [fix] **Version shown once, from the API.** The sidebar footer printed a hard-coded version — still `0.1.0` inside the 0.2.0 build — and Settings wore a duplicate chip in its header. The chip is gone; the sidebar now shows the version the API reports, so an in-place update changes it, and `tests/test_version.py` refuses any hard-coded version string in the frontend source — #version-from-api
 
 ## [0.2.0] - 2026-09-14
 

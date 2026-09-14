@@ -46,11 +46,8 @@ export default function SettingsPage() {
   const [pollBack, setPollBack] = useState(false);
   const [restartTimedOut, setRestartTimedOut] = useState(false);
 
-  const health = useQuery({
-    queryKey: ["system-health"],
-    queryFn: () => api.get<Health>("/api/system/health"),
-    staleTime: 30_000,
-  });
+  // The version is shown once, in the sidebar footer (from the API); this page
+  // does not repeat it. Here the installed commit is what matters.
   const update = useQuery({
     queryKey: ["system-update"],
     queryFn: () => api.get<UpdateState>("/api/system/update"),
@@ -116,11 +113,7 @@ export default function SettingsPage() {
 
   return (
     <>
-      <PageHeader
-        title="Settings"
-        subtitle="Studio and account settings."
-        actions={health.data?.version ? <span className="os-chip">v{health.data.version}</span> : null}
-      />
+      <PageHeader title="Settings" subtitle="Studio and account settings." />
 
       <Card title="Updates">
         {restarting && restartTimedOut && back.data?.status !== "ok" ? (

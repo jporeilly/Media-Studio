@@ -1,11 +1,12 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { Clapperboard, FileText, FolderOpen, LayoutDashboard, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
+import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { ACCENTS, useTheme } from "../context/ThemeContext";
 import { Avatar, Select } from "../components/ui";
 
 const BRAND_NAME = "Media Studio";
-const VERSION = "0.1.0";
 
 interface NavItem { to: string; label: string; icon: React.ReactNode }
 
@@ -20,6 +21,11 @@ export function Shell() {
   const { user, logout } = useAuth();
   const { dark, setDark, accent, setAccent } = useTheme();
   const navigate = useNavigate();
+  const version = useQuery({
+    queryKey: ["system-health"],
+    queryFn: () => api.get<{ status: string; version: string }>("/api/system/health"),
+    staleTime: 5 * 60_000,
+  });
 
   return (
     <div className="os-shell">
@@ -41,7 +47,11 @@ export function Shell() {
           </div>
         </div>
         <div className="os-sidebar-foot">
-          <span title={`${BRAND_NAME} version ${VERSION}`}>v{VERSION}</span>
+          {/* From the API, never a literal in the source: an in-place update changes it,
+              and a hard-coded one once printed 0.1.0 inside the 0.2.0 build. */}
+          {version.data?.version && (
+            <span title={`${BRAND_NAME} version ${version.data.version}`}>v{version.data.version}</span>
+          )}
         </div>
       </aside>
 
