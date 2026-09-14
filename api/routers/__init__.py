@@ -3,6 +3,9 @@
 ``API_ROUTERS`` are mounted under ``/api`` in this order.
 """
 
-from api.routers import auth, health, jobs, media, projects, updates
+from api.routers import auth, health, jobs, media, projects, settings, updates, users
 
-API_ROUTERS = [health.router, auth.router, projects.router, jobs.router, media.router, updates.router]
+API_ROUTERS = [
+    health.router, auth.router, users.router, settings.router,
+    projects.router, jobs.router, media.router, updates.router,
+]

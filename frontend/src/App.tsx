@@ -4,6 +4,7 @@ import { useAuth } from "./context/AuthContext";
 import { Shell } from "./layout/Shell";
 import { Spinner } from "./components/ui";
 import LoginPage from "./pages/Login";
+import ChangePasswordPage from "./pages/ChangePassword";
 import DashboardPage from "./pages/Dashboard";
 
 /* Login and the Dashboard ship in the main bundle; the placeholder pages are route-level chunks fetched on first visit. */
@@ -17,6 +18,8 @@ function RequireAuth({ children }: { children: React.ReactElement }) {
   const location = useLocation();
   if (loading) return <div className="os-login"><Spinner label="Loading Media Studio..." /></div>;
   if (!user) return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+  // A new or reset account sets its own password before it sees the studio.
+  if (user.must_change_password) return <ChangePasswordPage />;
   return children;
 }
 

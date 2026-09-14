@@ -4,6 +4,9 @@ import { Download, GitBranch, RefreshCw, RotateCcw } from "lucide-react";
 import { api, errorMessage } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { Button, Card, ErrorBox, PageHeader, Spinner } from "../components/ui";
+import { AccountsCard } from "../components/settings/AccountsCard";
+import { PasswordCard } from "../components/settings/PasswordCard";
+import { PasswordPolicyCard } from "../components/settings/PasswordPolicyCard";
 
 interface UpdateState {
   error: string | null;
@@ -213,6 +216,10 @@ export default function SettingsPage() {
           </div>
         )}
       </Card>
+
+      <PasswordCard />
+      {isAdmin && <AccountsCard />}
+      {isAdmin && <PasswordPolicyCard />}
     </>
   );
 }

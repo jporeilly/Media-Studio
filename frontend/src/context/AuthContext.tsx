@@ -2,10 +2,13 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { api } from "../api/client";
 
 export interface User {
-  id: number;
+  id: string; // shortuuid, not a number
   username: string;
   display_name: string;
   role: string;
+  must_change_password?: number; // 1 = a new or reset account: the app shows the Set-a-new-password gate
+  is_active?: number;
+  last_login?: string | null;
 }
 
 interface AuthState {

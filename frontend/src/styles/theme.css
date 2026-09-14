@@ -153,6 +153,8 @@ p { margin: 0 0 8px; }
 .os-btn-icon { display: inline-flex; }
 .os-icon-btn { background: transparent; border: 0; color: var(--text-2); padding: 6px; border-radius: 8px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; position: relative; }
 .os-icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.os-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.os-icon-btn:disabled:hover { background: transparent; color: var(--text-2); }
 .os-icon-badge { position: absolute; top: 2px; right: 2px; background: #dc2626; color: #fff; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 999px; min-width: 16px; text-align: center; }
 .os-input, .os-select { background: var(--surface-2); color: var(--text); border: 0; border-radius: 8px; padding: 8px 12px; font: inherit; outline: none; min-width: 0; box-shadow: inset 0 0 0 1px var(--border); transition: box-shadow 0.15s; }
 .os-input:focus, .os-select:focus { box-shadow: inset 0 0 0 1px var(--brand), 0 0 0 3px color-mix(in srgb, var(--brand) 25%, transparent); }

@@ -1,11 +1,44 @@
 """Pydantic request/response models for the API layer."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class PasswordPolicyIn(BaseModel):
+    """Settings › Password policy. The bounds mirror ``api/passwords.py``."""
+
+    min_length: int = Field(ge=4, le=64)
+    require_upper: bool = False
+    require_digit: bool = False
+    require_symbol: bool = False
+    forbid_username: bool = True
+    forbid_common: bool = True
 
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class UserIn(BaseModel):
+    username: str
+    password: str
+    display_name: str
+    role: str = "editor"
+
+
+class UserPatch(BaseModel):
+    display_name: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+
+
+class ResetPasswordIn(BaseModel):
+    new_password: str
 
 
 class HealthResponse(BaseModel):

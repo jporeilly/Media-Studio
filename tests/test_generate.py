@@ -68,6 +68,11 @@ def client(tmp_path, monkeypatch):
     from api.app import app
 
     with TestClient(app) as c:
+        # The seeded admin must change its password before the API serves it
+        # anything but the auth routes (api/deps.py); this suite is not about
+        # that gate, so start from an admin that has already done so.
+        seeded = auth_store.authenticate("admin", "admin")
+        auth_store.change_password(seeded["id"], "admin", must_change=False)
         r = c.post("/api/auth/login", json={"username": "admin", "password": "admin"})
         assert r.status_code == 200
         yield c

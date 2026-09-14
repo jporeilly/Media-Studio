@@ -33,10 +33,29 @@ def optional_user(request: Request) -> dict | None:
     return validate_session(_token_from_request(request) or "")
 
 
+# What an account may still call while it must change its password: the auth
+# routes (to change it, see who it is, or leave) and a read of the password
+# policy (the gate page shows the rules beside the field). Everything else is
+# refused until the change is made, so a seeded or admin-issued password can
+# never be used for real work - from the UI or from a script.
+PASSWORD_CHANGE_REQUIRED = "password_change_required"
+_ALLOWED_PREFIXES_WHILE_PENDING = ("/api/auth/",)
+_ALLOWED_GETS_WHILE_PENDING = ("/api/settings/password-policy",)
+
+
+def _allowed_while_password_change_pending(request: Request) -> bool:
+    path = request.url.path
+    if path.startswith(_ALLOWED_PREFIXES_WHILE_PENDING):
+        return True
+    return request.method == "GET" and path in _ALLOWED_GETS_WHILE_PENDING
+
+
 def current_user(request: Request) -> dict:
     user = optional_user(request)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    if user.get("must_change_password") and not _allowed_while_password_change_pending(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PASSWORD_CHANGE_REQUIRED)
     return user
 
 
