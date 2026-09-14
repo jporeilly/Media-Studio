@@ -20,12 +20,19 @@ from moviepy import (
     CompositeVideoClip, TextClip,
 )
 
+from core.tts_provider import OnsetProfile
 from utils.logger import get_logger
 logger = get_logger("VIDEO")
 
 
-def _active_onset_profile():
-    """Return the onset profile for the currently configured TTS provider."""
+def _active_onset_profile() -> OnsetProfile:
+    """The onset profile of the STUDIO'S configured TTS provider.
+
+    A fallback only: a run that knows its own provider passes that provider's
+    profile explicitly (``VideoCreator(onset_profile=...)``), because a job may
+    narrate with a provider other than the studio default, and the default can
+    change while the job runs.
+    """
     from core.tts_provider import get_onset_profile
     from utils.config import config
     return get_onset_profile(config.tts_provider)
@@ -311,12 +318,17 @@ def _build_master_audio(
     voice_start_delay: float,
     transition_pause: float,
     transition_sound_path=None,
+    profile: Optional[OnsetProfile] = None,
 ) -> tuple:
     """Build a single continuous audio track from all slide audio files.
 
     Instead of attaching audio per-clip (which causes clicks at boundaries),
     this concatenates all audio into one seamless pydub track with precise
     silence gaps for voice delay and transitions.
+
+    ``profile`` is the onset profile of the provider that synthesised the
+    clips (trim threshold, cap, opening boost); None falls back to the
+    studio's configured provider.
 
     Returns:
         (master_audio_path, slide_durations) where slide_durations is a list
@@ -325,10 +337,10 @@ def _build_master_audio(
     """
     try:
         from pydub import AudioSegment
-        from pydub.silence import detect_leading_silence
     except ImportError:
         return None, []
 
+    profile = profile or _active_onset_profile()
     delay_ms = int(voice_start_delay * 1000)
     pause_ms = int(transition_pause * 1000)
     delay_silence = AudioSegment.silent(duration=delay_ms) if delay_ms > 0 else AudioSegment.empty()
@@ -360,12 +372,12 @@ def _build_master_audio(
 
         has_any_audio = True
 
-        # Trim TTS silence, then level the opening to match body volume.
-        # Use the active provider's onset profile so quieter providers
-        # (e.g. Kokoro) are not over-trimmed by Edge's fixed -13 dB threshold.
-        _trim_leading_silence(str(audio_path), profile=_active_onset_profile())
+        # Trim TTS silence, then level the opening to match body volume, with
+        # the synthesising provider's onset profile so quieter providers
+        # (e.g. Kokoro) are not over-trimmed by Edge's fixed threshold.
+        _trim_leading_silence(str(audio_path), profile=profile)
         slide_audio = AudioSegment.from_file(str(audio_path))
-        slide_audio = _level_opening(slide_audio, profile=_active_onset_profile())
+        slide_audio = _level_opening(slide_audio, profile=profile)
 
         # Voice start delay: silence before narration
         slide_chunk = delay_silence + slide_audio
@@ -397,15 +409,18 @@ def _build_master_audio(
 def _open_audio_with_retry(
     path: str, retries: int = 4, delay: float = 0.3,
     trim_silence: bool = True,
+    profile: Optional[OnsetProfile] = None,
 ) -> AudioFileClip:
     """Open an AudioFileClip with retries for antivirus file-lock delays.
 
     Args:
         trim_silence: If True, trim leading silence from TTS audio before loading.
                       This prevents the fade-in artifact from TTS engines.
+        profile: The onset profile of the provider that made the clip; None
+                 falls back to the studio's configured provider.
     """
     if trim_silence:
-        path = _trim_leading_silence(path, profile=_active_onset_profile())
+        path = _trim_leading_silence(path, profile=profile or _active_onset_profile())
 
     last_exc: Exception = RuntimeError("Unknown error")
     for attempt in range(retries):
@@ -458,12 +473,18 @@ class VideoCreator:
         outro_text: str = "",
         outro_duration: float = 3.0,
         voice_start_delay: float = 1.0,
+        onset_profile: Optional[OnsetProfile] = None,
     ):
         self.resolution = resolution
         self.video_bitrate = video_bitrate
         self.fps = fps
         self.transition_pause = transition_pause
         self.voice_start_delay = voice_start_delay
+        # The onset profile of the provider that narrated this run's clips.
+        # None = the studio's configured provider at assembly time (legacy
+        # callers); the pipeline passes its own so a Kokoro job on an
+        # Edge-default studio is trimmed and boosted as Kokoro audio.
+        self.onset_profile = onset_profile
         self.transition_sound_path = transition_sound_path
         self.background_music_paths = [p for p in (background_music_paths or []) if p and p.exists()]
         self.music_volume = music_volume
@@ -497,7 +518,7 @@ class VideoCreator:
 
             # If we have audio, use its duration
             if clip_info.audio_path and clip_info.audio_path.exists():
-                audio_clip = _open_audio_with_retry(str(clip_info.audio_path))
+                audio_clip = _open_audio_with_retry(str(clip_info.audio_path), profile=self.onset_profile)
                 duration = audio_clip.duration
 
             # Create visual clip
@@ -921,6 +942,7 @@ class VideoCreator:
                 voice_start_delay=self.voice_start_delay,
                 transition_pause=self.transition_pause,
                 transition_sound_path=self.transition_sound_path,
+                profile=self.onset_profile,
             )
 
             # Step 2: Build visual-only clips with durations from the master track

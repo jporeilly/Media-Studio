@@ -11,13 +11,15 @@ original frames (ffmpeg ``-c:v copy`` + ``apad`` to the video length).
 from services import projects as store
 
 
-def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None) -> dict:
+def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, provider=None) -> dict:
     """Re-voice ``pid``'s narration in ``voice_id`` (optionally translated).
 
     Requires a ``video`` project with a non-empty ``transcript`` (raises
     ``ValueError`` otherwise). When ``language`` names a real target language
     (from :func:`core.translator.get_available_languages`, other than English or
     the source), the narration is translated via the local Ollama model first.
+    ``provider`` (edge_tts | kokoro) is the TTS provider the narration is
+    synthesised with; None means the studio default at the time the job runs.
 
     Reconstructs a one-section ``ProjectState`` from the transcript, runs the
     carried-over ``_revoice_video`` (keeps the frames, swaps the audio), records
@@ -51,15 +53,15 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None) -> d
         # Imported lazily so a re-voice without translation never touches the
         # translator / Ollama config, and startup stays light.
         from core import translator
+        from services.studio_settings import ollama_model
         from utils.config import config
 
         subtag = (translator.get_available_languages().get(language) or "").lower()
         source_lang = (record.get("language") or "").split("-")[0].lower()
         if subtag and subtag != "en" and subtag != source_lang:
             _report(0.05, f"Translating to {language}…")
-            model = config._config.get("ollama_model") or "llama3"
             notes_text = translator.translate_notes(
-                [joined], language, config.ollama_url, model,
+                [joined], language, config.ollama_url, ollama_model(),
             )[0]
 
     # Reconstruct a re-voiceable ProjectState: ONE section spanning the whole
@@ -94,7 +96,7 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None) -> d
     from services import processing
 
     _report(0.1, "Re-voicing…")
-    processor = processing.VideoProcessor(voice_id=voice_id, speed=speed)
+    processor = processing.VideoProcessor(voice_id=voice_id, speed=speed, provider=provider or "")
     ok = processor._revoice_video(pm, source_video, out, progress=progress)
     if not ok or not out.exists():
         raise RuntimeError("Re-voice failed")

@@ -183,6 +183,7 @@ class VideoProcessor:
         similarity_boost: float = 0.75,
         style: float = 0.0,
         video_bitrate: str = "",
+        provider: str = "",
     ):
         self.voice_id = voice_id
         self.resolution = resolution
@@ -193,12 +194,17 @@ class VideoProcessor:
         self.similarity_boost = similarity_boost
         self.style = style
         self.video_bitrate = video_bitrate
+        # The TTS provider this run uses, fixed at construction: a job carries
+        # its own choice (the request's, or the studio default at request time)
+        # rather than reading config.tts_provider mid-run, so an admin changing
+        # the default never alters a job that is already queued or running.
+        self.provider = provider or config.tts_provider
         self.cancel_requested = False
 
     def _create_tts_generator(self):
-        """Create the active TTS generator via the provider factory."""
+        """Create this run's TTS generator via the provider factory."""
         from core.tts_provider import get_tts_provider
-        return get_tts_provider()
+        return get_tts_provider(self.provider)
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -282,7 +288,7 @@ class VideoProcessor:
                     budget -= dur + config.transition_pause
                 slides_needing = [i for i in slides_needing if i in preview_slide_indices]
 
-            logger.info("speed=%s, voice=%s, stab=%s, sim=%s, style=%s", self.speed, self.voice_id, self.stability, self.similarity_boost, self.style)
+            logger.info("provider=%s, speed=%s, voice=%s, stab=%s, sim=%s, style=%s", self.provider, self.speed, self.voice_id, self.stability, self.similarity_boost, self.style)
             is_video_revoice = file_item.path.suffix.lower() in VIDEO_SUFFIXES
             if is_video_revoice and preview_seconds <= 0 and slides_needing:
                 # Re-voice projects synthesise per sentence inside the video
@@ -570,13 +576,13 @@ class VideoProcessor:
                 slide.needs_regeneration = False
                 return slide_idx, None
 
-            # Use per-slide voice override only when it matches the active
+            # Use per-slide voice override only when it matches this run's
             # provider; otherwise fall back to the provider-correct global voice
             # so a stale Edge override under Kokoro (or vice versa) can't fail.
             voice = effective_voice(
                 getattr(slide, 'voice_override', None),
                 self.voice_id,
-                config.tts_provider,
+                self.provider,
             )
 
             audio_path = pm.audio_dir / f"slide_{slide_idx + 1:03d}_audio.mp3"
@@ -642,9 +648,8 @@ class VideoProcessor:
         from pydub import AudioSegment
         from pydub.silence import detect_leading_silence
         from core.tts_provider import get_onset_profile
-        from utils.config import config as _cfg
 
-        _onset_profile = get_onset_profile(_cfg.tts_provider)
+        _onset_profile = get_onset_profile(self.provider)
 
         if progress:
             progress(0.82, f"{file_label}: Calibrating speech rate...")
@@ -718,11 +723,10 @@ class VideoProcessor:
         """
         from core.video_creator import replace_video_audio, trim_leading_silence_segment, _level_opening
         from core.tts_provider import get_onset_profile
-        from utils.config import config as _cfg
         from pydub import AudioSegment
         import subprocess as _sp
 
-        _onset_profile = get_onset_profile(_cfg.tts_provider)
+        _onset_profile = get_onset_profile(self.provider)
 
         tmp_dir = _ensure_temp_dir() / f"revoice_{int(time.time() * 1000)}"
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -885,6 +889,8 @@ class VideoProcessor:
         If preview_seconds > 0, only includes enough slides to fill
         the preview duration.
         """
+        from core.tts_provider import get_onset_profile
+
         tmp_dir = _ensure_temp_dir() / f"build_{int(time.time() * 1000)}"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -976,6 +982,9 @@ class VideoProcessor:
             creator = VideoCreator(
                 resolution=self.resolution,
                 video_bitrate=self.video_bitrate,
+                # This run's provider, not the studio default: the clips were
+                # synthesised by self.provider and must be trimmed as such.
+                onset_profile=get_onset_profile(self.provider),
                 transition_pause=config.transition_pause,
                 transition_sound_path=self.transition_sound_path,
                 background_music_paths=self.background_music_paths,

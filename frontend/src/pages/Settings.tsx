@@ -7,6 +7,7 @@ import { Button, Card, ErrorBox, PageHeader, Spinner } from "../components/ui";
 import { AccountsCard } from "../components/settings/AccountsCard";
 import { PasswordCard } from "../components/settings/PasswordCard";
 import { PasswordPolicyCard } from "../components/settings/PasswordPolicyCard";
+import { StudioCard } from "../components/settings/StudioCard";
 
 interface UpdateState {
   error: string | null;
@@ -210,6 +211,7 @@ export default function SettingsPage() {
         )}
       </Card>
 
+      <StudioCard />
       <PasswordCard />
       {isAdmin && <AccountsCard />}
       {isAdmin && <PasswordPolicyCard />}

@@ -12,6 +12,9 @@ from services import projects as store
 def transcribe_project(pid: str, model_size: str | None, progress) -> dict:
     """Extract audio, transcribe, and persist the transcript on the project.
 
+    ``model_size`` None/"" means the engine's recommended default; the studio's
+    Whisper model (Settings › Studio) is resolved by the transcribe route at
+    request time (``studio_settings.resolve_whisper_model``), not here.
     ``progress(fraction, message)`` is forwarded from the job runner. Returns a
     small summary ``{segments, language, duration}``; the full transcript is
     saved on the project record (fetch it via ``GET /api/projects/{id}``).

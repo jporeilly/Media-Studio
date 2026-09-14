@@ -277,28 +277,22 @@ class KokoroTTSGenerator(TTSProvider):
             for name in _FALLBACK_VOICES
         ]
 
-    def fetch_voices(self) -> List[Voice]:
-        """Return available Kokoro voices (no network required).
+    def model_voices(self) -> List[Voice]:
+        """The voices the Kokoro model on disk actually carries - strict.
 
-        Uses the loaded model's ``get_voices()`` when the model is already
-        present on disk; otherwise falls back to a curated list of common
-        voices. The model is only loaded when ``kokoro_model_present()`` is True,
-        so this never triggers a download.
+        Loads the model (never downloads it: an absent model is an error here,
+        not a trigger) and lets a load failure propagate, so a model that is
+        present but broken is reported rather than papered over with the
+        curated list. Raises ``RuntimeError`` when the model is absent or lists
+        no voices. :meth:`fetch_voices` is the forgiving wrapper.
         """
-        names: List[str] = []
-        if kokoro_model_present():
-            try:
-                model_path, voices_path = ensure_kokoro_model()
-                model = _load_model(model_path, voices_path)
-                raw = model.get_voices()
-                names = sorted(str(n) for n in raw) if raw else []
-            except Exception as e:
-                logger.warning("Falling back to curated Kokoro voice list: %s", e)
-
+        if not kokoro_model_present():
+            raise RuntimeError("Kokoro model not downloaded")
+        model_path, voices_path = ensure_kokoro_model()
+        model = _load_model(model_path, voices_path)
+        names = sorted(str(n) for n in (model.get_voices() or []))
         if not names:
-            self._voices = self.curated_voices()
-            return self._voices
-
+            raise RuntimeError("The Kokoro model lists no voices")
         self._voices = [
             Voice(
                 voice_id=name,
@@ -308,6 +302,24 @@ class KokoroTTSGenerator(TTSProvider):
             )
             for name in names
         ]
+        return self._voices
+
+    def fetch_voices(self) -> List[Voice]:
+        """Return available Kokoro voices (no network required) - never raises.
+
+        Uses the model's own list (:meth:`model_voices`) when the model is
+        already present on disk; otherwise, or when the model will not load,
+        falls back to the curated list of common voices. The model is only
+        loaded when ``kokoro_model_present()`` is True, so this never triggers
+        a download.
+        """
+        if kokoro_model_present():
+            try:
+                return self.model_voices()
+            except Exception as e:
+                logger.warning("Falling back to curated Kokoro voice list: %s", e)
+
+        self._voices = self.curated_voices()
         return self._voices
 
     @property

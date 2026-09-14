@@ -5,6 +5,7 @@ import { ArrowLeft, Download, FileText, Film, Mic, Presentation, Save, Wand2 } f
 import { api, errorMessage } from "../api/client";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { duration, relativeTime } from "../lib/format";
+import { defaultVoiceFor, pickVoice, useStudioSettings, useVoices } from "../lib/studioSettings";
 
 interface Segment {
   start: number;
@@ -34,11 +35,6 @@ interface Job {
   progress: number;
   message: string;
   error?: string | null;
-}
-interface Voice {
-  voice_id: string;
-  name: string;
-  category: string;
 }
 interface Lang {
   name: string;
@@ -82,6 +78,7 @@ export default function ProjectDetailPage() {
   const qc = useQueryClient();
   const [jobId, setJobId] = useState<string | null>(null);
   const [segments, setSegments] = useState<Segment[] | null>(null);
+  const [provider, setProvider] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [speed, setSpeed] = useState(1.0);
   const [presetId, setPresetId] = useState("youtube_1080p");
@@ -101,13 +98,16 @@ export default function ProjectDetailPage() {
     if (project.data?.transcript) setSegments(project.data.transcript);
   }, [project.data?.transcript]);
 
+  // The narration provider starts as the studio default (Settings › Studio);
+  // the voice list then follows whichever provider is selected.
+  const studio = useStudioSettings();
+  const studioSettings = studio.data?.settings;
+  useEffect(() => {
+    if (studioSettings && !provider) setProvider(studioSettings.tts_provider);
+  }, [studioSettings, provider]);
+
   // Voices are needed by both the deck Generate card and the video Re-voice card.
-  const voices = useQuery({
-    queryKey: ["voices"],
-    queryFn: () => api.get<{ voices: Voice[] }>("/api/voices"),
-    enabled: canGenerate || isVideo,
-    staleTime: Infinity,
-  });
+  const voices = useVoices(provider, canGenerate || isVideo);
   const presets = useQuery({
     queryKey: ["output-presets"],
     queryFn: () => api.get<{ presets: Preset[] }>("/api/output-presets"),
@@ -122,14 +122,18 @@ export default function ProjectDetailPage() {
     staleTime: Infinity,
   });
 
-  // Default to the first en-US voice once the list arrives.
+  // Preselect the studio's default voice for the provider once its list arrives
+  // (else the first en-US voice, else the first). An empty list leaves the voice
+  // blank and the server falls back to the studio default itself.
+  const voiceList = voices.data?.provider === provider ? voices.data.voices : undefined;
   useEffect(() => {
-    const list = voices.data?.voices;
-    if (list && list.length && !voiceId) {
-      const enUS = list.find((v) => v.category === "en-US");
-      setVoiceId((enUS ?? list[0]).voice_id);
-    }
-  }, [voices.data, voiceId]);
+    if (voiceList && !voiceId) setVoiceId(pickVoice(voiceList, defaultVoiceFor(studioSettings, provider)));
+  }, [voiceList, voiceId, studioSettings, provider]);
+
+  const changeProvider = (next: string) => {
+    setProvider(next);
+    setVoiceId(""); // re-picked from the new provider's list
+  };
 
   const transcribe = useMutation({
     mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/transcribe`, {}),
@@ -137,12 +141,12 @@ export default function ProjectDetailPage() {
   });
 
   const generate = useMutation({
-    mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/generate`, { voice_id: voiceId, speed, preset: presetId }),
+    mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/generate`, { provider, voice_id: voiceId, speed, preset: presetId }),
     onSuccess: (r) => setJobId(r.job_id),
   });
 
   const revoice = useMutation({
-    mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/revoice`, { voice_id: voiceId, speed, language }),
+    mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/revoice`, { provider, voice_id: voiceId, speed, language }),
     onSuccess: (r) => setJobId(r.job_id),
   });
 
@@ -189,10 +193,42 @@ export default function ProjectDetailPage() {
           ? errorMessage(generate.error)
           : null;
 
-  const voiceOptions = voices.data?.voices ?? [];
+  const providerOptions = studio.data?.options.tts_provider.options ?? [];
+  const voiceOptions = voiceList ?? [];
+  // Why the narration fields are not usable: the studio settings (provider list
+  // and defaults) failed to load, or the selected provider could not list voices.
+  const voicesError = studio.isError
+    ? errorMessage(studio.error)
+    : voices.data?.error ?? (voices.isError ? errorMessage(voices.error) : null);
+  const studioDefaultVoice = defaultVoiceFor(studioSettings, provider);
   const presetOptions = presets.data?.presets ?? [];
   const presetHint = presetOptions.find((x) => x.id === presetId)?.description;
   const languageOptions = languages.data?.languages ?? [];
+
+  // The provider + voice pair, shared by the Generate and Re-voice cards (a
+  // project shows one or the other).
+  const narrationFields = (
+    <>
+      <Field label="Narration provider">
+        <Select value={provider} onChange={(e) => changeProvider(e.target.value)} disabled={providerOptions.length === 0}>
+          {providerOptions.length === 0 && <option value="">Loading…</option>}
+          {providerOptions.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </Select>
+      </Field>
+      <Field label="Voice">
+        <Select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} disabled={voiceOptions.length === 0}>
+          {voiceOptions.length === 0 && (
+            <option value="">{voices.isLoading ? "Loading voices…" : `Studio default${studioDefaultVoice ? ` (${studioDefaultVoice})` : ""}`}</option>
+          )}
+          {voiceOptions.map((v) => (
+            <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+          ))}
+        </Select>
+      </Field>
+    </>
+  );
 
   // Only one job runs at a time; its kind tells which video card owns the
   // progress bar / error, so the transcript editor stays put during a re-voice.
@@ -226,20 +262,14 @@ export default function ProjectDetailPage() {
       {canGenerate && (
         <Card title="Generate video" style={{ marginTop: 16 }}>
           {jobError && <ErrorBox message={jobError} />}
+          {!running && voicesError && <ErrorBox message={voicesError} />}
 
           {running ? (
             <JobProgress job={job.data} />
           ) : (
             <div style={{ display: "grid", gap: 16 }}>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
-                <Field label="Voice">
-                  <Select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} disabled={voiceOptions.length === 0}>
-                    {voiceOptions.length === 0 && <option value="">No voices available</option>}
-                    {voiceOptions.map((v) => (
-                      <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
-                    ))}
-                  </Select>
-                </Field>
+                {narrationFields}
                 <Field label="Speed">
                   <Input
                     type="number"
@@ -261,13 +291,14 @@ export default function ProjectDetailPage() {
                 <Button
                   variant="primary"
                   icon={<Wand2 size={16} />}
-                  disabled={!voiceId || generate.isPending}
+                  disabled={!provider || generate.isPending}
                   onClick={() => generate.mutate()}
                 >
                   {p.output_video ? "Regenerate" : "Generate video"}
                 </Button>
               </div>
 
+              {voices.data?.notice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{voices.data.notice}</div>}
               {presetHint && <div style={{ color: "var(--muted)", fontSize: 13 }}>{presetHint}</div>}
 
               {p.output_video && (
@@ -321,20 +352,14 @@ export default function ProjectDetailPage() {
       {isVideo && segments && segments.length > 0 && (
         <Card title="Re-voice" subtitle="Regenerate the narration in a new voice (and optionally a language), keeping the original video." style={{ marginTop: 16 }}>
           {revoiceError && <ErrorBox message={revoiceError} />}
+          {!revoicing && voicesError && <ErrorBox message={voicesError} />}
 
           {revoicing ? (
             <JobProgress job={job.data} />
           ) : (
             <div style={{ display: "grid", gap: 16 }}>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
-                <Field label="Voice">
-                  <Select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} disabled={voiceOptions.length === 0}>
-                    {voiceOptions.length === 0 && <option value="">No voices available</option>}
-                    {voiceOptions.map((v) => (
-                      <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
-                    ))}
-                  </Select>
-                </Field>
+                {narrationFields}
                 <Field label="Speed">
                   <Input
                     type="number"
@@ -357,12 +382,14 @@ export default function ProjectDetailPage() {
                 <Button
                   variant="primary"
                   icon={<Mic size={16} />}
-                  disabled={!voiceId || revoice.isPending}
+                  disabled={!provider || revoice.isPending}
                   onClick={() => revoice.mutate()}
                 >
                   {p.revoiced_video ? "Re-voice again" : "Re-voice"}
                 </Button>
               </div>
+
+              {voices.data?.notice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{voices.data.notice}</div>}
 
               {p.revoiced_video && (
                 <div style={{ display: "grid", gap: 10 }}>

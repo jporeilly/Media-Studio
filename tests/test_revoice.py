@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from core import translator
 from services import processing
 from services import projects as store
+from utils.config import config
 
 
 class _FakeVideoProcessor:
@@ -29,10 +30,11 @@ class _FakeVideoProcessor:
     last = None
     captured = None
 
-    def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", **kwargs):
+    def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", provider="", **kwargs):
         self.voice_id = voice_id
         self.resolution = resolution
         self.speed = speed
+        self.provider = provider
         _FakeVideoProcessor.last = self
 
     def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
@@ -46,8 +48,11 @@ class _FakeVideoProcessor:
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """A logged-in TestClient with the store and auth DB isolated to tmp."""
+    """A logged-in TestClient with the store, the auth DB and the config
+    (the studio's narration defaults) isolated."""
     monkeypatch.setattr(store, "PROJECTS_DIR", tmp_path / "projects")
+    monkeypatch.setattr(config, "_config", {})
+    monkeypatch.setattr(config, "save", lambda: None)
 
     from api import store as auth_store
 
@@ -106,9 +111,10 @@ def test_revoice_video_with_transcript_runs_and_saves(client, monkeypatch):
     job = _wait_job(client, r.json()["job_id"])
     assert job["status"] == "done", job
 
-    # The voice and speed reached the processor.
+    # The voice and speed reached the processor, on the configured provider.
     assert _FakeVideoProcessor.last.voice_id == "en-US-GuyNeural"
     assert _FakeVideoProcessor.last.speed == 1.1
+    assert _FakeVideoProcessor.last.provider == "edge_tts"
 
     # revoiced_video is persisted, and the store record survived (transcript/kind).
     saved = store.get_project(pid)
@@ -175,6 +181,40 @@ def test_revoice_translates_when_language_given(client, monkeypatch):
 
     saved = store.get_project(pid)
     assert saved["revoiced_language"] == "Spanish"
+
+
+def test_revoice_runs_the_requested_provider_with_its_default_voice(client, monkeypatch):
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.last = None
+    config._config["kokoro_voice"] = "bm_lewis"  # Settings › Studio: the Kokoro default
+    pid = _video_with_transcript()
+
+    r = client.post(f"/api/projects/{pid}/revoice", json={"provider": "kokoro"})
+    assert r.status_code == 200, r.text
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+    assert _FakeVideoProcessor.last.provider == "kokoro"
+    assert _FakeVideoProcessor.last.voice_id == "bm_lewis"
+    assert _FakeVideoProcessor.captured.state.slides[0].voice_id == "bm_lewis"
+
+    r = client.post(f"/api/projects/{pid}/revoice", json={"provider": "kokoro", "voice_id": "en-US-AriaNeural"})
+    assert r.status_code == 400
+    assert "looks like an Edge TTS voice" in r.json()["detail"]
+
+
+def test_revoice_translates_with_the_studio_ollama_model(client, monkeypatch):
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    config._config["ollama_model"] = "gemma3:12b"
+    calls = {}
+
+    def fake_translate_notes(notes, target_language, ollama_url, ollama_model, on_progress=None):
+        calls["model"] = ollama_model
+        return ["Bonjour."]
+
+    monkeypatch.setattr(translator, "translate_notes", fake_translate_notes)
+    pid = _video_with_transcript()
+    r = client.post(f"/api/projects/{pid}/revoice", json={"language": "French"})
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+    assert calls["model"] == "gemma3:12b"
 
 
 def test_revoice_rejects_a_deck(client):

@@ -7,13 +7,23 @@ from fastapi.responses import FileResponse
 
 from api.deps import current_user
 from api.schemas import GenerateRequest, RevoiceRequest, TranscribeRequest, TranscriptUpdate
-from services import jobs, projects as store, revoice, transcription
+from services import jobs, projects as store, revoice, studio_settings, transcription
 from services.output_presets import get_preset
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 # Guard against unbounded in-memory reads (the upload is read fully before save).
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+
+
+def _narration(provider: str | None, voice_id: str | None) -> tuple[str, str]:
+    """The (provider, voice) a narration job runs with, resolved at request time
+    so the job is pinned to what the caller asked for (or the studio defaults
+    as they are now), whatever an admin changes while it queues."""
+    try:
+        return studio_settings.resolve_narration(provider, voice_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("")
@@ -64,10 +74,16 @@ def transcribe(pid: str, body: TranscribeRequest | None = None, user: dict = Dep
         raise HTTPException(status_code=404, detail="Project not found.")
     if record.get("kind") != "video":
         raise HTTPException(status_code=400, detail="Only video projects can be transcribed.")
-    model = body.model if body else None
+    # The request's model, else the studio's, resolved now so the job is pinned
+    # to the setting as it is at request time ("" = the engine's recommended
+    # default, chosen when the job runs).
+    try:
+        model = studio_settings.resolve_whisper_model(body.model if body else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     job_id = jobs.submit(
         "transcribe",
-        lambda progress: transcription.transcribe_project(pid, model, progress),
+        lambda progress: transcription.transcribe_project(pid, model or None, progress),
     )
     return {"job_id": job_id}
 
@@ -95,6 +111,7 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         raise HTTPException(status_code=400, detail="Only deck and PDF projects can generate a video.")
 
     preset = get_preset(body.preset)
+    provider, voice_id = _narration(body.provider, body.voice_id)
 
     def work(progress):
         # Imported lazily so the media engine and its heavy deps load only when a
@@ -113,7 +130,8 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             fi.load()
 
         processor = processing.VideoProcessor(
-            voice_id=body.voice_id,
+            voice_id=voice_id,
+            provider=provider,
             resolution=tuple(preset["resolution"]),
             speed=body.speed,
             video_bitrate=preset["video_bitrate"],
@@ -145,9 +163,12 @@ def revoice_video(pid: str, body: RevoiceRequest, user: dict = Depends(current_u
     if not record.get("transcript"):
         raise HTTPException(status_code=400, detail="Transcribe the video first.")
 
+    provider, voice_id = _narration(body.provider, body.voice_id)
     job_id = jobs.submit(
         "revoice",
-        lambda progress: revoice.revoice_project(pid, body.voice_id, body.speed, body.language, progress),
+        lambda progress: revoice.revoice_project(
+            pid, voice_id, body.speed, body.language, progress, provider=provider,
+        ),
     )
     return {"job_id": job_id}
 
