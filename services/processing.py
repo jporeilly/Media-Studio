@@ -9,6 +9,7 @@ keeps web_app.py focused on presentation.
 
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional, Callable
@@ -24,27 +25,40 @@ from utils.logger import get_logger
 logger = get_logger("PROC")
 from core.pptx_exporter import PPTXExporter
 from core.tts_provider import TTSProvider, effective_voice
-from core.video_creator import VideoCreator, SlideClipInfo
+from core.video_creator import VideoCreator, SlideClipInfo, fps_for_transition
 from core.project_manager import ProjectManager, get_project_dir
 
 
 # Type alias for progress callback: (progress_fraction, status_message)
 ProgressCallback = Callable[[float, str], None]
 
+# The subtitle modes a render accepts: one cue per slide from the notes, a
+# word-level Whisper pass over the rendered MP4, or nothing.
+SUBTITLE_MODES = ("none", "slide", "whisper")
+
+
+def _pinned(value, fallback):
+    """``value`` unless it is None, then ``fallback`` - the config value read
+    ONCE at construction, so a job never reads the shared config mid-run."""
+    return fallback if value is None else value
+
 
 def _ensure_temp_dir() -> Path:
-    """Create and return the assets/temp directory."""
+    """Create and return the assets/temp directory.
+
+    Scratch files live in a per-job directory under it (``_job_scratch``)
+    that the job removes when it is done; nothing ever sweeps the whole
+    directory, because two jobs run at once and one used to wipe the other's
+    build in progress.
+    """
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     return TEMP_DIR
 
 
-def _cleanup_temp_dir():
-    """Remove all files in assets/temp."""
-    if TEMP_DIR.exists():
-        try:
-            shutil.rmtree(TEMP_DIR, ignore_errors=True)
-        except Exception:
-            pass
+def _job_scratch(prefix: str) -> Path:
+    """A fresh, uniquely named scratch directory under assets/temp for one
+    job step; the caller removes it in a ``finally``."""
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=_ensure_temp_dir()))
 
 
 def _normalise_text(text: str) -> str:
@@ -184,6 +198,22 @@ class VideoProcessor:
         style: float = 0.0,
         video_bitrate: str = "",
         provider: str = "",
+        slide_transition: Optional[str] = None,
+        transition_duration: Optional[float] = None,
+        transition_pause: Optional[float] = None,
+        intro_text: Optional[str] = None,
+        intro_subtitle: Optional[str] = None,
+        intro_duration: Optional[float] = None,
+        outro_text: Optional[str] = None,
+        outro_duration: Optional[float] = None,
+        watermark_text: Optional[str] = None,
+        watermark_position: Optional[str] = None,
+        watermark_opacity: Optional[float] = None,
+        subtitles: str = "slide",
+        whisper_model: str = "",
+        export_webm: bool = False,
+        export_gif: bool = False,
+        export_audio_only: bool = False,
     ):
         self.voice_id = voice_id
         self.resolution = resolution
@@ -199,6 +229,36 @@ class VideoProcessor:
         # rather than reading config.tts_provider mid-run, so an admin changing
         # the default never alters a job that is already queued or running.
         self.provider = provider or config.tts_provider
+        # The render options are per job for the same reason (two jobs run at
+        # once and must never share or mutate the config): each is the value
+        # given, else the config value pinned now for callers that pass none.
+        self.slide_transition = _pinned(slide_transition, config.slide_transition)
+        self.transition_duration = float(_pinned(transition_duration, config.transition_duration))
+        self.transition_pause = float(_pinned(transition_pause, config.transition_pause))
+        self.intro_text = _pinned(intro_text, config.intro_text)
+        self.intro_subtitle = _pinned(intro_subtitle, config.intro_subtitle)
+        self.intro_duration = float(_pinned(intro_duration, config.intro_duration))
+        self.outro_text = _pinned(outro_text, config.outro_text)
+        self.outro_duration = float(_pinned(outro_duration, config.outro_duration))
+        # Text only: the image watermark needs a server-side file and has no
+        # upload path in this edition, so it is not forwarded.
+        self.watermark_text = _pinned(watermark_text, config.watermark_text)
+        self.watermark_position = _pinned(watermark_position, config.watermark_position)
+        self.watermark_opacity = float(_pinned(watermark_opacity, config.watermark_opacity))
+        # The seconds of picture before each slide's narration; not a per-job
+        # option yet, pinned here for the same reason as the rest.
+        self.voice_start_delay = float(config.voice_start_delay)
+        if subtitles not in SUBTITLE_MODES:
+            raise ValueError(f"Unknown subtitle mode '{subtitles}'. Choose one of: {', '.join(SUBTITLE_MODES)}.")
+        self.subtitles = subtitles
+        # "" = the engine's recommended default, chosen when the pass runs.
+        self.whisper_model = whisper_model or ""
+        self.export_webm = bool(export_webm)
+        self.export_gif = bool(export_gif)
+        self.export_audio_only = bool(export_audio_only)
+        # The sidecar artifacts of the most recent full render, as
+        # {"srt"|"vtt"|"webm"|"gif"|"mp3": filename} - files beside the MP4.
+        self.outputs: dict = {}
         self.cancel_requested = False
 
     def _create_tts_generator(self):
@@ -226,6 +286,7 @@ class VideoProcessor:
         audio_gen = self._create_tts_generator()
         total = len(files)
         successes = 0
+        self.outputs = {}
 
         # Count total slides across all files for step-level ETA
         total_slides = sum(f.slide_count for f in files)
@@ -285,7 +346,7 @@ class VideoProcessor:
                     if budget <= 0:
                         break
                     preview_slide_indices.add(s.index)
-                    budget -= dur + config.transition_pause
+                    budget -= dur + self.transition_pause
                 slides_needing = [i for i in slides_needing if i in preview_slide_indices]
 
             logger.info("provider=%s, speed=%s, voice=%s, stab=%s, sim=%s, style=%s", self.provider, self.speed, self.voice_id, self.stability, self.similarity_boost, self.style)
@@ -350,8 +411,7 @@ class VideoProcessor:
 
             if ok:
                 if not is_preview:
-                    _generate_srt(pm, output_path)
-                    generate_extra_formats(output_path)
+                    self.outputs = self._sidecar_outputs(pm, output_path, progress, label, idx, total)
                 pm.set_output_video(output_path)
                 successes += 1
                 try:
@@ -368,8 +428,6 @@ class VideoProcessor:
             file_item.project_manager = pm
             file_item.has_project = True
 
-        # Clean up temp files after all processing
-        _cleanup_temp_dir()
         return successes
 
     def prepare_audio(
@@ -461,7 +519,6 @@ class VideoProcessor:
             if progress:
                 progress((idx + 1) / total, f"{label}: Audio ready")
 
-        _cleanup_temp_dir()
         return successes
 
     def rebuild_files(
@@ -509,19 +566,52 @@ class VideoProcessor:
             ok = self._build_video(pm, output_path, progress=progress, file_label=label)
 
             if ok:
-                _generate_srt(pm, output_path)
-                generate_extra_formats(output_path)
+                self.outputs = self._sidecar_outputs(pm, output_path, progress, label, idx, total)
                 pm.set_output_video(output_path)
                 successes += 1
                 if progress:
                     progress((idx + 1) / total, f"{label}: Complete -> {output_path.name}")
 
-        _cleanup_temp_dir()
         return successes
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _sidecar_outputs(
+        self, pm: ProjectManager, output_path: Path,
+        progress: Optional[ProgressCallback], file_label: str,
+        file_idx: int = 0, total_files: int = 1,
+    ) -> dict:
+        """The files written beside a finished MP4 for this job's options -
+        subtitles (per slide, or a Whisper pass over the render) and the extra
+        export formats. Returns ``{kind: filename}`` for every file produced;
+        a failure in any of them is logged and leaves that kind out, the video
+        itself is already done. Not run for previews.
+        """
+        outputs: dict = {}
+        if self.subtitles == "slide":
+            try:
+                srt = _generate_srt(
+                    pm, output_path,
+                    transition_pause=self.transition_pause,
+                    voice_start_delay=self.voice_start_delay,
+                    intro_offset=self.intro_duration if self.intro_text else 0.0,
+                )
+                if srt:
+                    outputs["srt"] = srt.name
+            except Exception as e:
+                logger.error("Per-slide subtitles failed: %s", e)
+        elif self.subtitles == "whisper":
+            def _on_progress(_fraction: float, message: str):
+                if progress:
+                    progress((file_idx + 0.99) / total_files, f"{file_label}: Whisper subtitles - {message}")
+
+            outputs.update(_whisper_subtitles(output_path, self.whisper_model, on_progress=_on_progress))
+        outputs.update(generate_extra_formats(
+            output_path, webm=self.export_webm, gif=self.export_gif, audio_only=self.export_audio_only,
+        ))
+        return outputs
 
     def _get_or_create_project(self, file_item: FileItem) -> ProjectManager:
         """Load an existing project or create a new one."""
@@ -546,7 +636,7 @@ class VideoProcessor:
                 pptx_path=file_item.path,
                 slide_notes=slide_notes,
                 voice_id=self.voice_id,
-                transition_pause=config.transition_pause,
+                transition_pause=self.transition_pause,
                 background_music_path=self.background_music_paths[0] if self.background_music_paths else None,
                 music_volume=config.music_volume,
             )
@@ -728,8 +818,7 @@ class VideoProcessor:
 
         _onset_profile = get_onset_profile(self.provider)
 
-        tmp_dir = _ensure_temp_dir() / f"revoice_{int(time.time() * 1000)}"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_dir = _job_scratch("revoice_")
 
         try:
             # Per-sentence Whisper segments, except where the user edited a
@@ -875,6 +964,8 @@ class VideoProcessor:
         except Exception as e:
             logger.error("Re-voice failed: %s", e)
             return False
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def _build_video(
         self, pm: ProjectManager, output_path: Path,
@@ -891,8 +982,7 @@ class VideoProcessor:
         """
         from core.tts_provider import get_onset_profile
 
-        tmp_dir = _ensure_temp_dir() / f"build_{int(time.time() * 1000)}"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_dir = _job_scratch("build_")
         try:
             clip_infos = []
             preview_budget = preview_seconds if preview_seconds > 0 else float("inf")
@@ -937,19 +1027,25 @@ class VideoProcessor:
 
                 # Deduct this slide's duration from preview budget
                 slide_dur = s.audio_duration if s.audio_duration > 0 else 5.0
-                preview_budget -= slide_dur + config.transition_pause + config.voice_start_delay
+                preview_budget -= slide_dur + self.transition_pause + self.voice_start_delay
             # Calculate total video duration from known slide durations + transitions
             default_dur = 5.0
             video_duration = 0.0
             for s in pm.state.slides:
-                video_duration += (s.audio_duration if s.audio_duration > 0 else default_dur) + config.voice_start_delay
-            # Add transition pauses between slides
+                video_duration += (s.audio_duration if s.audio_duration > 0 else default_dur) + self.voice_start_delay
+            # Add transition pauses between slides, and the title cards
             num_transitions = max(0, len(pm.state.slides) - 1)
-            video_duration += num_transitions * config.transition_pause
-            total_frames = int(video_duration * 2)  # fps=2
+            video_duration += num_transitions * self.transition_pause
+            if self.intro_text:
+                video_duration += self.intro_duration
+            if self.outro_text:
+                video_duration += self.outro_duration
+            # A transition needs real frames to play on; a static deck stays at 2 fps.
+            fps = fps_for_transition(self.slide_transition, self.transition_duration)
+            total_frames = int(video_duration * fps)
 
             logger.info("-- %d slides ready for video --", len(clip_infos))
-            logger.info("Est. video duration: %.1fs  (%d frames at 2fps)", video_duration, total_frames)
+            logger.info("Est. video duration: %.1fs  (%d frames at %dfps)", video_duration, total_frames, fps)
 
             # Assembly progress — show which slide moviepy is processing
             def _on_assembly_progress(slide_num: int, total: int, msg: str):
@@ -979,28 +1075,31 @@ class VideoProcessor:
                 progress(0.85 + 0.14 * frame / total,
                          f"{file_label}: Encoding {pct}%{eta}")
 
+            # This job's own options (pinned at construction), never the
+            # shared config: two jobs render at once.
             creator = VideoCreator(
                 resolution=self.resolution,
                 video_bitrate=self.video_bitrate,
+                fps=fps,
                 # This run's provider, not the studio default: the clips were
                 # synthesised by self.provider and must be trimmed as such.
                 onset_profile=get_onset_profile(self.provider),
-                transition_pause=config.transition_pause,
+                transition_pause=self.transition_pause,
                 transition_sound_path=self.transition_sound_path,
                 background_music_paths=self.background_music_paths,
                 music_volume=config.music_volume,
-                watermark_text=config.watermark_text,
-                watermark_image=Path(config.watermark_image) if config.watermark_image else None,
-                watermark_position=config.watermark_position,
-                watermark_opacity=config.watermark_opacity,
-                slide_transition=config.slide_transition,
-                transition_duration=config.transition_duration,
-                intro_text=config.intro_text,
-                intro_subtitle=config.intro_subtitle,
-                intro_duration=config.intro_duration,
-                outro_text=config.outro_text,
-                outro_duration=config.outro_duration,
-                voice_start_delay=config.voice_start_delay,
+                watermark_text=self.watermark_text,
+                watermark_image=None,
+                watermark_position=self.watermark_position,
+                watermark_opacity=self.watermark_opacity,
+                slide_transition=self.slide_transition,
+                transition_duration=self.transition_duration,
+                intro_text=self.intro_text,
+                intro_subtitle=self.intro_subtitle,
+                intro_duration=self.intro_duration,
+                outro_text=self.outro_text,
+                outro_duration=self.outro_duration,
+                voice_start_delay=self.voice_start_delay,
             )
 
             # Collect slide titles for chapter metadata
@@ -1040,26 +1139,39 @@ def _fmt_eta(seconds: float) -> str:
 # SRT subtitle generation (stateless, so a module-level function)
 # ------------------------------------------------------------------
 
-def _generate_srt(pm: ProjectManager, video_path: Path):
-    """Generate an SRT subtitle file alongside the video.
+def _generate_srt(
+    pm: ProjectManager, video_path: Path, *,
+    transition_pause: float, voice_start_delay: float = 0.0, intro_offset: float = 0.0,
+) -> Optional[Path]:
+    """Generate an SRT subtitle file alongside the video: one cue per slide.
 
-    Walks slides in order, using actual audio durations for timing.
+    Walks slides in order, using actual audio durations for timing, the way
+    the master track is laid out: ``intro_offset`` (the intro card, which has
+    no narration) first, then per narrated slide ``voice_start_delay`` of
+    silence before its audio, with ``transition_pause`` between slides.
     Slides without notes are skipped but still advance the timeline.
+    Returns the SRT path, or None when no slide had notes.
     """
     srt_path = video_path.with_suffix(".srt")
     lines: List[str] = []
-    current_time = 0.0
+    current_time = float(intro_offset)
     sub_index = 1
 
     for slide in pm.state.slides:
         if not slide.speaker_notes.strip():
             current_time += 5.0
-            current_time += config.transition_pause
+            current_time += transition_pause
             continue
 
-        duration = slide.audio_duration if slide.audio_duration > 0 else 5.0
-        start = current_time
-        end = current_time + duration
+        # The master track opens a narrated slide with the voice start delay;
+        # a slide whose narration failed holds its 5 s with no delay.
+        if slide.audio_duration > 0:
+            duration = slide.audio_duration
+            start = current_time + voice_start_delay
+        else:
+            duration = 5.0
+            start = current_time
+        end = start + duration
 
         lines.append(str(sub_index))
         lines.append(f"{_srt_time(start)} --> {_srt_time(end)}")
@@ -1067,10 +1179,45 @@ def _generate_srt(pm: ProjectManager, video_path: Path):
         lines.append("")
         sub_index += 1
 
-        current_time = end + config.transition_pause
+        current_time = end + transition_pause
 
-    if lines:
-        srt_path.write_text("\n".join(lines), encoding="utf-8")
+    if not lines:
+        return None
+    srt_path.write_text("\n".join(lines), encoding="utf-8")
+    return srt_path
+
+
+def _whisper_subtitles(video_path: Path, model: str = "", on_progress=None) -> dict:
+    """Word-level subtitles (SRT + VTT) from a Whisper pass over the rendered
+    MP4 - a second transcription, run after the render. Written as
+    ``<stem>.whisper.srt`` / ``.vtt`` beside the video so they never overwrite
+    the per-slide ``<stem>.srt``. ``model`` "" = the engine's recommended
+    default. Returns ``{"srt": name, "vtt": name}``, or {} on failure (logged).
+    """
+    # Imported here: the Whisper engine is heavy and loads only when used.
+    from core.subtitle_generator import generate_subtitles
+    from core.video_importer import recommended_default_model
+
+    tmp_dir = _job_scratch("subs_")
+    try:
+        result = generate_subtitles(
+            video_path, tmp_dir,
+            model_size=model or recommended_default_model(),
+            on_progress=on_progress,
+        )
+        outputs = {}
+        for kind in ("srt", "vtt"):
+            target = video_path.with_name(f"{video_path.stem}.whisper.{kind}")
+            target.unlink(missing_ok=True)  # an earlier render's
+            shutil.move(str(result[kind]), str(target))
+            outputs[kind] = target.name
+        logger.info("Whisper subtitles: %s, %s", outputs["srt"], outputs["vtt"])
+        return outputs
+    except Exception as e:
+        logger.error("Whisper subtitles failed: %s", e)
+        return {}
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _srt_time(seconds: float) -> str:
@@ -1082,21 +1229,24 @@ def _srt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def generate_extra_formats(video_path: Path):
+def generate_extra_formats(video_path: Path, *, webm: bool = False, gif: bool = False, audio_only: bool = False) -> dict:
     """Generate additional export formats (WebM, GIF, audio MP3) from the MP4.
 
-    Reads config flags to decide which formats to produce. Uses ffmpeg directly.
+    The flags are this job's own (never the shared config). Uses ffmpeg
+    directly. Returns ``{"webm"|"gif"|"mp3": filename}`` for every file
+    produced; a format that fails is logged and left out.
     """
     from utils.config import FFMPEG_PATH
+    outputs: dict = {}
     if not FFMPEG_PATH or not video_path.exists():
-        return
+        return outputs
 
     import subprocess as sp
 
     flags = 0x08000000  # CREATE_NO_WINDOW on Windows
 
     # WebM
-    if config._config.get("export_webm", False):
+    if webm:
         webm_path = video_path.with_suffix(".webm")
         try:
             sp.run(
@@ -1105,12 +1255,13 @@ def generate_extra_formats(video_path: Path):
                 capture_output=True, timeout=600, creationflags=flags,
             )
             if webm_path.exists():
+                outputs["webm"] = webm_path.name
                 logger.info("WebM: %s", webm_path)
         except Exception as e:
             logger.error("WebM failed: %s", e)
 
     # GIF (first 30 seconds, scaled down)
-    if config._config.get("export_gif", False):
+    if gif:
         gif_path = video_path.with_suffix(".gif")
         try:
             sp.run(
@@ -1120,12 +1271,13 @@ def generate_extra_formats(video_path: Path):
                 capture_output=True, timeout=300, creationflags=flags,
             )
             if gif_path.exists():
+                outputs["gif"] = gif_path.name
                 logger.info("GIF: %s", gif_path)
         except Exception as e:
             logger.error("GIF failed: %s", e)
 
     # Audio-only MP3
-    if config._config.get("export_audio_only", False):
+    if audio_only:
         mp3_path = video_path.with_stem(video_path.stem + "_audio").with_suffix(".mp3")
         try:
             sp.run(
@@ -1134,6 +1286,9 @@ def generate_extra_formats(video_path: Path):
                 capture_output=True, timeout=300, creationflags=flags,
             )
             if mp3_path.exists():
+                outputs["mp3"] = mp3_path.name
                 logger.info("Audio MP3: %s", mp3_path)
         except Exception as e:
             logger.error("Audio MP3 failed: %s", e)
+
+    return outputs

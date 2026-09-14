@@ -1,7 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { api, qs } from "../api/client";
 
-/** Settings › Studio (services/studio_settings.py): the narration, transcription and output defaults shared by everyone. */
+/**
+ * Settings › Studio (services/studio_settings.py): the narration, transcription and output defaults shared by
+ * everyone. The transition, pause and watermark values are the defaults a generate job starts from; the
+ * Generate card prefills them and each render may change them (lib/generateOptions.ts).
+ */
 export interface StudioSettings {
   tts_provider: string;
   edge_tts_voice: string;
@@ -12,6 +16,11 @@ export interface StudioSettings {
   output_folder: string;
   transition_pause: number;
   music_volume: number;
+  slide_transition: string;
+  transition_duration: number;
+  watermark_text: string;
+  watermark_position: string;
+  watermark_opacity: number;
 }
 
 /** One selectable value, with the note the form shows as its hint. */
@@ -35,6 +44,10 @@ export interface StudioOptions {
   whisper_model: { options: Option[] };
   transition_pause: Range;
   music_volume: Range;
+  slide_transition: { options: Option[] };
+  transition_duration: Range;
+  watermark_position: { options: Option[] };
+  watermark_opacity: Range;
 }
 
 /** What GET/PUT /api/settings/studio return. */

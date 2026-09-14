@@ -17,12 +17,48 @@ import numpy as np
 from moviepy import (
     ImageClip, AudioFileClip, VideoFileClip,
     concatenate_videoclips, ColorClip, CompositeAudioClip,
-    CompositeVideoClip, TextClip,
+    CompositeVideoClip,
 )
 
+from core.fonts import resolve_font, text_image
 from core.tts_provider import OnsetProfile
 from utils.logger import get_logger
 logger = get_logger("VIDEO")
+
+# A static deck is encoded at 2 fps (every frame is the same slide, so the
+# encode stays fast). A visual transition needs real frames to play on: at 2 fps
+# a 0.5 s fade is a single frame, so a deck with a transition renders at 24 fps.
+STATIC_FPS = 2
+TRANSITION_FPS = 24
+
+
+def fps_for_transition(slide_transition: str, transition_duration: float = 0.5) -> int:
+    """The frame rate a render needs: ``TRANSITION_FPS`` when a transition will
+    actually render (the same gate as ``create_video``), else ``STATIC_FPS``."""
+    if slide_transition and slide_transition != "none" and transition_duration > 0:
+        return TRANSITION_FPS
+    return STATIC_FPS
+
+
+def chapter_spans(durations: List[float], transition_pause: float, intro_offset: float = 0.0) -> List[Tuple[int, int]]:
+    """``(start_ms, end_ms)`` per slide: the slides run back to back with the
+    transition pause between them, all shifted by the intro card's duration
+    (``intro_offset``) when there is one - the card has no chapter of its own.
+    """
+    spans = []
+    current = float(intro_offset)
+    for i, duration in enumerate(durations):
+        spans.append((int(round(current * 1000)), int(round((current + duration) * 1000))))
+        current += duration
+        if i < len(durations) - 1:
+            current += transition_pause
+    return spans
+
+
+def _configured_title_font() -> Optional[str]:
+    """The ``title_font`` config value (a font file path), if any."""
+    from utils.config import config
+    return config._config.get("title_font") or None
 
 
 def _active_onset_profile() -> OnsetProfile:
@@ -319,6 +355,7 @@ def _build_master_audio(
     transition_pause: float,
     transition_sound_path=None,
     profile: Optional[OnsetProfile] = None,
+    intro_offset: float = 0.0,
 ) -> tuple:
     """Build a single continuous audio track from all slide audio files.
 
@@ -329,6 +366,11 @@ def _build_master_audio(
     ``profile`` is the onset profile of the provider that synthesised the
     clips (trim threshold, cap, opening boost); None falls back to the
     studio's configured provider.
+
+    ``intro_offset`` is the duration of the intro title card, when there is
+    one: the card has no narration and sits before the first slide, so the
+    track opens with that much silence - otherwise every slide's narration
+    would play that much early.
 
     Returns:
         (master_audio_path, slide_durations) where slide_durations is a list
@@ -343,6 +385,7 @@ def _build_master_audio(
     profile = profile or _active_onset_profile()
     delay_ms = int(voice_start_delay * 1000)
     pause_ms = int(transition_pause * 1000)
+    intro_ms = int(round(max(0.0, intro_offset) * 1000))
     delay_silence = AudioSegment.silent(duration=delay_ms) if delay_ms > 0 else AudioSegment.empty()
     pause_silence = AudioSegment.silent(duration=pause_ms) if pause_ms > 0 else AudioSegment.empty()
 
@@ -354,7 +397,7 @@ def _build_master_audio(
         except Exception:
             pass
 
-    master = AudioSegment.empty()
+    master = AudioSegment.silent(duration=intro_ms) if intro_ms > 0 else AudioSegment.empty()
     slide_info = []  # (visual_duration_s,) per slide
     has_any_audio = False
 
@@ -455,7 +498,7 @@ class VideoCreator:
         self,
         resolution: Tuple[int, int] = (1920, 1080),
         video_bitrate: str = "",
-        fps: int = 2,
+        fps: int = STATIC_FPS,
         transition_pause: float = 1.0,
         transition_sound_path: Optional[Path] = None,
         background_music_paths: Optional[List[Path]] = None,
@@ -500,6 +543,19 @@ class VideoCreator:
         self.intro_duration = intro_duration
         self.outro_text = outro_text
         self.outro_duration = outro_duration
+        # The intro card has no narration: everything timed against the slides
+        # (master track, chapters, the caller's subtitles) starts this much later.
+        self.intro_offset = float(intro_duration) if intro_text else 0.0
+        # The font FILE the title cards and the text watermark are drawn with,
+        # resolved once per render (moviepy/Pillow refuse a family name such as
+        # "Arial"): the configured title_font, else the host's own. None = no
+        # font file on this host; the text is then drawn with Pillow's built-in
+        # font rather than dropped.
+        self.font = resolve_font(_configured_title_font())
+        if self.font:
+            logger.info("Text font: %s", self.font)
+        else:
+            logger.warning("No font file found on this host - title cards and the watermark use Pillow's built-in font")
         # Cache the transition audio so it's decoded once, not per slide gap
         self._transition_audio: Optional[AudioFileClip] = None
         if transition_sound_path and transition_sound_path.exists():
@@ -666,8 +722,9 @@ class VideoCreator:
                     return canvas
                 return get_frame(t)
 
+            # One transform (with the mask, when there is one): applying it a
+            # second time shifted the frame by twice the offset.
             clip = clip.transform(_slide_in, apply_to="mask" if clip.mask else None)
-            clip = clip.transform(_slide_in)
 
         elif self.slide_transition in ("slide-up", "slide-down"):
             direction = -1 if self.slide_transition == "slide-up" else 1
@@ -693,7 +750,7 @@ class VideoCreator:
                     return canvas
                 return get_frame(t)
 
-            clip = clip.transform(_slide_v)
+            clip = clip.transform(_slide_v, apply_to="mask" if clip.mask else None)
 
         elif self.slide_transition == "zoom-in":
             def _zoom(get_frame, t):
@@ -782,6 +839,16 @@ class VideoCreator:
             logger.error("Error applying background music: %s", e)
             return video
 
+    def _text_clip(self, text: str, font_size: int, color: str, duration: float, max_width: Optional[int] = None):
+        """A transparent clip of ``text`` drawn by Pillow (``core.fonts.text_image``)
+        with the resolved font file, or Pillow's built-in font when this host
+        has none - text is never dropped silently. Wrapped to ``max_width``
+        when given. Not moviepy's TextClip: in moviepy 2.1.2 it allocates an
+        image shorter than the text it draws, so every letter loses its bottom
+        rows and descenders (g, y, p) are cut flat."""
+        image = text_image(text, font_size, color, font=self.font, max_width=max_width)
+        return ImageClip(np.array(image), duration=duration)
+
     def _apply_watermark(self, video):
         """Overlay a text or image watermark on the video."""
         from moviepy import CompositeVideoClip
@@ -789,12 +856,8 @@ class VideoCreator:
         try:
             watermark = None
             if self.watermark_text:
-                watermark = TextClip(
-                    text=self.watermark_text,
-                    font_size=24,
-                    color="white",
-                    font="Arial",
-                    duration=video.duration,
+                watermark = self._text_clip(
+                    self.watermark_text, 24, "white", video.duration,
                 ).with_opacity(self.watermark_opacity)
             elif self.watermark_image and Path(self.watermark_image).exists():
                 watermark = ImageClip(str(self.watermark_image), duration=video.duration)
@@ -817,7 +880,7 @@ class VideoCreator:
             watermark = watermark.with_position(pos)
             return CompositeVideoClip([video, watermark])
         except Exception as e:
-            logger.error("Error applying watermark: %s", e)
+            logger.warning("The watermark could not be drawn (%s); the video has none", e)
             return video
 
     def _create_title_card(self, text: str, subtitle: str = "", duration: float = 3.0):
@@ -825,20 +888,16 @@ class VideoCreator:
         from moviepy import CompositeVideoClip
         bg = ColorClip(size=self.resolution, color=(0, 0, 0), duration=duration).with_fps(self.fps)
         clips = [bg]
+        max_width = self.resolution[0] - 200
         try:
-            title = TextClip(
-                text=text, font_size=48, color="white", font="Arial",
-                duration=duration, method="caption", size=(self.resolution[0] - 200, None),
-            ).with_position(("center", "center" if not subtitle else 0.4), relative=subtitle != "")
+            title = self._text_clip(text, 48, "white", duration, max_width=max_width)
+            title = title.with_position(("center", "center" if not subtitle else 0.4), relative=subtitle != "")
             clips.append(title)
             if subtitle:
-                sub = TextClip(
-                    text=subtitle, font_size=28, color="#cccccc", font="Arial",
-                    duration=duration, method="caption", size=(self.resolution[0] - 200, None),
-                ).with_position(("center", 0.55), relative=True)
-                clips.append(sub)
+                sub = self._text_clip(subtitle, 28, "#cccccc", duration, max_width=max_width)
+                clips.append(sub.with_position(("center", 0.55), relative=True))
         except Exception as e:
-            logger.error("Title card text error: %s", e)
+            logger.warning("The title card text could not be drawn (%s); the card is blank", e)
         return CompositeVideoClip(clips, size=self.resolution).with_duration(duration).with_fps(self.fps)
 
     def _embed_chapters(self, video_path: Path, slide_clips: List[SlideClipInfo], slide_titles: List[str]):
@@ -853,28 +912,30 @@ class VideoCreator:
             return
 
         try:
-            # Calculate chapter timestamps from clip durations
-            chapters = []
-            current_time = 0.0
+            # Each slide's on-screen time: its narration plus the voice start
+            # delay (the master track opens every narrated slide with that
+            # silence), or the default hold for a silent slide.
+            durations = []
+            titles = []
             for i, clip_info in enumerate(slide_clips):
                 title = slide_titles[i] if i < len(slide_titles) else f"Slide {i + 1}"
                 if not title or not title.strip():
                     title = f"Slide {i + 1}"
+                titles.append(title)
 
-                # Get duration from audio or default
                 duration = clip_info.duration or 5.0
                 if clip_info.audio_path and clip_info.audio_path.exists():
                     try:
                         clip = AudioFileClip(str(clip_info.audio_path))
-                        duration = clip.duration
+                        duration = clip.duration + self.voice_start_delay
                         clip.close()
                     except Exception:
                         pass
+                durations.append(duration)
 
-                start_ms = int(current_time * 1000)
-                end_ms = int((current_time + duration) * 1000)
-                chapters.append((start_ms, end_ms, title))
-                current_time += duration + self.transition_pause
+            # Shifted past the intro card, which has no chapter of its own.
+            spans = chapter_spans(durations, self.transition_pause, self.intro_offset)
+            chapters = [(start_ms, end_ms, title) for (start_ms, end_ms), title in zip(spans, titles)]
 
             if not chapters:
                 return
@@ -943,6 +1004,7 @@ class VideoCreator:
                 transition_pause=self.transition_pause,
                 transition_sound_path=self.transition_sound_path,
                 profile=self.onset_profile,
+                intro_offset=self.intro_offset,
             )
 
             # Step 2: Build visual-only clips with durations from the master track
@@ -1019,14 +1081,16 @@ class VideoCreator:
             logger.info("Concatenation done in %.1fs  total_duration=%.1fs",
                        time.time() - t1, final_video.duration)
 
-            # Attach single continuous audio track (avoids per-clip boundary clicks)
+            # Attach single continuous audio track (avoids per-clip boundary clicks).
+            # The track already opens with the intro card's silence (see
+            # _build_master_audio), so it is attached at t=0.
             if master_audio_path and master_audio_path.exists():
                 master_audio_clip = AudioFileClip(str(master_audio_path))
                 # Trim or pad to match video duration
                 if master_audio_clip.duration > final_video.duration:
                     master_audio_clip = master_audio_clip.subclipped(0, final_video.duration)
                 elif master_audio_clip.duration < final_video.duration:
-                    # Pad with silence — intro/outro cards have no audio in master track
+                    # Pad with silence — the outro card has no audio in master track
                     pass  # AudioClip shorter than video is fine, moviepy fills with silence
                 final_video = final_video.with_audio(master_audio_clip)
                 logger.info("Attached master audio track (%.1fs)", master_audio_clip.duration)

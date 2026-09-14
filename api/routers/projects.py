@@ -1,5 +1,6 @@
 """Projects: import decks / PDFs / videos, list them, delete them."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -14,6 +15,17 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 # Guard against unbounded in-memory reads (the upload is read fully before save).
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+
+# The sidecar artifacts a generate job records on the project (``outputs``):
+# kind -> (media type, served as a download or inline).
+OUTPUT_KINDS = {
+    "srt": ("application/x-subrip", "attachment"),
+    "vtt": ("text/vtt", "attachment"),
+    "webm": ("video/webm", "attachment"),
+    "gif": ("image/gif", "attachment"),
+    "mp3": ("audio/mpeg", "attachment"),
+    "preview": ("video/mp4", "inline"),
+}
 
 
 def _narration(provider: str | None, voice_id: str | None) -> tuple[str, str]:
@@ -102,7 +114,10 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     """Render a deck (or PDF) project into a narrated MP4.
 
     Returns a job id to poll at /api/jobs/{id}; when the job is done the video
-    is downloadable at /api/projects/{pid}/video.
+    is downloadable at /api/projects/{pid}/video and its sidecar files
+    (subtitles, extra formats) at /api/projects/{pid}/outputs/{kind}. With
+    ``preview_seconds`` > 0 only the first seconds render, to a separate file
+    served as the ``preview`` kind; the full video is left as it was.
     """
     record = store.get_project(pid)
     if not record:
@@ -112,6 +127,11 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
 
     preset = get_preset(body.preset)
     provider, voice_id = _narration(body.provider, body.voice_id)
+    # The studio defaults are read now, like the narration, so the job is
+    # pinned to them whatever an admin changes while it queues.
+    render = studio_settings.resolve_render_options(body.model_dump())
+    whisper_model = studio_settings.resolve_whisper_model(None) if body.subtitles == "whisper" else ""
+    preview = body.preview_seconds > 0
 
     def work(progress):
         # Imported lazily so the media engine and its heavy deps load only when a
@@ -135,13 +155,45 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             resolution=tuple(preset["resolution"]),
             speed=body.speed,
             video_bitrate=preset["video_bitrate"],
+            intro_text=body.intro_text,
+            intro_subtitle=body.intro_subtitle,
+            intro_duration=body.intro_duration,
+            outro_text=body.outro_text,
+            outro_duration=body.outro_duration,
+            subtitles=body.subtitles,
+            whisper_model=whisper_model,
+            export_webm=body.export_webm,
+            export_gif=body.export_gif,
+            export_audio_only=body.export_audio_only,
+            **render,
         )
-        processor.process_files([fi], output_dir=output_dir, progress=progress)
+        rendered = processor.process_files(
+            [fi], output_dir=output_dir, progress=progress, preview_seconds=body.preview_seconds,
+        )
+        if not rendered:
+            raise RuntimeError("The video could not be rendered; the server log has the reason.")
 
         video_path = get_output_filename(source_path, output_dir)
-        record["output_video"] = video_path.name
-        store.save_project(record)
-        return {"video": video_path.name}
+        # Saved onto the record as it is NOW, not the copy captured at request
+        # time: a preview and a full render of the same project can run at
+        # once, and the copy would overwrite whatever the other job saved.
+        current = store.get_project(pid) or record
+        outputs = dict(current.get("outputs") or {})
+        # Lets the UI cache-bust the players: a re-render keeps the file names.
+        current["rendered_at"] = datetime.now(timezone.utc).isoformat()
+        if preview:
+            # A preview stands beside the full render; neither replaces the other.
+            outputs["preview"] = video_path.with_stem(video_path.stem + "_preview").name
+            current["outputs"] = outputs
+            store.save_project(current)
+            return {"preview": outputs["preview"]}
+
+        # A full render replaces every sidecar with what it produced (an
+        # earlier preview file is still there and stays listed).
+        current["output_video"] = video_path.name
+        current["outputs"] = {**({"preview": outputs["preview"]} if "preview" in outputs else {}), **processor.outputs}
+        store.save_project(current)
+        return {"video": video_path.name, "outputs": current["outputs"]}
 
     job_id = jobs.submit("generate", work)
     return {"job_id": job_id}
@@ -192,6 +244,31 @@ def get_video(pid: str, user: dict = Depends(current_user)):
         raise HTTPException(status_code=404, detail="No generated video for this project.")
 
     return FileResponse(str(video_path), media_type="video/mp4")
+
+
+@router.get("/{pid}/outputs/{kind}")
+def get_output(pid: str, kind: str, user: dict = Depends(current_user)):
+    """Serve one sidecar file of the last generate job: ``srt``, ``vtt``,
+    ``webm``, ``gif`` or ``mp3`` as a download, ``preview`` (the short render)
+    inline. 404 when the project has none of that kind."""
+    record = store.get_project(pid)
+    if not record:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    if kind not in OUTPUT_KINDS:
+        raise HTTPException(status_code=404, detail=f"Unknown output kind '{kind}'.")
+    filename = (record.get("outputs") or {}).get(kind)
+    if not filename:
+        raise HTTPException(status_code=404, detail=f"No {kind} output for this project.")
+
+    # Same guard as get_video: the resolved path must stay under the project dir.
+    base = (store.PROJECTS_DIR / pid).resolve()
+    path = (base / filename).resolve()
+    if base not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No {kind} output for this project.")
+
+    media_type, disposition = OUTPUT_KINDS[kind]
+    return FileResponse(str(path), media_type=media_type, filename=path.name, content_disposition_type=disposition)
 
 
 @router.get("/{pid}/revoiced-video")

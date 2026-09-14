@@ -19,6 +19,13 @@ Each setting maps to ONE config key - the key the engine reads:
 - ``ollama_model``     ``config._config["ollama_model"]`` (``services.revoice``)
 - ``output_folder``    ``config.output_folder``
 - ``transition_pause`` / ``music_volume``  ``config.transition_pause`` / ``config.music_volume``
+- ``slide_transition`` / ``transition_duration``  ``config.slide_transition`` / ``config.transition_duration``
+- ``watermark_text`` / ``watermark_position`` / ``watermark_opacity``  ``config.watermark_*``
+  (the text watermark; the image watermark has no upload path here and is not offered)
+
+The transition, pause and watermark values are the *defaults* of a generate
+job: the Generate card prefills them and every generate request may override
+them per job (``resolve_render_options``).
 
 ``update_settings`` validates every change and raises ``ValueError`` with a
 message the user can read; the API turns that into HTTP 400.
@@ -64,10 +71,44 @@ _WHISPER_GPU_RECOMMENDED = ("distil-large-v3", "large-v3")
 
 TRANSITION_PAUSE_RANGE = {"min": 0.0, "max": 5.0, "step": 0.1, "unit": "seconds"}
 MUSIC_VOLUME_RANGE = {"min": 0.0, "max": 1.0, "step": 0.05}
+TRANSITION_DURATION_RANGE = {"min": 0.1, "max": 2.0, "step": 0.1, "unit": "seconds"}
+WATERMARK_OPACITY_RANGE = {"min": 0.1, "max": 1.0, "step": 0.05}
+
+# The visual transitions core/video_creator.py renders, with the labels the
+# desktop edition's settings tab used. "none" keeps the render at its static
+# frame rate; anything else raises it so the effect has frames to play on.
+TRANSITIONS = {
+    "none": "None",
+    "fade-to-black": "Fade to Black",
+    "fade-to-white": "Fade to White",
+    "crossfade": "Crossfade / Dissolve",
+    "slide-left": "Slide Left",
+    "slide-right": "Slide Right",
+    "slide-up": "Slide Up",
+    "slide-down": "Slide Down",
+    "zoom-in": "Zoom In",
+}
+
+WATERMARK_POSITIONS = {
+    "top-left": "Top Left",
+    "top-right": "Top Right",
+    "bottom-left": "Bottom Left",
+    "bottom-right": "Bottom Right",
+    "center": "Center",
+}
 
 FIELDS = (
     "tts_provider", "edge_tts_voice", "kokoro_voice", "kokoro_lang", "whisper_model",
     "ollama_model", "output_folder", "transition_pause", "music_volume",
+    "slide_transition", "transition_duration",
+    "watermark_text", "watermark_position", "watermark_opacity",
+)
+
+# The settings a generate request may override per job (GenerateRequest sends
+# null for "the studio default").
+RENDER_OPTION_FIELDS = (
+    "slide_transition", "transition_duration", "transition_pause",
+    "watermark_text", "watermark_position", "watermark_opacity",
 )
 
 
@@ -97,6 +138,11 @@ def get_settings() -> dict:
         "output_folder": config.output_folder,
         "transition_pause": float(config.transition_pause),
         "music_volume": float(config.music_volume),
+        "slide_transition": config.slide_transition,
+        "transition_duration": float(config.transition_duration),
+        "watermark_text": config.watermark_text,
+        "watermark_position": config.watermark_position,
+        "watermark_opacity": float(config.watermark_opacity),
     }
 
 
@@ -123,6 +169,14 @@ def describe() -> dict:
         "whisper_model": {"options": whisper},
         "transition_pause": dict(TRANSITION_PAUSE_RANGE),
         "music_volume": dict(MUSIC_VOLUME_RANGE),
+        "slide_transition": {
+            "options": [{"value": key, "label": label} for key, label in TRANSITIONS.items()],
+        },
+        "transition_duration": dict(TRANSITION_DURATION_RANGE),
+        "watermark_position": {
+            "options": [{"value": key, "label": label} for key, label in WATERMARK_POSITIONS.items()],
+        },
+        "watermark_opacity": dict(WATERMARK_OPACITY_RANGE),
     }
 
 
@@ -189,6 +243,21 @@ def resolve_narration(provider: str | None, voice_id: str | None) -> tuple[str, 
         from core.tts_provider import default_voice_for_provider
         return provider_id, default_voice_for_provider(provider_id)
     return provider_id, check_voice_for_provider(voice_id, provider_id)
+
+
+def resolve_render_options(requested: dict) -> dict:
+    """The transition, pause and watermark values a generate job runs with:
+    the request's value where one was given, else the studio default as it is
+    now. One entry per ``RENDER_OPTION_FIELDS``; resolved at request time so
+    the job is pinned to the defaults as they were when it was asked for,
+    whatever an admin changes while it queues. The request's own values are
+    already validated by the API schema (enums and bounds).
+    """
+    defaults = get_settings()
+    return {
+        key: defaults[key] if requested.get(key) is None else requested[key]
+        for key in RENDER_OPTION_FIELDS
+    }
 
 
 # -- write -----------------------------------------------------------------
@@ -289,6 +358,39 @@ def _music_volume(value) -> float:
                    "The music volume must be a number between 0 (silent) and 1 (full).")
 
 
+def _slide_transition(value) -> str:
+    if value not in TRANSITIONS:
+        raise ValueError(
+            f"Unknown slide transition '{value}'. Choose one of: {', '.join(TRANSITIONS)}."
+        )
+    return value
+
+
+def _transition_duration(value) -> float:
+    return _number(value, TRANSITION_DURATION_RANGE,
+                   "The transition duration must be a number of seconds between 0.1 and 2.")
+
+
+def _watermark_text(value) -> str:
+    """Text only ("" = no watermark); the value is stripped."""
+    if not isinstance(value, str):
+        raise ValueError("The watermark text must be text (leave it empty for no watermark).")
+    return value.strip()
+
+
+def _watermark_position(value) -> str:
+    if value not in WATERMARK_POSITIONS:
+        raise ValueError(
+            f"Unknown watermark position '{value}'. Choose one of: {', '.join(WATERMARK_POSITIONS)}."
+        )
+    return value
+
+
+def _watermark_opacity(value) -> float:
+    return _number(value, WATERMARK_OPACITY_RANGE,
+                   "The watermark opacity must be a number between 0.1 (faint) and 1 (solid).")
+
+
 _VALIDATORS = {
     "tts_provider": _provider,
     "edge_tts_voice": _edge_voice,
@@ -299,6 +401,11 @@ _VALIDATORS = {
     "output_folder": _output_folder,
     "transition_pause": _transition_pause,
     "music_volume": _music_volume,
+    "slide_transition": _slide_transition,
+    "transition_duration": _transition_duration,
+    "watermark_text": _watermark_text,
+    "watermark_position": _watermark_position,
+    "watermark_opacity": _watermark_opacity,
 }
 
 

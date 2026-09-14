@@ -11,6 +11,11 @@ const SAVED: StudioSettings = {
   output_folder: "C:\\renders",
   transition_pause: 0,
   music_volume: 0.25,
+  slide_transition: "none",
+  transition_duration: 0.5,
+  watermark_text: "",
+  watermark_position: "bottom-right",
+  watermark_opacity: 0.5,
 };
 
 const VOICES: Voice[] = [

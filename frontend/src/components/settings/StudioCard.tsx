@@ -37,8 +37,10 @@ export function StudioCard() {
   const dirty = Object.keys(changes).length > 0;
   const pauseOk = !!form && !!options && inRange(form.transition_pause, options.transition_pause);
   const volumeOk = !!form && !!options && inRange(form.music_volume, options.music_volume);
+  const durationOk = !!form && !!options && inRange(form.transition_duration, options.transition_duration);
+  const opacityOk = !!form && !!options && inRange(form.watermark_opacity, options.watermark_opacity);
   const textOk = !!form && !!form.ollama_model.trim() && !!form.output_folder.trim();
-  const valid = pauseOk && volumeOk && textOk;
+  const valid = pauseOk && volumeOk && durationOk && opacityOk && textOk;
 
   const save = useMutation({
     mutationFn: (body: Partial<StudioSettings>) => api.put<StudioPayload>("/api/settings/studio", body),
@@ -62,12 +64,14 @@ export function StudioCard() {
   const noteOf = (list: Option[] | undefined, value: string) => list?.find((o) => o.value === value)?.note;
   const pause = options?.transition_pause;
   const volume = options?.music_volume;
+  const duration = options?.transition_duration;
+  const opacity = options?.watermark_opacity;
 
   return (
     <Card title="Studio" subtitle="Narration, transcription and output defaults for everyone.">
       {studio.isLoading && <Spinner label="Loading the studio settings…" />}
       {studio.isError && <ErrorBox message={errorMessage(studio.error)} />}
-      {form && options && pause && volume && (
+      {form && options && pause && volume && duration && opacity && (
         <div style={{ display: "grid", gap: 14 }}>
           <div className="os-form-grid">
             <Field label="Narration provider" hint={noteOf(options.tts_provider.options, form.tts_provider)}>
@@ -130,6 +134,45 @@ export function StudioCard() {
                 aria-invalid={!volumeOk}
               />
             </Field>
+
+            <Field label="Slide transition" hint="The default effect between slides; each render can change it under More options.">
+              <Select value={form.slide_transition} disabled={readOnly} onChange={(e) => update({ slide_transition: e.target.value })}>
+                <Options options={options.slide_transition.options} />
+              </Select>
+            </Field>
+            <Field label="Transition duration" hint={`Seconds the effect lasts (${duration.min} to ${duration.max}).`}>
+              <Input
+                type="number"
+                min={duration.min}
+                max={duration.max}
+                step={duration.step}
+                value={form.transition_duration}
+                disabled={readOnly}
+                onChange={(e) => update({ transition_duration: Number(e.target.value) })}
+                aria-invalid={!durationOk}
+              />
+            </Field>
+
+            <Field label="Watermark text" hint="Brand text drawn over every render; leave it empty for none. Each render can change it.">
+              <Input value={form.watermark_text} disabled={readOnly} placeholder="e.g. Company name" onChange={(e) => update({ watermark_text: e.target.value })} />
+            </Field>
+            <Field label="Watermark position">
+              <Select value={form.watermark_position} disabled={readOnly} onChange={(e) => update({ watermark_position: e.target.value })}>
+                <Options options={options.watermark_position.options} />
+              </Select>
+            </Field>
+            <Field label="Watermark opacity" hint={`${opacity.min} (faint) to ${opacity.max} (solid).`}>
+              <Input
+                type="number"
+                min={opacity.min}
+                max={opacity.max}
+                step={opacity.step}
+                value={form.watermark_opacity}
+                disabled={readOnly}
+                onChange={(e) => update({ watermark_opacity: Number(e.target.value) })}
+                aria-invalid={!opacityOk}
+              />
+            </Field>
           </div>
 
           {edge.data?.error && <ErrorBox message={edge.data.error} />}
@@ -138,6 +181,8 @@ export function StudioCard() {
           {kokoro.data?.notice && <div className="os-muted os-small">{kokoro.data.notice}</div>}
           {!pauseOk && <ErrorBox message={`The transition pause must be between ${pause.min} and ${pause.max} seconds.`} />}
           {!volumeOk && <ErrorBox message={`The music volume must be between ${volume.min} and ${volume.max}.`} />}
+          {!durationOk && <ErrorBox message={`The transition duration must be between ${duration.min} and ${duration.max} seconds.`} />}
+          {!opacityOk && <ErrorBox message={`The watermark opacity must be between ${opacity.min} and ${opacity.max}.`} />}
           {!textOk && <ErrorBox message="The Ollama model and the output folder cannot be empty." />}
           {save.isError && <ErrorBox message={errorMessage(save.error)} />}
           {saved && <div style={{ color: "var(--good)", fontWeight: 500 }}>Settings saved — they apply to the next job.</div>}

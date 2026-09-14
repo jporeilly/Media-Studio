@@ -1,11 +1,24 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, FileText, Film, Mic, Presentation, Save, Wand2 } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Download, Eye, FileText, Film, Mic, Presentation, Save, Wand2 } from "lucide-react";
 import { api, errorMessage } from "../api/client";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { duration, relativeTime } from "../lib/format";
-import { defaultVoiceFor, pickVoice, useStudioSettings, useVoices } from "../lib/studioSettings";
+import {
+  CARD_DURATION,
+  PREVIEW_SECONDS,
+  SUBTITLE_OPTIONS,
+  downloadLinks,
+  generateBody,
+  optionProblems,
+  optionsFromStudio,
+  optionsSummary,
+  type GenerateOptions,
+  type Outputs,
+  type SubtitleMode,
+} from "../lib/generateOptions";
+import { defaultVoiceFor, pickVoice, useStudioSettings, useVoices, type Option } from "../lib/studioSettings";
 
 interface Segment {
   start: number;
@@ -25,6 +38,8 @@ interface Project {
   duration?: number;
   transcribed_device?: string;
   output_video?: string;
+  outputs?: Outputs;
+  rendered_at?: string;
   revoiced_video?: string;
   revoiced_language?: string;
 }
@@ -59,6 +74,23 @@ function Meta({ label, value }: { label: string; value: string }) {
   );
 }
 
+function Options({ options }: { options: Option[] }) {
+  return <>{options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</>;
+}
+
+// One titled group inside the Generate card's "More options" section.
+function OptionGroup({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div>
+        <div style={{ fontWeight: 600, fontSize: 13 }}>{title}</div>
+        {hint && <div className="os-muted os-small">{hint}</div>}
+      </div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>{children}</div>
+    </div>
+  );
+}
+
 // Shared progress bar for the transcribe and generate jobs (both poll the same job).
 function JobProgress({ job }: { job?: Job }) {
   const pct = Math.round((job?.progress || 0) * 100);
@@ -83,6 +115,9 @@ export default function ProjectDetailPage() {
   const [speed, setSpeed] = useState(1.0);
   const [presetId, setPresetId] = useState("youtube_1080p");
   const [language, setLanguage] = useState("");
+  // The per-render options ("More options"), prefilled from the studio settings once they arrive.
+  const [options, setOptions] = useState<GenerateOptions | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   const project = useQuery({
     queryKey: ["project", id],
@@ -105,6 +140,10 @@ export default function ProjectDetailPage() {
   useEffect(() => {
     if (studioSettings && !provider) setProvider(studioSettings.tts_provider);
   }, [studioSettings, provider]);
+  // The transition, pause and watermark start as the studio defaults; the rest as the engine's.
+  useEffect(() => {
+    if (studioSettings && !options) setOptions(optionsFromStudio(studioSettings));
+  }, [studioSettings, options]);
 
   // Voices are needed by both the deck Generate card and the video Re-voice card.
   const voices = useVoices(provider, canGenerate || isVideo);
@@ -140,8 +179,13 @@ export default function ProjectDetailPage() {
     onSuccess: (r) => setJobId(r.job_id),
   });
 
+  // previewSeconds > 0 renders only the opening seconds to a separate preview clip.
   const generate = useMutation({
-    mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/generate`, { provider, voice_id: voiceId, speed, preset: presetId }),
+    mutationFn: (previewSeconds: number) => {
+      if (!options) throw new Error("The studio settings have not loaded yet.");
+      const body = generateBody({ provider, voice_id: voiceId, speed, preset: presetId }, options, previewSeconds);
+      return api.post<{ job_id: string }>(`/api/projects/${id}/generate`, body);
+    },
     onSuccess: (r) => setJobId(r.job_id),
   });
 
@@ -204,6 +248,16 @@ export default function ProjectDetailPage() {
   const presetOptions = presets.data?.presets ?? [];
   const presetHint = presetOptions.find((x) => x.id === presetId)?.description;
   const languageOptions = languages.data?.languages ?? [];
+  // Optional-chained past the option lists too: a backend older than this card answers without them.
+  const studioOptions = studio.data?.options;
+  const transitionOptions = studioOptions?.slide_transition?.options ?? [];
+  const positionOptions = studioOptions?.watermark_position?.options ?? [];
+  const problems = options ? optionProblems(options, studioOptions) : [];
+  const canSend = !!provider && !!options && problems.length === 0 && !generate.isPending;
+  const updateOptions = (patch: Partial<GenerateOptions>) => options && setOptions({ ...options, ...patch });
+  const outputLinks = downloadLinks(p.outputs);
+  // A re-render keeps the file names, so the players are cache-busted by the render time.
+  const mediaVersion = encodeURIComponent(p.rendered_at ?? "");
 
   // The provider + voice pair, shared by the Generate and Re-voice cards (a
   // project shows one or the other).
@@ -288,26 +342,175 @@ export default function ProjectDetailPage() {
                     ))}
                   </Select>
                 </Field>
-                <Button
-                  variant="primary"
-                  icon={<Wand2 size={16} />}
-                  disabled={!provider || generate.isPending}
-                  onClick={() => generate.mutate()}
-                >
+                <Button variant="primary" icon={<Wand2 size={16} />} disabled={!canSend} onClick={() => generate.mutate(0)}>
                   {p.output_video ? "Regenerate" : "Generate video"}
+                </Button>
+                <Button
+                  icon={<Eye size={16} />}
+                  disabled={!canSend}
+                  onClick={() => generate.mutate(PREVIEW_SECONDS)}
+                  title={`Render only the first ${PREVIEW_SECONDS} seconds to check the voice and the options.`}
+                >
+                  Preview {PREVIEW_SECONDS} s
                 </Button>
               </div>
 
               {voices.data?.notice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{voices.data.notice}</div>}
               {presetHint && <div style={{ color: "var(--muted)", fontSize: 13 }}>{presetHint}</div>}
 
+              {options && (
+                <div style={{ display: "grid", gap: 14 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={moreOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                      onClick={() => setMoreOpen(!moreOpen)}
+                      aria-expanded={moreOpen}
+                    >
+                      More options
+                    </Button>
+                    {!moreOpen && <span className="os-muted os-small">{optionsSummary(options, transitionOptions)}</span>}
+                  </div>
+
+                  {moreOpen && (
+                    <div style={{ display: "grid", gap: 18, padding: "4px 0 4px 8px", borderLeft: "2px solid var(--border)" }}>
+                      <OptionGroup title="Transition" hint="The effect between slides. Any effect but None renders at 24 fps, so the encode takes longer.">
+                        <Field label="Effect">
+                          <Select value={options.slide_transition} onChange={(e) => updateOptions({ slide_transition: e.target.value })}>
+                            <Options options={transitionOptions} />
+                          </Select>
+                        </Field>
+                        <Field label="Duration (s)">
+                          <Input
+                            type="number"
+                            min={studioOptions?.transition_duration.min}
+                            max={studioOptions?.transition_duration.max}
+                            step={studioOptions?.transition_duration.step}
+                            value={options.transition_duration}
+                            onChange={(e) => updateOptions({ transition_duration: Number(e.target.value) })}
+                            style={{ width: 100 }}
+                          />
+                        </Field>
+                        <Field label="Pause between slides (s)">
+                          <Input
+                            type="number"
+                            min={studioOptions?.transition_pause.min}
+                            max={studioOptions?.transition_pause.max}
+                            step={studioOptions?.transition_pause.step}
+                            value={options.transition_pause}
+                            onChange={(e) => updateOptions({ transition_pause: Number(e.target.value) })}
+                            style={{ width: 100 }}
+                          />
+                        </Field>
+                      </OptionGroup>
+
+                      <OptionGroup title="Intro card" hint="A title card before the first slide; leave the title empty for none.">
+                        <Field label="Title">
+                          <Input value={options.intro_text} placeholder="Presentation title" onChange={(e) => updateOptions({ intro_text: e.target.value })} style={{ width: 240 }} />
+                        </Field>
+                        <Field label="Subtitle">
+                          <Input value={options.intro_subtitle} placeholder="Author or subtitle" onChange={(e) => updateOptions({ intro_subtitle: e.target.value })} style={{ width: 240 }} />
+                        </Field>
+                        <Field label="Duration (s)">
+                          <Input
+                            type="number"
+                            min={CARD_DURATION.min}
+                            max={CARD_DURATION.max}
+                            step={CARD_DURATION.step}
+                            value={options.intro_duration}
+                            onChange={(e) => updateOptions({ intro_duration: Number(e.target.value) })}
+                            style={{ width: 100 }}
+                          />
+                        </Field>
+                      </OptionGroup>
+
+                      <OptionGroup title="Outro card" hint="A closing card after the last slide; leave the text empty for none.">
+                        <Field label="Closing text">
+                          <Input value={options.outro_text} placeholder="Thank you! Questions?" onChange={(e) => updateOptions({ outro_text: e.target.value })} style={{ width: 240 }} />
+                        </Field>
+                        <Field label="Duration (s)">
+                          <Input
+                            type="number"
+                            min={CARD_DURATION.min}
+                            max={CARD_DURATION.max}
+                            step={CARD_DURATION.step}
+                            value={options.outro_duration}
+                            onChange={(e) => updateOptions({ outro_duration: Number(e.target.value) })}
+                            style={{ width: 100 }}
+                          />
+                        </Field>
+                      </OptionGroup>
+
+                      <OptionGroup title="Watermark" hint="Text drawn over the whole video; leave it empty for none.">
+                        <Field label="Text">
+                          <Input value={options.watermark_text} placeholder="e.g. Company name" onChange={(e) => updateOptions({ watermark_text: e.target.value })} style={{ width: 240 }} />
+                        </Field>
+                        <Field label="Position">
+                          <Select value={options.watermark_position} onChange={(e) => updateOptions({ watermark_position: e.target.value })}>
+                            <Options options={positionOptions} />
+                          </Select>
+                        </Field>
+                        <Field label="Opacity">
+                          <Input
+                            type="number"
+                            min={studioOptions?.watermark_opacity.min}
+                            max={studioOptions?.watermark_opacity.max}
+                            step={studioOptions?.watermark_opacity.step}
+                            value={options.watermark_opacity}
+                            onChange={(e) => updateOptions({ watermark_opacity: Number(e.target.value) })}
+                            style={{ width: 100 }}
+                          />
+                        </Field>
+                      </OptionGroup>
+
+                      <OptionGroup title="Subtitles">
+                        <Field label="Mode" hint={SUBTITLE_OPTIONS.find((o) => o.value === options.subtitles)?.note}>
+                          <Select value={options.subtitles} onChange={(e) => updateOptions({ subtitles: e.target.value as SubtitleMode })}>
+                            <Options options={SUBTITLE_OPTIONS} />
+                          </Select>
+                        </Field>
+                      </OptionGroup>
+
+                      <OptionGroup title="Extra formats" hint="Made from the finished MP4, downloadable beside it.">
+                        <label className="os-checkbox">
+                          <input type="checkbox" checked={options.export_webm} onChange={(e) => updateOptions({ export_webm: e.target.checked })} />
+                          WebM
+                        </label>
+                        <label className="os-checkbox">
+                          <input type="checkbox" checked={options.export_gif} onChange={(e) => updateOptions({ export_gif: e.target.checked })} />
+                          GIF (first 30 s)
+                        </label>
+                        <label className="os-checkbox">
+                          <input type="checkbox" checked={options.export_audio_only} onChange={(e) => updateOptions({ export_audio_only: e.target.checked })} />
+                          Audio-only MP3
+                        </label>
+                      </OptionGroup>
+                    </div>
+                  )}
+                  {problems.map((problem) => <ErrorBox key={problem} message={problem} />)}
+                </div>
+              )}
+
+              {p.outputs?.preview && (
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div className="os-muted os-small">Preview — the first {PREVIEW_SECONDS} seconds</div>
+                  <video controls src={`/api/projects/${id}/outputs/preview?v=${mediaVersion}`} style={{ width: 360, maxWidth: "100%", borderRadius: 8, background: "#000" }} />
+                </div>
+              )}
+
               {p.output_video && (
                 <div style={{ display: "grid", gap: 10 }}>
-                  <video controls src={`/api/projects/${id}/video`} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
-                  <div>
+                  <video controls src={`/api/projects/${id}/video?v=${mediaVersion}`} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/video`} download={`${p.name}.mp4`}>
                       <Download size={15} /> Download video
                     </a>
+                    {outputLinks.map((link) => (
+                      <a key={link.kind} className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/outputs/${link.kind}`} download={link.filename}>
+                        <Download size={15} /> {link.label}
+                      </a>
+                    ))}
                   </div>
                 </div>
               )}

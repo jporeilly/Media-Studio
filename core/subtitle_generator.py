@@ -146,77 +146,88 @@ def generate_subtitles(
     else:
         actual_audio = audio_path
 
-    if not actual_audio.exists():
-        raise FileNotFoundError(f"Audio file not found: {actual_audio}")
+    try:
+        if not actual_audio.exists():
+            raise FileNotFoundError(f"Audio file not found: {actual_audio}")
 
-    # Load whisper model (cached)
-    if on_progress:
-        on_progress(0.05, f"Loading Whisper model ({model_size})...")
-    logger.info(f"Loading Whisper model: {model_size}")
-    model = _get_whisper_model(model_size)
+        # Load whisper model (cached)
+        if on_progress:
+            on_progress(0.05, f"Loading Whisper model ({model_size})...")
+        logger.info(f"Loading Whisper model: {model_size}")
+        model = _get_whisper_model(model_size)
 
-    # Transcribe with word-level timestamps
-    if on_progress:
-        on_progress(0.15, "Transcribing audio...")
-    logger.info("Starting transcription for subtitles...")
+        # Transcribe with word-level timestamps
+        if on_progress:
+            on_progress(0.15, "Transcribing audio...")
+        logger.info("Starting transcription for subtitles...")
 
-    raw_segments, info = model.transcribe(
-        str(actual_audio),
-        language=language,
-        word_timestamps=True,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=500),
-    )
+        raw_segments, info = model.transcribe(
+            str(actual_audio),
+            language=language,
+            word_timestamps=True,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
 
-    detected_lang = info.language
-    duration = info.duration
-    logger.info(f"Language: {detected_lang}, Duration: {duration:.1f}s")
+        detected_lang = info.language
+        duration = info.duration
+        logger.info(f"Language: {detected_lang}, Duration: {duration:.1f}s")
 
-    # Collect all word-level timestamps across segments
-    all_words = []
-    total_processed = 0.0
-    for seg in raw_segments:
-        if seg.words:
-            for w in seg.words:
-                all_words.append({
-                    "word": w.word,
-                    "start": w.start,
-                    "end": w.end,
-                })
+        # Collect all word-level timestamps across segments
+        all_words = []
+        total_processed = 0.0
+        for seg in raw_segments:
+            if seg.words:
+                for w in seg.words:
+                    all_words.append({
+                        "word": w.word,
+                        "start": w.start,
+                        "end": w.end,
+                    })
 
-        total_processed = seg.end
-        if on_progress and duration > 0:
-            pct = 0.15 + 0.70 * (total_processed / duration)
-            on_progress(min(pct, 0.85), f"Transcribing... {total_processed:.0f}s / {duration:.0f}s")
+            total_processed = seg.end
+            if on_progress and duration > 0:
+                pct = 0.15 + 0.70 * (total_processed / duration)
+                on_progress(min(pct, 0.85), f"Transcribing... {total_processed:.0f}s / {duration:.0f}s")
 
-    logger.info(f"Transcription complete: {len(all_words)} words")
+        logger.info(f"Transcription complete: {len(all_words)} words")
 
-    # Split into readable subtitle segments (~10 words each)
-    if on_progress:
-        on_progress(0.88, "Splitting into subtitle segments...")
+        # Split into readable subtitle segments (~10 words each)
+        if on_progress:
+            on_progress(0.88, "Splitting into subtitle segments...")
 
-    subtitle_segments = _split_words_into_segments(all_words, MAX_WORDS_PER_SEGMENT)
-    logger.info(f"Split into {len(subtitle_segments)} subtitle segments")
+        subtitle_segments = _split_words_into_segments(all_words, MAX_WORDS_PER_SEGMENT)
+        logger.info(f"Split into {len(subtitle_segments)} subtitle segments")
 
-    # Write SRT and VTT files
-    if on_progress:
-        on_progress(0.92, "Writing subtitle files...")
+        # Write SRT and VTT files
+        if on_progress:
+            on_progress(0.92, "Writing subtitle files...")
 
-    stem = audio_path.stem
-    srt_path = output_dir / f"{stem}.srt"
-    vtt_path = output_dir / f"{stem}.vtt"
+        stem = audio_path.stem
+        srt_path = output_dir / f"{stem}.srt"
+        vtt_path = output_dir / f"{stem}.vtt"
 
-    _write_srt(subtitle_segments, srt_path)
-    _write_vtt(subtitle_segments, vtt_path)
+        _write_srt(subtitle_segments, srt_path)
+        _write_vtt(subtitle_segments, vtt_path)
 
-    if on_progress:
-        on_progress(1.0, f"Subtitles complete: {len(subtitle_segments)} segments")
+        if on_progress:
+            on_progress(1.0, f"Subtitles complete: {len(subtitle_segments)} segments")
 
-    return {
-        "srt": srt_path,
-        "vtt": vtt_path,
-        "segments": subtitle_segments,
-    }
+        return {
+            "srt": srt_path,
+            "vtt": vtt_path,
+            "segments": subtitle_segments,
+        }
+    finally:
+        # The WAV extracted from a video (and the temp dir made for it) is
+        # scratch: a full-length 16 kHz track per render would otherwise pile
+        # up in the system temp folder.
+        if temp_audio is not None:
+            temp_audio.unlink(missing_ok=True)
+            try:
+                temp_audio.parent.rmdir()
+            except OSError:
+                pass
 
 
 def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path) -> bool:
@@ -234,10 +245,19 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path) -> bool:
     Returns:
         True on success, False on failure.
     """
+    # The resolved ffmpeg (system PATH or the imageio bundle), as every other
+    # ffmpeg call in the engine uses it - a bare "ffmpeg" is not on PATH on a
+    # machine that relies on the bundled one. Read at call time so it can be
+    # pointed elsewhere by tests.
+    from utils.config import FFMPEG_PATH
+
     video_path = Path(video_path)
     srt_path = Path(srt_path)
     output_path = Path(output_path)
 
+    if not FFMPEG_PATH:
+        logger.error("FFmpeg not found - cannot burn subtitles")
+        return False
     if not video_path.exists():
         logger.error(f"Video not found: {video_path}")
         return False
@@ -256,7 +276,7 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path) -> bool:
     )
 
     cmd = [
-        "ffmpeg",
+        FFMPEG_PATH,
         "-i", str(video_path),
         "-vf", subtitle_filter,
         "-c:a", "copy",

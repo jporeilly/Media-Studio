@@ -219,13 +219,21 @@ def extract_audio(video_path: Path, output_path: Optional[Path] = None) -> Path:
     Returns:
         Path to extracted WAV file.
     """
+    # The resolved ffmpeg (system PATH or the imageio bundle), read at call
+    # time: a bare "ffmpeg" is not on PATH on a host that relies on the bundle.
+    from utils.config import FFMPEG_PATH
+    if not FFMPEG_PATH:
+        raise RuntimeError(
+            "FFmpeg is not available - install ffmpeg (or the imageio-ffmpeg package) to extract audio."
+        )
+
     if output_path is None:
         output_path = Path(tempfile.mkdtemp()) / "extracted_audio.wav"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        "ffmpeg", "-i", str(video_path),
+        FFMPEG_PATH, "-i", str(video_path),
         "-vn",                    # no video
         "-acodec", "pcm_s16le",   # 16-bit WAV
         "-ar", "16000",           # 16kHz (Whisper's native sample rate)
@@ -524,7 +532,7 @@ def extract_keyframes(
         "-vsync", "vfr", "-frame_pts", "1",
         "-y", str(output_dir / "frame_%03d.png"),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
     frames = sorted(output_dir.glob("frame_*.png"))
 
@@ -636,7 +644,6 @@ def import_video(
         slide_transcripts = _auto_segment_by_pauses(segments, duration)
 
     # Step 5: Extract keyframes if requested
-    extracted_frames = []
     if extract_frames and frames_output_dir:
         if on_progress:
             on_progress(0.96, "Extracting keyframes...")
@@ -644,7 +651,7 @@ def import_video(
         timestamps = [
             (st.start_time + st.end_time) / 2 for st in slide_transcripts
         ]
-        extracted_frames = extract_keyframes(
+        extract_keyframes(
             video_path, frames_output_dir, timestamps=timestamps,
         )
 

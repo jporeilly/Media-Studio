@@ -117,6 +117,12 @@ DEFAULT_CONFIG = {
     "mcp_enabled": False,
     "slide_transition": "none",
     "transition_duration": 0.5,
+    "watermark_text": "",
+    "watermark_position": "bottom-right",
+    "watermark_opacity": 0.5,
+    # A font FILE (.ttf/.otf path) for the title cards and the text watermark;
+    # "" = the host's Arial / Segoe UI / DejaVu ... (core/fonts.py). No UI.
+    "title_font": "",
     "intro_text": "",
     "intro_subtitle": "",
     "intro_duration": 3.0,
