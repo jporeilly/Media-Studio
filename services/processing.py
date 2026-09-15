@@ -106,9 +106,10 @@ def collect_revoice_segments(slides) -> list:
     segments rather than producing silence. Slides with neither segments nor
     an original window are skipped.
 
-    Every returned segment also carries ``section`` (the slide index) and the
-    section's ``section_start`` / ``section_end`` so the re-voicer can pace
-    sentences within a section and pin only the section start to the picture.
+    Every returned segment keeps its own ``start`` / ``end`` — the moment it was
+    spoken, which is what the re-voicer pins it to — and also carries
+    ``section`` (the slide index) with the section's ``section_start`` /
+    ``section_end``, which bound the last sentence of the section.
     """
     result = []
     for idx, slide in enumerate(slides):
@@ -868,12 +869,19 @@ class VideoProcessor:
             else:
                 logger.info("Free pace mode — no calibration, speed=%.1f", self.speed)
 
-            # Section-paced synthesis. Each section is pinned to where it began
-            # in the original; inside it the sentences run back to back at the
-            # user's speed and any spare time is silence at the end of the
-            # section. A section that would overrun its window is sped up a
-            # little at TTS time (<= +30%) and, if still too long, tempo-
-            # adjusted as a whole so the next section starts on time. In free
+            # Sentence-paced synthesis. Every sentence is pinned to the moment
+            # it was spoken in the original, so the narration keeps step with
+            # the picture the whole way through: the pause that followed a
+            # sentence is that sentence's slack, and assemble_master turns
+            # whatever it does not use back into silence — which is how an
+            # original pause survives instead of being squeezed out. (Pinning
+            # only the first sentence of a section and letting the rest run on
+            # was fine for a deck, where a section is one slide, but a re-voiced
+            # video is a single section: every pause in it was dropped and the
+            # narration drifted further ahead of the picture with each sentence.)
+            # A sentence whose synthesis overruns the moment the next one is due
+            # is sped up a little at TTS time (<= +30%) and, if still too long,
+            # tempo-adjusted so the next sentence still lands on time. In free
             # mode nothing is pinned and nothing is sped up.
             def _tempo(clip, factor: float, name: str):
                 """Speed a clip up by ``factor`` with ffmpeg atempo (pitch kept)."""
@@ -890,22 +898,33 @@ class VideoProcessor:
             total_segments = len(all_segments)
             done = 0
             for sec in sections:
-                sec_dur_s = max(0.0, sec["end"] - sec["start"])
-                sec_dur_ms = int(sec_dur_s * 1000)
-                texts = [s["text"].strip() for s in sec["segments"] if s["text"].strip()]
-                sec_speed = self.speed if is_free else self._per_sentence_speed(
-                    " ".join(texts), sec_dur_s, tts_baseline, self.speed,
-                )
-                clips = []
-                for text in texts:
+                spoken = [s for s in sec["segments"] if (s.get("text") or "").strip()]
+                for i, seg in enumerate(spoken):
                     done += 1
+                    seg_start = float(seg.get("start", sec["start"]))
+                    # The room this sentence has is the time until the next one
+                    # is due, so the pause after it is slack it may borrow from
+                    # before anything is sped up. The last sentence of a section
+                    # runs to the section's end.
+                    next_start = (
+                        float(spoken[i + 1].get("start", sec["end"])) if i + 1 < len(spoken)
+                        else float(sec["end"])
+                    )
+                    window_s = max(0.0, next_start - seg_start)
+                    window_ms = int(window_s * 1000)
+                    text = seg["text"].strip()
+                    speed = self.speed if is_free else self._per_sentence_speed(
+                        text, window_s, tts_baseline, self.speed,
+                    )
                     seg_audio_path = tmp_dir / f"seg_{done:04d}.mp3"
                     try:
                         tts_gen.generate_audio(
                             text=text, voice_id=self.voice_id,
-                            output_path=seg_audio_path, speed=sec_speed,
+                            output_path=seg_audio_path, speed=speed,
                         )
                     except Exception as e:
+                        # This sentence stays silent; the next one is pinned to
+                        # its own moment, so nothing after it shifts.
                         logger.warning("TTS failed for segment %d: %s", done, e)
                         continue
                     if not seg_audio_path.exists():
@@ -920,39 +939,26 @@ class VideoProcessor:
                     # sounds like each sentence fades in).
                     clip = trim_leading_silence_segment(clip, profile=_onset_profile)
                     clip = _level_opening(clip, profile=_onset_profile)
-                    clips.append(clip)
+
+                    if not is_free and window_ms > 0 and len(clip) > window_ms * 1.05:
+                        spoken_ms = len(clip)
+                        factor = spoken_ms / window_ms
+                        if factor <= 2.0:
+                            clip = _tempo(clip, factor, f"seg{done:04d}")
+                            logger.info("Sentence %d: %.1fs of speech for a %.1fs window — tempo x%.2f",
+                                        done, spoken_ms / 1000, window_s, factor)
+                        else:
+                            logger.warning("Sentence %d: %.1fs of speech for a %.1fs window — beyond 2x, "
+                                           "it will run into the next sentence",
+                                           done, spoken_ms / 1000, window_s)
+
+                    # Pinned to its own moment: assemble_master fills the time
+                    # since the previous sentence ended with silence, which is
+                    # how the original pause is reproduced rather than dropped.
+                    aligned_chunks.append((seg_start, next_start, clip))
                     if done % 10 == 0 and progress:
                         pct = 0.8 + 0.15 * (done / max(total_segments, 1))
                         progress(pct, f"{file_label}: Synthesising sentence {done}/{total_segments}")
-
-                if not clips:
-                    if not is_free and sec_dur_ms > 0:
-                        # Nothing to say here: hold the picture's time with silence.
-                        aligned_chunks.append(
-                            (sec["start"], sec["end"], AudioSegment.silent(duration=sec_dur_ms))
-                        )
-                    continue
-
-                if not is_free and sec_dur_ms > 0:
-                    total_ms = sum(len(c) for c in clips)
-                    if total_ms > sec_dur_ms * 1.05:
-                        factor = total_ms / sec_dur_ms
-                        if factor <= 2.0:
-                            clips = [
-                                _tempo(c, factor, f"sec{sec['index']:03d}_{i:02d}")
-                                for i, c in enumerate(clips)
-                            ]
-                            logger.info("Section %s: %.1fs of speech for a %.1fs window — tempo x%.2f",
-                                        sec["index"], total_ms / 1000, sec_dur_s, factor)
-                        else:
-                            logger.warning("Section %s: %.1fs of speech for a %.1fs window — beyond 2x, "
-                                           "it will run into the next section",
-                                           sec["index"], total_ms / 1000, sec_dur_s)
-
-                # First sentence pinned to the section start (synced mode); the
-                # rest follow on immediately.
-                for i, clip in enumerate(clips):
-                    aligned_chunks.append((sec["start"] if i == 0 else None, None, clip))
 
             if not aligned_chunks:
                 logger.error("No aligned audio chunks")
