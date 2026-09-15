@@ -1,6 +1,6 @@
 # Version
 
-**Current version:** 0.3.1
+**Current version:** 0.4.0
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
 assistant, generation options, transcription, re-voice, studio settings, accounts, project
 ownership and the audit log, self-update, the Windows desktop installer; see CHANGELOG.md).
