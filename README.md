@@ -16,16 +16,15 @@ the whole app suite looks and feels the same.
 > subtitles, extra formats and Vimeo output presets, video transcription with an editable
 > transcript whose sentences can each be nudged, muted, given their own voice and speed and
 > played back one at a time before a re-voice (phases 1 and 2 of the narration timeline — no
-> waveform, no drag), re-voicing in a new voice or a translated
-> language that keeps step with the picture, Edge TTS or local Kokoro narration with
-> studio-wide defaults, accounts with a
+> waveform, no drag), re-voicing in a new voice or a translated language that keeps step with
+> the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
 > configurable password policy, projects that belong to whoever imported them with an audit
 > log of every change for admins, self-update from Git, and a Windows desktop installer are
 > in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound
-> library, the rest of the narration timeline (the waveform and the drag), and the rest of
-> the administration work
-> (notifications, a branding lock, an admin page of its own, per-kind job limits). Until parity,
-> the NiceGUI app at `C:\Projects\slidestudio_enterprise` remains the shipping product.
+> library, the rest of the narration timeline (the waveform and the drag), and the rest of the
+> administration work (notifications, a branding lock, an admin page of its own, per-kind job
+> limits). Until parity, the NiceGUI app at `C:\Projects\slidestudio_enterprise` remains the
+> shipping product.
 
 ## Stack
 

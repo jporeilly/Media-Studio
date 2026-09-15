@@ -5,10 +5,9 @@
 assistant, generation options, transcription, re-voice, per-sentence narration adjustments
 on a transcript — phases 1 and 2 of the narration timeline, so an offset, a mute, a voice, a
 speed and a per-sentence preview, but no waveform and no drag —, studio settings, accounts,
-project ownership and the audit log, self-update,
-the Windows desktop installer; see CHANGELOG.md). Still to come: the music library, the rest
-of the narration timeline (the waveform and the drag), and the rest of the administration
-work — notifications, a branding
+project ownership and the audit log, self-update, the Windows desktop installer; see
+CHANGELOG.md). Still to come: the music library, the rest of the narration timeline (the
+waveform and the drag), and the rest of the administration work — notifications, a branding
 lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio Enterprise
 remains the shipping product until parity.
 
