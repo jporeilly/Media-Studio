@@ -317,11 +317,17 @@ CLAUDE.md's frontend conventions say hand-authored CSS, lucide icons, no UI kit.
 
 ```
 GET /api/projects/{pid}/transcript/{index}/preview?provider=&voice=&speed=
-→ 200 audio/mpeg (FileResponse straight from the TTS cache path)
-→ 400 unknown provider, or a voice belonging to the other one (resolve_narration)
-→ 404 no transcript / index out of range
-→ 409 Kokoro's model is not on disk — return services/voices.py:28-31's notice verbatim
-→ 502 the provider returned nothing
+→ 200 audio/mpeg (FileResponse from the TTS cache path — which is where the clip is READ
+      from, never where the provider is pointed; see §7 phase 2)
+→ 400 unknown provider, a voice belonging to the other one (resolve_narration), a speed out
+      of range, a deck or PDF, or a sentence with NO WORDS IN IT — the text editor can save
+      an empty line and there is then nothing to synthesise; this list omitted that case and
+      the build had to add it
+→ 404 no such project / no transcript / index out of range
+→ 409 Kokoro's model is not on disk — the shared first sentence of services/voices.py's
+      notice plus what to do about it, NOT that notice verbatim: its "This is the built-in
+      voice list." is untrue of a Play button, which is why the constant was split
+→ 502 the provider returned nothing, or nothing inside the bounded wait
 ```
 
 Defaults are **the segment's own overrides, else the studio defaults**, so a parameterless
@@ -335,9 +341,14 @@ Save, so that is a reasonable rule. If a draft preview is ever wanted it becomes
 must be added to `AUDIT_EXEMPT` in writing, in the shape of the existing `ai_enhance_one`
 entry (`tests/test_audit.py:47-54`): *"synthesises one sentence as a preview; saves nothing."*
 
-**What it costs.** Edge TTS is a network round trip, typically 1–3 s for a sentence, and it
-is cached by `(text, voice, speed)` (`utils/helpers.py:41-52`) — so a repeat press is a file
-copy and the preview *warms the render's cache*. Two hazards:
+**What it costs.** Edge TTS is a network round trip, cached by `(text, voice, speed)`
+(`utils/helpers.py:41-52`) — so a repeat press is a file copy and the preview *warms the
+render's cache*. **Measured on the development machine, 2026-09-15: ~1 s for a sentence once
+the process is warm, and ~10 s for the very first press after the server starts** (the
+`edge_tts` import plus the first connection). The 1–3 s this section originally estimated is
+the warm case only; a cold start is an order of magnitude worse, which is what the bounded
+wait below has to be sized against (shipped: 30 s) and what the UI has to say while it waits,
+or the first press looks like a broken button. Two hazards:
 
 - `_run_async`'s ceiling is **120 s** (`core/edge_tts_generator.py:20-28`), and
   `generate_audio` swallows every exception and returns `None` (`:159-161`). A hung request
@@ -466,9 +477,69 @@ four of them contradict a section or a trap that still reads as written:
 Left for phase 2, deliberately: the per-sentence **voice** and **speed** are stored,
 validated and honoured by the render, but neither has a control in the UI yet.
 
-**Phase 2 — per-sentence voice and speed, and hear one sentence.** Backend is two more
-fields plus `effective_voice`, already written; the preview route is the only new machinery.
-Controls on the selected row. Cheap, and it makes phase 3 worth looking at.
+**Phase 2 — per-sentence voice and speed, and hear one sentence.** **DONE**, 2026-09-15; see
+CHANGELOG `#sentence-preview`, `#preview-atomic-cache` and `#preview-errors`. The two fields
+phase 1 stored gained controls on **every** row of the existing list — a Speed box and a
+type-ahead Voice box beside the offset and the mute — plus a **Play** button per row over the
+new `GET /{pid}/transcript/{index}/preview` (`api/routers/narration.py` beside the PATCH,
+`narration.preview_segment` / `_synthesise` / `cache_path_for` underneath). `services/voices.py`
+split its Kokoro sentence into `KOKORO_MODEL_PENDING` so the 409 and the voice-list notice
+say the same thing; `services/projects.py`'s rename helper became public
+(`replace_with_retry`); `frontend/src/lib/narration.ts` + `narration.test.ts` hold the pure
+rules; `api.blob` was added to `frontend/src/api/client.ts`; the row controls are in
+`frontend/src/pages/ProjectDetail.tsx`. No waveform, no drag, no timeline strip, no new
+component tree — as scoped. Tests: `tests/test_narration_preview.py` (29), vitest
+`narration.test.ts` (10), `tests/test_project_ownership.py` (+1 route in the sweep).
+
+Six things the build changed about the design above. Read them before phase 3, because five
+of them contradict a line that still reads as written:
+
+- **The provider must never write to the cache path.** §5's "FileResponse straight from the
+  TTS cache path" is where the clip is *read* from; pointing `generate_audio` at it (its
+  no-`output_path` default) hands the provider the shared cache entry to stream a download
+  into, and the only completeness check anywhere is that the file exists. That is a
+  half-written file served to a second press, and — worse — a dropped stream leaving a
+  truncated entry at that key forever, read by every later preview and copied out by every
+  later **re-voice**, which counts it a success and muxes the stump into the video, straight
+  past phase 1's failed-sentence counting. Shipped as a private `.part` file per press
+  published with an atomic rename (`services.projects.replace_with_retry`, shared with
+  `save_project` rather than copied), an empty result refused, and a zero-byte entry already
+  at the key removed and remade. **Phase 3 inherits the rule:** anything that hands a
+  generator a path must hand it a private one.
+- **A plain `<audio src="/api/…">` was the wrong instruction** (§5's last line). It works —
+  the cookie rides along — but a media element is told only that its source failed, so every
+  message this route writes (the 409, the voice-mismatch 400, the 502 naming the provider)
+  was replaced by a guess, and pressing Play is exactly how someone finds out a hand-typed
+  voice id is wrong. Fetched with `credentials` and played from a blob instead, which also
+  bounds it to one request in flight: a second press is ignored rather than starting a second
+  synthesis of the same sentence.
+- **The provider is never taken from the segment.** A stored `provider` exists only so
+  `effective_voice` knows which provider the stored *voice* belongs to; `_revoice_video`
+  resolves the engine from the job, else the studio. Reading it here would make the preview
+  diverge from the render in the one case it looked helpful — a Kokoro-voiced sentence under
+  an Edge studio previewing in Kokoro and rendering in Edge.
+- **The voice control is one shared `<datalist>`, not a `<select>`** (§6 assumed the controls
+  sit on a *selected* block, where the size of the list does not matter). On a per-row
+  control it does: north of 300 voices (322 on Edge today) × one row per sentence is tens of
+  thousands of `<option>` nodes on a ten-minute video. A `<datalist>` is one list for every
+  input and filters as you type; a voice picked off it saves at once, while a hand-typed one
+  waits for the blur.
+- **The controls are on every row, and there is no Reset yet.** §6 puts mute / voice / speed /
+  Play on the selected timeline block; with no timeline in phase 2 they went on each list row
+  instead, and the per-segment **Reset** (§9's "enough for v1") is still unbuilt. §6's
+  extraction into `TranscriptCard.tsx` did not happen either — the transcript is still inline
+  in `ProjectDetail.tsx`, which phase 3 should extract as planned — and the pure helpers went
+  to `lib/narration.ts` rather than `lib/timeline.ts`, since they are the editor's rules
+  rather than the strip's.
+- **The preview does NOT take `jobs.require_idle`** (trap 4 and §6's table put it on all three
+  new routes). It writes nothing, and refusing a listen while a re-voice runs would be a 409
+  on a read; the PATCH still takes it. One consequence to keep: `SegmentNotFound` is answered
+  **404 by the preview and 400 by the PATCH**, and both are right — a GET of something that is
+  not there, against a write whose index argument is out of range.
+
+Trap 19 stands and is now load-bearing: `data/cache` is still never swept, and previewing is
+the cheapest way yet to fill it. Accepted, not fixed — the render shares those entries and
+this route must not delete behind it.
 
 **Phase 3 — the waveform and the timeline strip. This is the expensive phase.** The peaks
 endpoint is genuinely small (~80 lines plus its cache). The cost is the timeline component:

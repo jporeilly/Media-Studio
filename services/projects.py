@@ -263,27 +263,32 @@ def delete_project(pid: str) -> bool:
     return True
 
 
-# The rename in ``save_project``, retried on a transient Windows refusal.
-# Worst case ~0.6 s before the save really fails.
+# The rename that publishes an atomically-written file, retried on a transient
+# Windows refusal. Worst case ~0.6 s before the write really fails.
 _REPLACE_ATTEMPTS = 8
 _REPLACE_BACKOFF_SECONDS = 0.02
 
 
-def _replace_with_retry(tmp: Path, path: Path) -> None:
+def replace_with_retry(tmp: Path, path: Path) -> None:
     """``os.replace(tmp, path)``, retried briefly on a Windows sharing refusal.
+
+    Public because it is the repo's one write-a-temp-then-rename idiom, and a
+    second copy of a retry loop is a second thing to get wrong: ``save_project``
+    below publishes project.json with it, and ``services.narration`` publishes a
+    finished TTS clip onto its cache path with it.
 
     On Windows the rename fails with ERROR_ACCESS_DENIED (WinError 5) whenever
     anything else holds a handle to either file for the instant it takes: a
     real-time virus scanner opening the file we have just written (IObit and
     Defender both do - see ``core.audio_mixer._load_audio_with_retry``, which
     exists for the same reason), the search indexer, or a reader that opened
-    project.json without FILE_SHARE_DELETE. It is transient and uncommon - 2 in
-    60 in a concurrent loop on the development machine - and it is not a reason
-    to fail a save: a few milliseconds later it succeeds. POSIX never takes
-    this path.
+    the destination without FILE_SHARE_DELETE. It is transient and uncommon -
+    2 in 60 in a concurrent loop on the development machine - and it is not a
+    reason to fail a save: a few milliseconds later it succeeds. POSIX never
+    takes this path.
 
-    Retrying exposes nothing partial: the destination is either the old record
-    or the new one throughout, and only the rename is repeated.
+    Retrying exposes nothing partial: the destination is either the old file or
+    the new one throughout, and only the rename is repeated.
     """
     for attempt in range(_REPLACE_ATTEMPTS):
         try:
@@ -314,7 +319,7 @@ def save_project(record: dict) -> None:
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
-        _replace_with_retry(tmp, path)
+        replace_with_retry(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

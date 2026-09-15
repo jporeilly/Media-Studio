@@ -10,6 +10,29 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The ApiError for a failed response, built from its body: the server's own
+ * `detail` when it wrote one, else the body, else the status text. Shared by
+ * every call shape so a failure reads the same wherever it came from — and so a
+ * binary GET can surface the server's message, which an `<audio>` element's own
+ * error event never can (it is told only that its source failed).
+ */
+function failure(resp: Response, text: string, path: string): ApiError {
+  let data: unknown = text;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    /* non-JSON body */
+  }
+  const detail = (data && typeof data === "object" && "detail" in (data as Record<string, unknown>))
+    ? (data as Record<string, unknown>).detail
+    : data || resp.statusText;
+  if (resp.status === 401 && !path.includes("/auth/")) {
+    window.dispatchEvent(new CustomEvent("mediastudio:unauthorized"));
+  }
+  return new ApiError(resp.status, detail);
+}
+
 async function request<T>(method: string, path: string, body?: unknown, isForm = false): Promise<T> {
   const headers: Record<string, string> = {};
   let payload: BodyInit | undefined;
@@ -30,20 +53,25 @@ async function request<T>(method: string, path: string, body?: unknown, isForm =
   } catch {
     /* non-JSON body */
   }
-  if (!resp.ok) {
-    const detail = (data && typeof data === "object" && "detail" in (data as Record<string, unknown>))
-      ? (data as Record<string, unknown>).detail
-      : data || resp.statusText;
-    if (resp.status === 401 && !path.includes("/auth/")) {
-      window.dispatchEvent(new CustomEvent("mediastudio:unauthorized"));
-    }
-    throw new ApiError(resp.status, detail);
-  }
+  if (!resp.ok) throw failure(resp, text, path);
   return data as T;
+}
+
+/**
+ * GET a binary body — audio the page plays, for instance. Fetched rather than
+ * handed straight to a media element as a `src` so that a failure comes back as
+ * the SAME ApiError as every other call and the server's message reaches the
+ * user; a media element only ever reports that its source failed.
+ */
+async function requestBlob(path: string): Promise<Blob> {
+  const resp = await fetch(path, { method: "GET", credentials: "include" });
+  if (!resp.ok) throw failure(resp, await resp.text(), path);
+  return resp.blob();
 }
 
 export const api = {
   get: <T = any>(path: string) => request<T>("GET", path),
+  blob: (path: string) => requestBlob(path),
   post: <T = any>(path: string, body?: unknown) => request<T>("POST", path, body),
   patch: <T = any>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   put: <T = any>(path: string, body?: unknown) => request<T>("PUT", path, body),

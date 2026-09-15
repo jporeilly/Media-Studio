@@ -25,10 +25,16 @@ _KOKORO_GENDERS = {"f": "Female", "m": "Male"}
 # Edge display names end in "(en-US, Female)".
 _EDGE_GENDER = re.compile(r"\([^()]*,\s*(Female|Male|Neutral)\)\s*$")
 
-KOKORO_MODEL_NOTICE = (
+# The one fact about a missing Kokoro model, in one place: the voice list says
+# it as a notice beside a curated list, and the per-sentence preview
+# (``services.narration.preview_segment``) says it as a 409 rather than making
+# one press of a Play button download 340 MB.
+KOKORO_MODEL_PENDING = (
     "Kokoro's model is not downloaded yet — it downloads once (about 340 MB) on the "
-    "first Kokoro narration. This is the built-in voice list."
+    "first Kokoro narration."
 )
+
+KOKORO_MODEL_NOTICE = f"{KOKORO_MODEL_PENDING} This is the built-in voice list."
 
 
 def _payload(provider: str, voices: list, error: str | None = None, notice: str | None = None) -> dict:
