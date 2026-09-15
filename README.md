@@ -23,8 +23,8 @@ the whole app suite looks and feels the same.
 > in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound
 > library, the rest of the narration timeline (the waveform and the drag), and the rest of the
 > administration work (notifications, a branding lock, an admin page of its own, per-kind job
-> limits). Until parity, the NiceGUI app at `C:\Projects\slidestudio_enterprise` remains the
-> shipping product.
+> limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
+> `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).
 
 ## Stack
 

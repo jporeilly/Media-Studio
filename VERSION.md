@@ -60,7 +60,8 @@ A bump touches all eleven carriers above, and then:
 ## Lineage
 
 Media Studio Enterprise is the React + FastAPI successor to **Slide Studio Enterprise**
-(NiceGUI, `C:\Projects\slidestudio_enterprise`, last at 0.4.1). The Python media
+(NiceGUI, last at 0.4.1; source at `jporeilly/slidestudio-enterprise`, no longer
+checked out locally). The Python media
 engine (`core/`, `utils/`, `services/processing.py`) is carried over; the UI is rebuilt
 on the OpenSight design system. The NiceGUI app remains the shipping product until this
 one reaches feature parity.
