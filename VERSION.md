@@ -2,11 +2,14 @@
 
 **Current version:** 0.4.0
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
-assistant, generation options, transcription, re-voice, studio settings, accounts, project
-ownership and the audit log, self-update, the Windows desktop installer; see CHANGELOG.md).
-Still to come: the music library and the rest of the administration work — notifications, a
-branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
-Enterprise remains the shipping product until parity.
+assistant, generation options, transcription, re-voice, per-sentence narration adjustments
+on a transcript — phase 1 of the narration timeline, so an offset and a mute but no waveform
+and no drag —, studio settings, accounts, project ownership and the audit log, self-update,
+the Windows desktop installer; see CHANGELOG.md). Still to come: the music library, the rest
+of the narration timeline (per-sentence voice and speed controls, hearing one sentence, the
+waveform and the drag), and the rest of the administration work — notifications, a branding
+lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio Enterprise
+remains the shipping product until parity.
 
 ## Where the version string lives
 
