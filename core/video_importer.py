@@ -82,7 +82,18 @@ def _add_cuda_dll_dirs() -> None:
             # where cublas64_12.dll was present all along. A wheel added later
             # (cuFFT, cuRAND) is picked up without touching this again.
             for d in sorted(p for p in Path(root).glob("*/bin") if p.is_dir()):
-                _cuda_dll_handles.append(os.add_dll_directory(str(d.resolve())))
+                resolved = str(d.resolve())
+                _cuda_dll_handles.append(os.add_dll_directory(resolved))
+                # PATH as well, and this is the half that matters: CTranslate2
+                # loads cuBLAS from its own C++ code with a plain LoadLibrary,
+                # which searches PATH and ignores the directories registered by
+                # add_dll_directory (those only apply to loads that ask for the
+                # user directories, as ctypes and Python's own extension loader
+                # do). Without this the DLLs sit right there, load fine from
+                # Python, and CTranslate2 still reports "cublas64_12.dll is not
+                # found or cannot be loaded" and falls back to the CPU.
+                if resolved not in os.environ.get("PATH", "").split(os.pathsep):
+                    os.environ["PATH"] = resolved + os.pathsep + os.environ.get("PATH", "")
                 logger.debug("Added CUDA DLL dir: %s", d)
                 added = True
         if not added:
