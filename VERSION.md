@@ -1,6 +1,6 @@
 # Version
 
-**Current version:** 0.4.0
+**Current version:** 0.5.0
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
 assistant, generation options, transcription, re-voice, per-sentence narration adjustments
 on a transcript — phase 1 of the narration timeline, so an offset and a mute but no waveform

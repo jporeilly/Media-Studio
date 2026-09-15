@@ -208,8 +208,14 @@ One sentence the UI can show: *editing the words never moves the sentences.* One
 concern; today's Save button keeps working unchanged.
 
 New module `services/narration.py`, in the shape `services/slides.py` has for the slide
-editor: the override vocabulary, validation, a per-pid lock around read-modify-write of the
-outer record, `update_segment(pid, index, **changes)`, and `segments(pid)`.
+editor: the override vocabulary, validation, `update_segment(pid, index, **changes)`, and
+`segments(pid)`.
+
+> **Corrected by what phase 1 actually built.** This paragraph originally put the per-pid
+> lock in `services/narration.py`. It is in **`services/projects.py`**, beside the file it
+> guards, and `narration` takes `store.project_lock(pid)`. A lock owned by whichever
+> feature needed it first protects that writer only from itself — which is exactly the bug
+> the Reviewer found and measured. See trap 3.
 
 ---
 
@@ -495,11 +501,17 @@ each that is a job with a progress bar, not a request.
    (`api/routers/projects.py:240-241`, with the comment explaining why). Every new writer
    must re-read immediately before saving — and re-transcribing *legitimately* discards
    overrides, so the UI must warn before it starts, not after.
-3. **The outer `project.json` has no lock.** `services/slides.py:78-84` `project_lock` guards
-   the *inner* engine file only; `save_project` (`services/projects.py:207-209`) guards
-   nothing. A drag that PATCHes per frame turns that into a real interleaved
-   read-modify-write. Add a per-pid lock in `services/narration.py`, release it in
-   `forget`-style on delete (`services/projects.py:198-204`), and commit on drag **end**.
+3. **The outer `project.json` lock — CLOSED by phase 1, and read this before phase 3.**
+   It originally said to add the lock in `services/narration.py`. Do not: a lock owned by
+   one feature guards that feature only. `services/projects.py` owns `project_lock(pid)`
+   and `forget(pid)` now, beside `project.json`; `set_transcript`, `narration.update_segment`
+   and `delete_project` all take it, and `save_project` writes atomically (temp file plus
+   `os.replace`, with a retry — `os.replace` intermittently fails on Windows while anything
+   holds either file for the instant of the rename, measured at 2 in 60 concurrent runs).
+   The two job writers deliberately do NOT take it: they re-read immediately before saving,
+   and `jobs.require_idle` refuses an edit while a job holds the project. **Phase 3 still
+   has to commit on drag end, not per frame** — that was the other half of this trap and it
+   is the half still outstanding.
 4. **The transcript PATCH does not take `jobs.require_idle`.** Every slide write does
    (`api/routers/slides.py:42-47`). The new routes must, which adds a 409 the UI has to
    render — `api/app.py:72-74` already maps `ProjectBusy` to it.

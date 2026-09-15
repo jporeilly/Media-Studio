@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The shell needs its own commands, plus opener to reveal the startup report in Explorer and open the data folder when a support email is being put together. The UI itself is served over http from the local backend and needs no Tauri APIs.",
+  "description": "The shell needs its own commands, plus opener to reveal the startup report in Explorer and open the data folder when a support email is being put together. The scope is $RESOURCE, the resource directory the app resolves its own root and data folder from (main.rs app_dir/data_dir), NOT a named install path - the install location is the user's choice at install time, and a hard-coded one silently stopped matching the moment it moved. The UI itself is served over http from the local backend and needs no Tauri APIs.",
   "windows": [
     "main"
   ],
@@ -12,7 +12,7 @@
     {
       "identifier": "opener:allow-open-path",
       "allow": [
-        { "path": "$LOCALDATA/Media Studio Enterprise/**" },
+        { "path": "$RESOURCE/**" },
         { "path": "$APPLOCALDATA/**" }
       ]
     }

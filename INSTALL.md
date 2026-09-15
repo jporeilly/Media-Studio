@@ -35,17 +35,17 @@ two runtime wheels (about 1 GB) into the app's own Python and restart the backen
 (Settings › Updates › Restart backend):
 
 ```powershell
-& "$env:LOCALAPPDATA\Media Studio Enterprise\python\python.exe" -m pip install -r "$env:LOCALAPPDATA\Media Studio Enterprise\app\requirements-gpu.txt"
+& "C:\Media-Studio-Enterprise\python\python.exe" -m pip install -r "C:\Media-Studio-Enterprise\app\requirements-gpu.txt"
 ```
 
 For a source checkout: `venv\Scripts\pip install -r requirements-gpu.txt`.
 
 ## Install
 
-1. Run `Media Studio Enterprise_<version>_x64-setup.exe` — the file name carries the
+1. Run `Media-Studio-Enterprise_<version>_x64-setup.exe` — the file name carries the
    version it installs.
 2. Keep the proposed location. The app installs into
-   `%LOCALAPPDATA%\Media Studio Enterprise\` and adds a Start menu entry and a desktop
+   `C:\Media-Studio-Enterprise\` and adds a Start menu entry and a desktop
    shortcut.
 
 The installer is not code-signed yet, so Windows SmartScreen may ask you to confirm on
@@ -56,7 +56,7 @@ installer asks to close it first.
 asking):
 
 ```
-"Media Studio Enterprise_0.1.0_x64-setup.exe" /S
+"Media-Studio-Enterprise_<version>_x64-setup.exe" /S
 ```
 
 **Reinstalling** over an existing install keeps your data (see
@@ -67,7 +67,7 @@ previous version first, and that removal leaves your data alone too. But read
 ### What lands on disk
 
 ```
-%LOCALAPPDATA%\Media Studio Enterprise\
+C:\Media-Studio-Enterprise\
   media-studio-desktop.exe    the app window (named after its Rust crate, not the product)
   uninstall.exe
   app\                        the application: a git checkout of the repo, plus boot.py and bin\ffmpeg.exe
@@ -107,7 +107,7 @@ Everything the app creates lives inside the install folder:
 
 | What | Where |
 |---|---|
-| Accounts and sessions | `%LOCALAPPDATA%\Media Studio Enterprise\app\data\media_studio.db` |
+| Accounts and sessions | `C:\Media-Studio-Enterprise\app\data\media_studio.db` |
 | Settings | `...\app\data\config.json` |
 | Imported projects (decks, PDFs, videos, transcripts) | `...\app\data\projects\` |
 | Logs, cache, temporary files | `...\app\data\logs\`, `cache\`, `temp\` |
@@ -190,7 +190,7 @@ else. This is a known limitation, tracked together with the data-folder move abo
 install folder — in PowerShell:
 
 ```powershell
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Media Studio Enterprise"
+Remove-Item -Recurse -Force "C:\Media-Studio-Enterprise"
 ```
 
 Reinstalling without deleting the folder keeps your accounts, settings, projects and
@@ -216,7 +216,7 @@ Python and its core packages are FAILs; ffmpeg, git, Ollama and disk space are w
 that name the feature they affect:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Media Studio Enterprise\provisioning\check-environment.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Media-Studio-Enterprise\provisioning\check-environment.ps1"
 ```
 
 Add `-Json` for machine-readable output; the exit code is 1 when anything FAILs.

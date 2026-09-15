@@ -86,7 +86,7 @@ npm run fetch:python      # download the embeddable Python 3.12.8 + pip install 
                           # (SLOW the first time, ~600 MB; stamped, so later runs skip it)
 npm run stage:app         # git clone HEAD -> src-tauri/vendor/app, overlay boot.py + bin\ffmpeg.exe, verify
 npm run tauri:build       # compile the Rust shell and produce the NSIS installer
-npm run collect           # copy dist\Media Studio Enterprise_<ver>_x64-setup.exe to <repo>\dist, print its SHA-256
+npm run collect           # copy dist\Media-Studio-Enterprise_<ver>_x64-setup.exe to <repo>\dist, print its SHA-256
 ```
 
 ### The staging gate
@@ -120,13 +120,13 @@ npm run icons             # python scripts/make-icons.py
 
 ### Output & install
 
-- Installer: `C:\Projects\media_studio_enterprise\dist\Media Studio Enterprise_0.1.0_x64-setup.exe` (~145 MB)
-- Install (double-click, **per-user, no admin**; silent: `/S`): `%LOCALAPPDATA%\Media Studio Enterprise\`
+- Installer: `C:\Projects\Media-Studio-Enterprise\dist\Media-Studio-Enterprise_<ver>_x64-setup.exe` (~145 MB)
+- Install (double-click, **per-user, no admin**; silent: `/S`): `C:\Media-Studio-Enterprise\`
   - `media-studio-desktop.exe` - the shell (named after the Cargo crate, not the product), and `uninstall.exe`
   - `app\` - the git checkout (with the committed `frontend\dist`) + `boot.py` + `bin\ffmpeg.exe`
   - `python\` - the vendored runtime
   - `provisioning\` - `check-environment.ps1` + `lib\common.ps1`
-- **App data**: `%LOCALAPPDATA%\Media Studio Enterprise\app\data\`
+- **App data**: `C:\Media-Studio-Enterprise\app\data\`
   (SQLite `media_studio.db`, `config.json`, `projects\`, `cache\`, `logs\`, `temp\`)
   and rendered output under `...\app\assets\finished\` - **inside** the install
   tree. See *Why per-user* and *Uninstall and reinstall* below.
@@ -159,7 +159,7 @@ Windows shows SmartScreen on first run.
 ### Verify a machine can run it (after install)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Media Studio Enterprise\provisioning\check-environment.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Media-Studio-Enterprise\provisioning\check-environment.ps1"
 ```
 
 (PowerShell does not expand `%LOCALAPPDATA%`; use `$env:LOCALAPPDATA`.) From a
@@ -234,7 +234,7 @@ FAILs; everything else is a WARN that names the feature it affects.
 | Health endpoint | `GET /api/system/health` -> `{"status":"ok","version":...}` |
 | Backend entry | `boot.py` -> `uvicorn api.app:app` (== `python main.py --no-browser`) |
 | Install mode | NSIS `currentUser` (per-user) |
-| Install root | `%LOCALAPPDATA%\Media Studio Enterprise\` |
+| Install root | `C:\Media-Studio-Enterprise\` |
 | App data | `<install>\app\data\`; rendered output `<install>\app\assets\finished\` |
 | Git remote of the install | `https://github.com/jporeilly/media-studio-enterprise.git` (private) |
 
@@ -250,7 +250,7 @@ and `api/store.py` hard-code the data directory to `<app root>/data` (and
 Program Files install those writes would fail at import time.
 
 So this installer is **per-user (`currentUser`)**: the whole app tree lands under
-the writable `%LOCALAPPDATA%\Media Studio Enterprise\`, and `<install>/app/data`
+the writable `C:\Media-Studio-Enterprise\`, and `<install>/app/data`
 is writable as-is - satisfying "data lives under the user profile" without
 touching backend code.
 
@@ -279,7 +279,7 @@ it never is:
   cache.
 
 Removing everything is
-`Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Media Studio Enterprise"` after
+`Remove-Item -Recurse -Force "C:\Media-Studio-Enterprise"` after
 the uninstall.
 
 **Reinstalling** (running an installer over an existing install) lays the
