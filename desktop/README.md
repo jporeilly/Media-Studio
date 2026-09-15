@@ -229,7 +229,7 @@ FAILs; everything else is a WARN that names the feature it affects.
 | Product name | `Media Studio Enterprise` |
 | Bundle identifier | `com.pentaho.media-studio` |
 | Shell crate / npm package / exe | `media-studio-desktop` (`media-studio-desktop.exe`) |
-| Version | `0.1.0` (from repo `__init__.py`; `VERSION.md` lists all nine carriers) |
+| Version | from repo `__init__.py` (`VERSION.md` lists all eleven carriers and the bump policy) |
 | Port | `5680` (free-port fallback if taken) |
 | Health endpoint | `GET /api/system/health` -> `{"status":"ok","version":...}` |
 | Backend entry | `boot.py` -> `uvicorn api.app:app` (== `python main.py --no-browser`) |

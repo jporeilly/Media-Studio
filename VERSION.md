@@ -1,6 +1,6 @@
 # Version
 
-**Current version:** 0.3.0
+**Current version:** 0.3.1
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
 assistant, generation options, transcription, re-voice, studio settings, accounts,
 self-update, the Windows desktop installer; see CHANGELOG.md). Still to come: the music
@@ -9,7 +9,7 @@ shipping product until parity.
 
 ## Where the version string lives
 
-Hand-kept and must be identical across all nine carriers. `tests/test_version.py`
+Hand-kept and must be identical across all eleven carriers. `tests/test_version.py`
 fails when any of them disagrees with `__init__.py`, and when README.md, VERSION.md or
 Cargo.toml still carries an older number alongside the current one.
 
@@ -17,7 +17,9 @@ Cargo.toml still carries an older number alongside the current one.
 |------|------|
 | `__init__.py` | `__version__ = "x.y.z"` — **source of truth** (`api.__version__`; reported by `/api/system/health` and shown in the sidebar footer from that endpoint — the UI never hard-codes it, `tests/test_version.py` checks) |
 | `frontend/package.json` | `"version": "x.y.z"` |
+| `frontend/package-lock.json` | the two root entries (`version` and `packages[""].version`) — npm rewrites them from package.json on the next install, so bump them with the others or the tree is dirty mid-build |
 | `desktop/package.json` | `"version": "x.y.z"` |
+| `desktop/package-lock.json` | the two root entries, as above |
 | `desktop/src-tauri/tauri.conf.json` | `"version": "x.y.z"` — the installer's file name and the Add/Remove Programs entry |
 | `desktop/src-tauri/Cargo.toml` | `version = "x.y.z"` — the shell exe's file version |
 | `desktop/src-tauri/Cargo.lock` | the `media-studio-desktop` entry (cargo rewrites it on the next build, so bump it with the others or the tree is dirty after a build) |
@@ -41,7 +43,7 @@ Semantic Versioning while `0.x`:
 - **Minor** (`0.x` → `0.x+1`): a new feature, or a removed feature.
 - **Patch** (`0.x.y` → `0.x.y+1`): fixes, dependency bumps, docs only.
 
-A bump touches all nine carriers above, and then:
+A bump touches all eleven carriers above, and then:
 
 1. `frontend/package.json` is part of the built UI's fingerprint, and `frontend/dist`
    is committed — so run `npm run build` in `frontend/` and commit `frontend/dist`

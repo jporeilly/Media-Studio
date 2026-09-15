@@ -1,11 +1,13 @@
 """The version string is hand-kept in several files; this test keeps them equal.
 
 Source of truth: the repo-root ``__init__.py`` (``__version__``), read through
-``api.__version__``. Every other carrier - the two package.json files, the Tauri
-config and crate, README, VERSION.md and the CHANGELOG release header - must
-match it exactly. See VERSION.md for the bump policy.
+``api.__version__``. Every other carrier - the two package.json files and their
+lockfiles, the Tauri config, the crate and its lockfile, README, VERSION.md and
+the CHANGELOG release header - must match it exactly. See VERSION.md for the
+bump policy.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -58,6 +60,23 @@ def test_version_string_agrees_everywhere(rel, pattern):
 def test_no_other_app_version_numbers_in_carriers(rel, pattern):
     numbers = set(re.findall(pattern, _read(rel), re.MULTILINE))
     assert numbers == {VERSION}, f"{rel} carries {sorted(numbers)}, expected only {VERSION}"
+
+
+@pytest.mark.parametrize("rel", ["frontend/package-lock.json", "desktop/package-lock.json"])
+def test_npm_lockfiles_carry_the_version(rel):
+    """``npm install`` copies the version from package.json into the lockfile's
+    two root entries. A lockfile left behind (both sat at 0.1.0 from the scaffold
+    until 0.3.1) is rewritten by the next install and dirties the tree in the
+    middle of a build - which the staging gate then refuses. Same trap as
+    Cargo.lock above, so the same rule: bump it with the others.
+
+    Read as JSON rather than by line: a dependency may carry any version string,
+    and only these two keys describe the app itself.
+    """
+    data = json.loads(_read(rel))
+    assert data.get("version") == VERSION, f"{rel}: root version is {data.get('version')!r}"
+    own = data.get("packages", {}).get("", {})
+    assert own.get("version") == VERSION, f'{rel}: packages[""] version is {own.get("version")!r}'
 
 
 def test_frontend_source_never_hard_codes_a_version():

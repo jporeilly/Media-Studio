@@ -1,6 +1,6 @@
 <h1 align="center">Media Studio Enterprise</h1>
 
-<p align="center"><b>Version 0.3.0</b> — React + FastAPI. Turn slide decks and videos into narrated MP4s.</p>
+<p align="center"><b>Version 0.3.1</b> — React + FastAPI. Turn slide decks and videos into narrated MP4s.</p>
 
 Media Studio Enterprise is the React + FastAPI successor to **Slide Studio Enterprise**
 (NiceGUI). It reuses the same Python media engine — PowerPoint/PDF export, Edge TTS &
