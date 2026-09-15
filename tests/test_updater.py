@@ -172,3 +172,34 @@ def test_restart_hands_the_successor_its_argv_intact(tmp_path, interpreter):
     )
     assert marker.exists(), f"the successor never ran: {proc.stderr[-600:]}"
     assert json.loads(marker.read_text()) == [str(script), "an arg with spaces"]
+
+
+def test_update_clears_stale_built_ui_files(monkeypatch, tmp_path):
+    """The installer copies files in and never removes ones it no longer ships,
+    so old hashed chunks pile up in frontend/dist/assets. A WebView holding an
+    old index.html would load that whole stale UI from them, which is how a
+    0.3.0 backend ended up rendering the 0.1.0 page. The pull owns the tracked
+    files; this clears the leftovers."""
+    calls = _fake_git(monkeypatch, {"rev-parse": (0, "abc1234", ""), "pull": (0, "", "")})
+    req = tmp_path / "requirements.txt"
+    req.write_text("fastapi\n")
+    monkeypatch.setattr(updater, "REQUIREMENTS", req)
+
+    updater.apply_update()
+
+    clean = [c for c in calls if c[:2] == ["git", "clean"]]
+    assert clean, f"no git clean was run: {calls}"
+    assert clean[0] == ["git", "clean", "-fdq", "--", "frontend/dist"], clean[0]
+
+
+def test_a_failed_clean_does_not_fail_the_update(monkeypatch, tmp_path):
+    """Leftover files are cosmetic; a pull that succeeded must still count."""
+    _fake_git(monkeypatch, {"rev-parse": (0, "abc1234", ""), "pull": (0, "", ""),
+                            "clean": (1, "", "permission denied")})
+    req = tmp_path / "requirements.txt"
+    req.write_text("fastapi\n")
+    monkeypatch.setattr(updater, "REQUIREMENTS", req)
+
+    result = updater.apply_update()
+
+    assert result["restart_required"] is True

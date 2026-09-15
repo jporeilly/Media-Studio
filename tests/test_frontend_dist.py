@@ -76,3 +76,19 @@ def test_built_ui_is_tracked_by_git():
     if r.returncode != 0 and "not a git repository" in (r.stderr or ""):
         pytest.skip("not a git checkout")
     assert r.returncode == 0, "frontend/dist is not tracked - the installed app's git pull could never update the UI"
+
+
+def test_index_html_is_served_uncacheable():
+    """index.html has one URL for the life of an install while its asset names
+    carry a content hash. The desktop shell's WebView2 cached the page and went
+    on rendering a whole earlier UI - version line and all - against an updated
+    backend, because the old hashed files were still on disk beside the new
+    ones. The page must never be cached; the hashed assets still may be."""
+    from fastapi.testclient import TestClient
+
+    from api.app import app
+
+    with TestClient(app) as client:
+        r = client.get("/")
+        assert r.status_code == 200
+        assert "no-store" in r.headers.get("cache-control", ""), r.headers

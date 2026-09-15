@@ -74,13 +74,17 @@ def _add_cuda_dll_dirs() -> None:
         # __path__ (the list of directories the wheels populate).
         added = False
         for root in list(getattr(nvidia, "__path__", [])):
-            base = Path(root)
-            for sub in ("cublas/bin", "cudnn/bin", "cuda_nvrtc/bin"):
-                d = base / sub
-                if d.is_dir():
-                    _cuda_dll_handles.append(os.add_dll_directory(str(d.resolve())))
-                    logger.debug("Added CUDA DLL dir: %s", d)
-                    added = True
+            # Every nvidia-*-cu12 wheel drops its DLLs in <package>/bin, so take
+            # them all rather than a fixed list: cuBLAS cannot load without the
+            # CUDA runtime (cudart64_12.dll) beside it, and naming only cublas,
+            # cudnn and nvrtc left that one out — CTranslate2 then reported
+            # "cublas64_12.dll is not found or cannot be loaded" on a machine
+            # where cublas64_12.dll was present all along. A wheel added later
+            # (cuFFT, cuRAND) is picked up without touching this again.
+            for d in sorted(p for p in Path(root).glob("*/bin") if p.is_dir()):
+                _cuda_dll_handles.append(os.add_dll_directory(str(d.resolve())))
+                logger.debug("Added CUDA DLL dir: %s", d)
+                added = True
         if not added:
             logger.debug("No CUDA DLL dirs found under nvidia.__path__=%s",
                          list(getattr(nvidia, "__path__", [])))

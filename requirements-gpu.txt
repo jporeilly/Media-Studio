@@ -3,7 +3,12 @@
 # engine adds their directories at load time (core/video_importer.py) and falls
 # back to the CPU when they are absent. About 1 GB of wheels.
 #
+# cuda-runtime is not optional: cuBLAS cannot load without cudart64_12.dll
+# beside it, and CTranslate2 reports that as "cublas64_12.dll is not found or
+# cannot be loaded", which reads like the wrong library is missing.
+#
 #   venv\Scripts\pip install -r requirements-gpu.txt
 #   "%LOCALAPPDATA%\Media Studio Enterprise\python\python.exe" -m pip install -r requirements-gpu.txt
+nvidia-cuda-runtime-cu12
 nvidia-cublas-cu12
 nvidia-cudnn-cu12

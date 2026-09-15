@@ -90,7 +90,17 @@ def create_app() -> FastAPI:
             candidate = (root / full_path).resolve()
             if full_path and root in candidate.parents and candidate.is_file():
                 return FileResponse(str(candidate))
-            return FileResponse(str(root / "index.html"))
+            # index.html must never be cached. Its asset names carry a content
+            # hash, so the assets themselves cache forever, but the page that
+            # names them has one URL for the life of the install: the desktop
+            # shell's WebView2 held on to a copy from an earlier version and
+            # went on rendering that whole UI - version line and all - against
+            # an updated backend, because the old hashed files were still on
+            # disk beside the new ones.
+            return FileResponse(
+                str(root / "index.html"),
+                headers={"Cache-Control": "no-store, must-revalidate"},
+            )
     else:
         @app.get("/", include_in_schema=False)
         async def no_frontend():

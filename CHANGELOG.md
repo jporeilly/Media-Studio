@@ -7,7 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+- [fix] **The app could keep showing an older version's whole UI.** `index.html` has one URL for the life of an install while its asset file names carry a content hash, and it was served cacheable — so the desktop shell's WebView2 held a copy from an earlier version and went on rendering that entire UI, version line included, against an updated backend. The old hashed files were still there to load because the installer copies files in and never removes ones it no longer ships. `index.html` is now served `no-store` (the hashed assets still cache), and an update clears any built-UI file the pull did not bring — #stale-ui
+- [fix] **GPU transcription actually uses the GPU.** The engine added the cuBLAS, cuDNN and NVRTC folders to the DLL search path but not the CUDA runtime's, and `nvidia-cuda-runtime-cu12` was not among the documented wheels — so cuBLAS could not load and CTranslate2 reported "cublas64_12.dll is not found or cannot be loaded" on a machine where that file was present all along, falling back to the CPU every time. Every `nvidia-*/bin` folder is now added, so a wheel added later is picked up without another change, and the runtime is listed in `requirements-gpu.txt` — #gpu-runtime
 
 ## [0.3.0] - 2026-09-15
 

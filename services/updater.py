@@ -116,6 +116,16 @@ def apply_update(progress=None) -> dict:
             raise RuntimeError(f"pip install failed: {(r.stderr or r.stdout)[-800:]}")
         deps_installed = True
 
+    # Drop any built UI file the pull did not bring. The installer copies files
+    # in and never removes ones it no longer ships, so hashed chunks from older
+    # versions pile up in frontend/dist/assets — and a browser or WebView that
+    # still has an old index.html cached will happily load that whole stale UI
+    # from them. Only untracked files under the built UI are removed; the pull
+    # owns everything tracked.
+    rc, out, err = _git("clean", "-fdq", "--", "frontend/dist")
+    if rc != 0:
+        log.warning("Could not clean stale built-UI files: %s", err or out)
+
     after = installed_state()["commit"]
     if progress:
         progress(1.0, "Update applied — restart to finish")
