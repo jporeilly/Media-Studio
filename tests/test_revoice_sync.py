@@ -95,9 +95,15 @@ def _manager(tmp_path, segments):
     return pm
 
 
-def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed=1.0):
-    """Run _revoice_video with the engine stubbed; return the aligned chunks."""
-    _Seg.next_ms = clip_ms
+def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed=1.0,
+             video_seconds=None):
+    """Run _revoice_video with the engine stubbed; return the aligned chunks.
+
+    ``video_seconds`` is what the duration probe reports for the source video;
+    None stands for a probe that failed (no ffprobe), which is the fallback the
+    last sentence's bound has to cope with.
+    """
+    monkeypatch.setattr(_Seg, "next_ms", clip_ms)
     pm = _manager(tmp_path, segments)
     if free:
         pm.state.revoice_sync_mode = "free"
@@ -116,17 +122,18 @@ def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed
         return real_assemble(chunks, is_free)
 
     monkeypatch.setattr(processing, "assemble_master", _assemble)
-    monkeypatch.setattr(processing, "replace_video_audio", lambda **kw: True, raising=False)
 
     import core.video_creator as vc
     monkeypatch.setattr(vc, "replace_video_audio", lambda **kw: True)
     monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
     monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_probe_duration", lambda path: video_seconds)
 
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"video")
     ok = proc._revoice_video(pm, source, tmp_path / "out.mp4")
     assert ok, "re-voice returned False"
+    captured["assemble"] = real_assemble
     return captured, tts
 
 
@@ -152,7 +159,7 @@ def test_every_sentence_is_pinned_to_the_moment_it_was_spoken(tmp_path, monkeypa
 def test_the_pauses_between_sentences_survive_in_the_master(tmp_path, monkeypatch):
     captured, _ = _revoice(tmp_path, monkeypatch, GAPPY, clip_ms=1500)
 
-    master = processing.assemble_master(captured["chunks"], False)
+    master = captured["assemble"](captured["chunks"], False)
     # 10 s of picture before the last sentence starts, plus that sentence.
     assert len(master) == pytest.approx(11500, abs=50)
     # Without the pins it would be the three clips back to back.
@@ -224,7 +231,7 @@ def test_free_mode_still_runs_the_sentences_together(tmp_path, monkeypatch):
     captured, _ = _revoice(tmp_path, monkeypatch, GAPPY, free=True, clip_ms=1500)
 
     assert captured["is_free"] is True
-    master = processing.assemble_master(captured["chunks"], True)
+    master = captured["assemble"](captured["chunks"], True)
     assert len(master) == 4500, "free pace concatenates: no silence is inserted"
 
 
@@ -265,3 +272,81 @@ def test_a_failed_sentence_leaves_its_slot_silent_without_shifting_the_rest(tmp_
 
     starts = [start for start, _end, _clip in captured["chunks"]]
     assert starts == [0.0, 10.0], "the third sentence keeps its own moment"
+
+
+def test_the_last_sentence_may_use_the_video_after_it(tmp_path, monkeypatch):
+    """The narration is padded to the video and trimmed there, so the tail after
+    the closing sentence is room it may use. Bounding it at the speaker's own
+    stop would squeeze it for nothing."""
+    monkeypatch.setattr(processing.VideoProcessor, "_per_sentence_speed",
+                        lambda self, *a, **k: 1.0)
+    cmds = []
+    import subprocess as sp
+    monkeypatch.setattr(sp, "run", lambda cmd, **k: cmds.append(cmd) or types.SimpleNamespace(returncode=0))
+
+    # Last sentence spoken 10.0-12.0 but the video runs to 20.0: a 4 s synthesis
+    # fits the room after it and must not be tempo-adjusted.
+    _revoice(tmp_path, monkeypatch, GAPPY, clip_ms=4000, video_seconds=20.0)
+
+    assert cmds == [], "the closing sentence may use the video's tail"
+
+
+def test_without_a_duration_probe_the_last_sentence_keeps_its_own_slot(tmp_path, monkeypatch):
+    """No ffprobe (the packaged app): fall back to the section's end so the
+    closing sentence cannot overrun the video and be cut off mid-word."""
+    monkeypatch.setattr(processing.VideoProcessor, "_per_sentence_speed",
+                        lambda self, *a, **k: 1.0)
+    cmds = []
+    import subprocess as sp
+    monkeypatch.setattr(sp, "run", lambda cmd, **k: cmds.append(cmd) or types.SimpleNamespace(returncode=0))
+
+    _revoice(tmp_path, monkeypatch, GAPPY, clip_ms=4000, video_seconds=None)
+
+    assert len(cmds) == 1 and any("seg0003" in str(part) for part in cmds[0]), cmds
+
+
+def test_a_small_overrun_is_left_alone_rather_than_squeezed(tmp_path, monkeypatch):
+    """Whisper often ends one sentence exactly where the next begins. A slightly
+    long synthesis there is absorbed at the next real pause; tempo-adjusting
+    every such sentence would make the speaking rate wobble."""
+    tight = [
+        {"start": 0.0, "end": 2.0, "text": "First sentence."},
+        {"start": 2.0, "end": 4.0, "text": "Second sentence."},
+        {"start": 8.0, "end": 10.0, "text": "Third sentence."},
+    ]
+    monkeypatch.setattr(processing.VideoProcessor, "_per_sentence_speed",
+                        lambda self, *a, **k: 1.0)
+    cmds = []
+    import subprocess as sp
+    monkeypatch.setattr(sp, "run", lambda cmd, **k: cmds.append(cmd) or types.SimpleNamespace(returncode=0))
+
+    # 2.2 s of speech in a 2.0 s slot: 10% over, inside the tolerance.
+    captured, _ = _revoice(tmp_path, monkeypatch, tight, clip_ms=2200, video_seconds=12.0)
+
+    assert cmds == [], "a 10% overrun should not be tempo-adjusted"
+    # The third sentence still starts on time: the overrun ate into the pause.
+    master = captured["assemble"](captured["chunks"], False)
+    assert len(master) == pytest.approx(10200, abs=50)
+
+
+def test_a_re_voice_where_every_sentence_fails_reports_failure(tmp_path, monkeypatch):
+    """No audio at all is a failed job, not a silent video."""
+    pm = _manager(tmp_path, GAPPY)
+    proc = processing.VideoProcessor(voice_id="v", speed=1.0)
+
+    class _DeadTTS:
+        def generate_audio(self, **kwargs):
+            raise RuntimeError("voice unavailable")
+
+    monkeypatch.setattr(proc, "_create_tts_generator", lambda: _DeadTTS())
+    monkeypatch.setattr(proc, "_calibrate_tts_baseline", lambda *a, **k: 15.0)
+
+    import core.video_creator as vc
+    monkeypatch.setattr(vc, "replace_video_audio", lambda **kw: True)
+    monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_probe_duration", lambda path: 20.0)
+
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    assert proc._revoice_video(pm, source, tmp_path / "out.mp4") is False
