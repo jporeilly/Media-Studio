@@ -1,0 +1,19 @@
+# Line endings.
+#
+# The repo is developed on Windows with core.autocrlf=true, which is fine for
+# everything git owns: it stores LF and checks out CRLF, and a commit normalises
+# on the way in. The problem is the files a TOOL rewrites behind git's back.
+#
+# Cargo rewrites Cargo.toml and Cargo.lock with LF every time the desktop shell
+# is built. autocrlf then sees a working file that no longer matches what a
+# checkout would produce and reports it modified forever - content identical,
+# `git diff` empty, `git status` never clean. That cost a release build once:
+# the staging gate refused to package what it believed was a dirty tree, and it
+# has drawn the eye at every status check since.
+#
+# Pinning these to LF makes the checkout match what cargo writes, so there is
+# nothing to report. Nothing else is declared here on purpose: a blanket
+# `* text=auto` would renormalise the whole tree in one commit and bury real
+# changes under thousands of line-ending-only ones.
+desktop/src-tauri/Cargo.toml text eol=lf
+desktop/src-tauri/Cargo.lock text eol=lf
