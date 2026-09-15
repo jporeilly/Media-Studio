@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.0] - 2026-09-15
+
+The studio ported over: the slide editor and its AI
+assistant, generation options, studio-wide narration defaults with Kokoro, and a re-voice that keeps
+step with the picture.
+
 - [fix] **Re-voiced video stays in step with the picture.** Re-voicing an imported video rebuilds it as a single section, and only the *first* sentence of a section was pinned to the moment it was spoken — every sentence after it ran on immediately, so each pause in the original was squeezed out of the new narration while the picture kept it. The narration drifted further ahead with every pause, and on a clip with any real gaps the end was badly out of sync. Each sentence is now pinned to its own timestamp: the pause that followed it becomes its slack, whatever it does not use comes back as silence, and a sentence is only sped up when it would overrun the moment the next one is due (the last one stays inside its own slot so the video's end cannot cut it off mid-word). The speed asked of the voice is worked out per sentence too, against its own window, rather than once for the whole clip. The closing sentence may use the video's tail after the speaker stops (the narration is padded to the video and trimmed there), falling back to its own slot when the duration cannot be probed, and a small overrun is left alone rather than squeezed — Whisper often ends one sentence exactly where the next begins, and adjusting every one of those would make the speaking rate wobble. A re-voice in which every sentence fails to synthesise now reports failure instead of producing a silent video. Verified on a real clip: every sentence lands within ~10 ms of its original timestamp, against drift of up to five seconds before. `tests/test_revoice_sync.py` (11) — #revoice-sync
 - [chore] **Log lines say `mediastudio`, not `pptx2video`.** The engine's logger root (and the eleven modules that named theirs directly) carried the predecessor's package name; every line in the desktop splash and the server log now reads `[mediastudio.VIDEO]`, `[mediastudio.IMPORT]` and so on. The optional environment overrides moved with it: `PPTX2VIDEO_PORT`, `…_OLLAMA_URL`, `…_OLLAMA_MODEL`, `…_OLLAMA_ENABLED`, `…_EDGE_TTS_VOICE`, `…_MUSIC_VOLUME`, `…_TRANSITION_PAUSE` are now `MEDIA_STUDIO_*`, matching `MEDIA_STUDIO_NO_BROWSER` — #log-name
 - [docs] **GPU transcription.** Whisper runs on the GPU when the optional CUDA 12 runtime wheels are present (`pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`, about 1 GB); without them the engine logs "GPU transcription failed … retrying on CPU" and continues on the CPU. Installed on the development machine and in its packaged app today; an in-app "Enable GPU transcription" action is on the list — #gpu
