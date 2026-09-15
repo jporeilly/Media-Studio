@@ -491,21 +491,23 @@ rules; `api.blob` was added to `frontend/src/api/client.ts`; the row controls ar
 component tree — as scoped. Tests: `tests/test_narration_preview.py` (29), vitest
 `narration.test.ts` (10), `tests/test_project_ownership.py` (+1 route in the sweep).
 
-Six things the build changed about the design above. Read them before phase 3, because five
-of them contradict a line that still reads as written:
+Six things the build changed about the design above. Read them before phase 3, because four
+of them contradict a line that still reads as written (§5's own errors were corrected in
+place instead, since the next reader will rely on them):
 
-- **The provider must never write to the cache path.** §5's "FileResponse straight from the
-  TTS cache path" is where the clip is *read* from; pointing `generate_audio` at it (its
-  no-`output_path` default) hands the provider the shared cache entry to stream a download
-  into, and the only completeness check anywhere is that the file exists. That is a
-  half-written file served to a second press, and — worse — a dropped stream leaving a
-  truncated entry at that key forever, read by every later preview and copied out by every
-  later **re-voice**, which counts it a success and muxes the stump into the video, straight
-  past phase 1's failed-sentence counting. Shipped as a private `.part` file per press
-  published with an atomic rename (`services.projects.replace_with_retry`, shared with
-  `save_project` rather than copied), an empty result refused, and a zero-byte entry already
-  at the key removed and remade. **Phase 3 inherits the rule:** anything that hands a
-  generator a path must hand it a private one.
+- **The provider must never write to the cache path.** §5 originally read "FileResponse
+  straight from the TTS cache path"; that path is where the clip is *read* from, and it has
+  been corrected above. Pointing `generate_audio` at it (its no-`output_path` default) hands
+  the provider the shared cache entry to stream a download into, and the only completeness
+  check anywhere is that the file exists. That is a half-written file served to a second
+  press, and — worse — a dropped stream leaving a truncated entry at that key forever, read
+  by every later preview and copied out by every later **re-voice**, which counts it a success
+  and muxes the stump into the video, straight past phase 1's failed-sentence counting.
+  Shipped as a private `.part` file per press published with an atomic rename
+  (`services.projects.replace_with_retry`, shared with `save_project` rather than copied), an
+  empty result refused, and a zero-byte entry already at the key removed and remade.
+  **Phase 3 inherits the rule:** anything that hands a generator a path must hand it a
+  private one.
 - **A plain `<audio src="/api/…">` was the wrong instruction** (§5's last line). It works —
   the cookie rides along — but a media element is told only that its source failed, so every
   message this route writes (the 409, the voice-mismatch 400, the 502 naming the provider)
