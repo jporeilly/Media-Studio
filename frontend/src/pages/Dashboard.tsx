@@ -35,7 +35,7 @@ export default function DashboardPage() {
         {FEATURES.map((f) => {
           const Icon = f.icon;
           return (
-            <Card key={f.title}>
+            <Card key={f.title} className="os-tile">
               <EmptyState
                 icon={<Icon size={30} />}
                 title={f.title}

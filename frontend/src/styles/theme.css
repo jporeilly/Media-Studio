@@ -257,6 +257,15 @@ p { margin: 0 0 8px; }
 .os-empty-title { font-weight: 600; color: var(--text-2); }
 .os-empty-sub { font-size: 13px; }
 .os-empty-action { margin-top: 8px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+
+/* Dashboard feature tiles. The grid already stretches the cards to one height,
+   but the empty-state inside each one was only as tall as its own content, so
+   a description that wrapped to three lines pushed its button lower than the
+   two-line ones beside it. The card becomes a column, the description takes
+   the slack, and every button lands on the same line across the row. */
+.os-tile { height: 100%; display: flex; flex-direction: column; }
+.os-tile > .os-empty { flex: 1; justify-content: flex-start; }
+.os-tile .os-empty-sub { flex: 1; }
 .os-spinner { display: flex; align-items: center; gap: 8px; color: var(--muted); padding: 16px; }
 .os-spin { animation: os-spin 1s linear infinite; }
 @keyframes os-spin { to { transform: rotate(360deg); } }
