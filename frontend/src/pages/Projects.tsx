@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Film, FolderOpen, Presentation, Trash2, Upload } from "lucide-react";
 import { api, errorMessage } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 import { Button, Card, EmptyState, ErrorBox, PageHeader, Spinner, Table } from "../components/ui";
 import { relativeTime } from "../lib/format";
 
@@ -14,6 +15,10 @@ interface Project {
   size_bytes: number;
   slide_count: number | null;
   created_at: string;
+  /** Who imported it. Null on projects imported before ownership existed — those are admin-owned. */
+  owner_id?: string | null;
+  /** Their display name as it was at import, so it still reads after the account is gone. */
+  owner_name?: string | null;
 }
 
 const ACCEPT = ".pptx,.pdf,.mp4,.mov,.mkv,.avi,.webm,.m4v";
@@ -38,8 +43,12 @@ function fmtBytes(n: number): string {
 
 export default function ProjectsPage() {
   const qc = useQueryClient();
+  const { user } = useAuth();
   const fileRef = useRef<HTMLInputElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Only admins see the list of everyone's projects, so only they get an Owner
+  // column — for anyone else it would be a column of their own name.
+  const showOwner = user?.role === "admin";
 
   const projects = useQuery({
     queryKey: ["projects"],
@@ -121,7 +130,7 @@ export default function ProjectsPage() {
         </Card>
       ) : (
         <Card style={{ padding: 0 }}>
-          <Table headers={["Name", "Type", "Slides", "Size", "Imported", ""]}>
+          <Table headers={["Name", "Type", "Slides", "Size", ...(showOwner ? ["Owner"] : []), "Imported", ""]}>
             {list.map((p) => {
               const k = KIND[p.kind];
               const Icon = k.icon;
@@ -139,6 +148,16 @@ export default function ProjectsPage() {
                   </td>
                   <td style={{ fontVariantNumeric: "tabular-nums" }}>{p.slide_count ?? "—"}</td>
                   <td style={{ fontVariantNumeric: "tabular-nums" }}>{fmtBytes(p.size_bytes)}</td>
+                  {showOwner && (
+                    <td className="os-nowrap">
+                      {p.owner_name || (
+                        // Imported before ownership existed: admin-owned, never public.
+                        <span className="os-dim" title="Imported before projects had owners — only admins can see it.">
+                          unassigned
+                        </span>
+                      )}
+                    </td>
+                  )}
                   <td title={p.created_at} style={muted}>{relativeTime(p.created_at)}</td>
                   <td style={{ textAlign: "right" }}>
                     <button

@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from api.audit import JOB_CANCEL, audit
 from api.deps import current_user
 from services import jobs as job_store
 
@@ -29,4 +30,6 @@ def cancel_job(job_id: str, user: dict = Depends(current_user)):
         raise HTTPException(status_code=404, detail="Job not found.")
     if job.get("user_id") and job["user_id"] != user["id"] and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Only the user who started this job, or an admin, can cancel it.")
-    return job_store.cancel(job_id)
+    cancelled = job_store.cancel(job_id)
+    audit(JOB_CANCEL, user=user, entity="job", entity_id=job_id, detail=job.get("kind"))
+    return cancelled

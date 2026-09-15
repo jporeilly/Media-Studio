@@ -247,3 +247,118 @@ def test_languages_endpoint_lists_targets(client):
     names = [x["name"] for x in langs]
     assert "Spanish" in names and "French" in names
     assert all(x.get("subtag") for x in langs)  # every entry carries a subtag
+
+
+class _KeepsNarration(_FakeVideoProcessor):
+    """A re-voice that also leaves the narration track behind, as the real
+    engine does once the audio swap has succeeded."""
+
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
+        ok = super()._revoice_video(pm, source_video, output_path, progress=progress, file_label=file_label)
+        processing.narration_path_for(output_path).write_bytes(b"NARRATION")
+        return ok
+
+
+def test_the_narration_track_is_recorded_and_downloadable(client, monkeypatch):
+    """The new voice on its own, for editing the video in another tool."""
+    monkeypatch.setattr(processing, "VideoProcessor", _KeepsNarration)
+    pid = _video_with_transcript()
+
+    assert client.get(f"/api/projects/{pid}/tracks/narration").status_code == 404
+
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+
+    assert store.get_project(pid)["narration_audio"] == "clip_revoiced_narration.mp3"
+    got = client.get(f"/api/projects/{pid}/tracks/narration")
+    assert got.status_code == 200
+    assert got.content == b"NARRATION"
+    assert got.headers["content-type"].startswith("audio/mpeg")
+
+
+def test_no_narration_is_claimed_when_the_engine_kept_none(client, monkeypatch):
+    """A project re-voiced before the track was kept - or by an engine whose
+    copy failed - must not advertise one."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    pid = _video_with_transcript()
+
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+
+    assert "narration_audio" not in store.get_project(pid)
+    assert client.get(f"/api/projects/{pid}/tracks/narration").status_code == 404
+
+
+def test_a_stale_narration_claim_is_cleared_by_the_next_re_voice(client, monkeypatch):
+    """The record is rewritten from what is actually on disk, so a re-voice
+    that kept no track cannot leave the previous one's claim standing."""
+    monkeypatch.setattr(processing, "VideoProcessor", _KeepsNarration)
+    pid = _video_with_transcript()
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+    assert store.get_project(pid).get("narration_audio")
+
+    processing.narration_path_for(store.PROJECTS_DIR / pid / "clip_revoiced.mp4").unlink()
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+
+    assert "narration_audio" not in store.get_project(pid)
+
+
+def test_the_picture_and_the_original_audio_are_downloadable(client):
+    """Both already existed on disk and were simply never served: the imported
+    video, and the audio extracted from it when it was transcribed."""
+    pid = _video_with_transcript()
+
+    picture = client.get(f"/api/projects/{pid}/tracks/picture")
+    assert picture.status_code == 200
+    assert picture.content == b"video-bytes"
+    assert picture.headers["content-disposition"].startswith("attachment")
+
+    # audio.wav is written by the transcription step, which is mocked here.
+    assert client.get(f"/api/projects/{pid}/tracks/original-audio").status_code == 404
+    (store.PROJECTS_DIR / pid / "audio.wav").write_bytes(b"WAV")
+    original = client.get(f"/api/projects/{pid}/tracks/original-audio")
+    assert original.status_code == 200 and original.content == b"WAV"
+
+
+def test_an_unknown_track_names_the_ones_that_exist(client):
+    pid = _video_with_transcript()
+    r = client.get(f"/api/projects/{pid}/tracks/subtitles")
+    assert r.status_code == 404
+    assert "picture" in r.json()["detail"] and "narration" in r.json()["detail"]
+
+
+def test_a_track_filename_cannot_escape_the_project_directory(client):
+    """The record is the only source of the filename, but a tampered one must
+    not read an arbitrary file - the same guard the video routes use."""
+    pid = _video_with_transcript()
+    rec = store.get_project(pid)
+    rec["narration_audio"] = "../../../../Windows/win.ini"
+    store.save_project(rec)
+
+    assert client.get(f"/api/projects/{pid}/tracks/narration").status_code == 404
+
+
+def test_tracks_are_refused_for_a_deck_or_a_pdf(client):
+    """Only a video has tracks. Every kind of project has a source file, so a
+    route that checked only the track name would hand back a deck's .pptx as
+    the "picture" - labelled as video."""
+    for filename, body in (("slides.pptx", b"PK-deck"), ("paper.pdf", b"%PDF-1.4")):
+        pid = store.import_upload(filename, body)["id"]
+        r = client.get(f"/api/projects/{pid}/tracks/picture")
+        assert r.status_code == 400, f"{filename}: {r.status_code}"
+        assert "video projects" in r.json()["detail"]
+
+
+def test_the_picture_keeps_its_own_container_type(client):
+    """.mov, .mkv, .avi, .webm and .m4v are all importable, so the picture
+    cannot be announced as video/mp4 on the way out."""
+    pid = store.import_upload("clip.mov", b"quicktime-bytes")["id"]
+    store.set_transcript(pid, [{"start": 0.0, "end": 1.0, "text": "Hello."}])
+
+    r = client.get(f"/api/projects/{pid}/tracks/picture")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("video/quicktime"), r.headers["content-type"]
+    assert "clip.mov" in r.headers["content-disposition"]

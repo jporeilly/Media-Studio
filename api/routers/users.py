@@ -7,6 +7,7 @@ in ``api.passwords`` and is applied here and by the change-password endpoint.
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from api.audit import USER_CREATE, USER_RESET_PASSWORD, USER_UPDATE, audit, changed_keys
 from api.deps import admin_only
 from api.passwords import validate_password
 from api.schemas import ResetPasswordIn, UserIn, UserPatch
@@ -49,9 +50,12 @@ def create(body: UserIn, admin: dict = Depends(admin_only)):
         raise HTTPException(status_code=400, detail="Unknown role")
     _check_policy(body.password, username)
     try:
-        return create_user(username, body.password, display_name, role=body.role, must_change_password=True)
+        created = create_user(username, body.password, display_name, role=body.role, must_change_password=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    audit(USER_CREATE, user=admin, entity="user", entity_id=created["id"],
+          detail=f"{created['username']} ({created['role']})")
+    return created
 
 
 @router.patch("/{user_id}")
@@ -85,6 +89,8 @@ def patch(user_id: str, body: UserPatch, admin: dict = Depends(admin_only)):
     updated = update_user(user_id, **changes)
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
+    audit(USER_UPDATE, user=admin, entity="user", entity_id=user_id,
+          detail=f"{updated['username']}: {changed_keys(changes)}")
     return updated
 
 
@@ -97,4 +103,7 @@ def reset_password(user_id: str, body: ResetPasswordIn, admin: dict = Depends(ad
     _check_policy(body.new_password, target["username"])
     change_password(user_id, body.new_password, must_change=True)
     delete_sessions_for_user(user_id)
+    # Whose password was reset - never the temporary password itself.
+    audit(USER_RESET_PASSWORD, user=admin, entity="user", entity_id=user_id,
+          detail=target["username"])
     return {"ok": True}

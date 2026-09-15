@@ -50,12 +50,14 @@ instead, where they exist and are exercised.
 
 ## Media Studio today (the gaps that matter)
 
-- Projects are ownerless: `services/projects.py:100-116` writes no user; `list_projects()`
-  returns everything; every route is `Depends(current_user)` with no filter — any editor
-  can delete any project. Rendered output already lives in the project directory, so no
-  directory restructure is needed: add `owner_id`/`owner_name`, filter lists (admins see
-  all), enforce ownership on get/delete/generate/revoice/video, backfill legacy records
-  as admin-owned (never "public").
+- ~~Projects are ownerless~~ — **CLOSED by 4a.** A project records `owner_id` and the
+  denormalised `owner_name` in its own `project.json` (`services/projects.py`);
+  `list_projects()` still returns every record and the API filters it, and all thirty
+  `{pid}` routes fetch through `api.deps.require_project` (404 for a project that does not
+  exist, 403 for one that is not the caller's). A record with no `owner_id` predates
+  ownership and is admin-owned, logged once per process. No directory restructure was
+  needed, as expected: the API renders into the project's own directory
+  (`api/routers/projects.py`), so every output is owned by the project that produced it.
 - `services/jobs.py`: 2 workers, in-memory, no cancel, no per-kind limits. PowerPoint COM
   (`core/pptx_exporter.py:61-93`, GetActiveObject/Dispatch) is unguarded → **two concurrent
   deck generations race on one PowerPoint instance TODAY** (live bug).
@@ -76,12 +78,27 @@ instead, where they exist and are exercised.
 
 ## Recommended vertical 4, in build order
 
-- **4a Ownership + audit** (correctness first): `owner_id` on the project record, list
-  filtering, per-route checks, legacy backfill; `audit_log` table (users(id) nullable,
-  denormalised username, action, entity, entity_id, detail, created_at) + `audit()` called
-  from EVERY mutating endpoint (login/logout, project import/delete, generate, revoice,
-  user create/patch/reset, settings update, asset upload); `GET /api/admin/audit`
-  (limit, action, user filters) + `POST /api/admin/maintenance/purge-audit?days=`.
+- **4a Ownership + audit** (correctness first) — **DONE**, shipped as specified; see
+  CHANGELOG `#project-ownership` and `#audit-log`. `owner_id` + `owner_name` on the
+  project record (`services/projects.py`), list filtering and per-route checks through the
+  one helper `api.deps.require_project`, legacy records admin-owned and noted once per
+  process; `audit_log` (users(id) nullable, denormalised username, action, entity,
+  entity_id, detail, created_at, indexed on created_at DESC / action / user_id) in
+  `api/store.py`, written by the never-raises `audit()` in `api/audit.py`;
+  `GET /api/admin/audit` (limit, action, user — all filtered in SQL) and
+  `POST /api/admin/maintenance/purge-audit?days=` in the new `api/routers/admin.py`; an
+  Audit card in Settings and an Owner column on Projects for admins. Tests:
+  `tests/test_project_ownership.py` (9), `tests/test_audit.py` (26).
+  Three notes for whoever does 4b–4e:
+  - Actions are NAMED CONSTANTS with a vocabulary (`api.audit.ACTIONS`), not the inline
+    strings OpenSight uses — its `update_settings` / `settings_update` drift is exactly
+    what a filter cannot recover from. A test refuses an inline action string in a router.
+  - "EVERY mutating endpoint" is enforced by the app's own route table, not by hand:
+    31 of 33 mutating routes audit, and the two AI routes that record nothing are exempted
+    **in writing** in `tests/test_audit.py`. A new route must audit or join that list.
+    `asset upload` above is not audited only because no asset endpoint exists yet (2b).
+  - The ownership sweep in `tests/test_project_ownership.py` is likewise checked against
+    the live route table, so a new `{pid}` route cannot skip the check unnoticed.
 - **4b Notifications**: OpenSight's table (type CHECK: job|system|account|asset) + three
   endpoints + a bell in `layout/Shell.tsx`'s top bar; producers: job done/failed, account
   created/reset, settings changed (to admins).

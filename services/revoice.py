@@ -102,6 +102,16 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         raise RuntimeError("Re-voice failed")
 
     record["revoiced_video"] = out.name
+    # The narration on its own, for editing the video elsewhere: same length as
+    # the picture and starting at the same zero, so it drops straight onto a
+    # timeline beside the original. Recorded only when it is really there - the
+    # copy is best-effort and an older project re-voiced before this existed has
+    # none.
+    narration = processing.narration_path_for(out)
+    if narration.is_file():
+        record["narration_audio"] = narration.name
+    else:
+        record.pop("narration_audio", None)
     if language:
         record["revoiced_language"] = language
     store.save_project(record)

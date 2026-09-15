@@ -1,4 +1,11 @@
-"""Tests for the project store: kind detection, import, list/get/delete."""
+"""Tests for the project store: kind detection, import, list/get/delete, and
+the owner recorded on the record.
+
+The store only RECORDS the owner; who may see or touch a project is decided in
+``api.deps`` and tested in ``test_project_ownership.py``.
+"""
+
+import json
 
 import pytest
 
@@ -32,9 +39,24 @@ def test_import_upload_creates_record_and_saves_file(tmp_projects_dir):
     assert rec["size_bytes"] == 10
     assert rec["slide_count"] is None  # not a real pptx -> reader fails -> None
     assert rec["created_at"]
+    # No owner named: the record says so rather than leaving the key out, so a
+    # reader never has to guess whether the field is missing or empty.
+    assert rec["owner_id"] is None and rec["owner_name"] is None
 
     saved = tmp_projects_dir / rec["id"] / "Deck One.pptx"
     assert saved.is_file() and saved.read_bytes() == b"1234567890"
+
+
+def test_import_upload_records_the_owner_on_the_record_not_in_a_database(tmp_projects_dir):
+    """Ownership lives in project.json so a project stays a directory you can
+    zip, and the display name is denormalised so it still reads after the
+    account is gone."""
+    rec = projects.import_upload("Deck.pptx", b"x", owner_id="u-123", owner_name="Olive Owner")
+    assert (rec["owner_id"], rec["owner_name"]) == ("u-123", "Olive Owner")
+
+    meta = json.loads((tmp_projects_dir / rec["id"] / "project.json").read_text(encoding="utf-8"))
+    assert meta["owner_id"] == "u-123" and meta["owner_name"] == "Olive Owner"
+    assert projects.get_project(rec["id"])["owner_name"] == "Olive Owner"
 
 
 def test_import_upload_detects_video():
@@ -56,9 +78,10 @@ def test_import_upload_strips_directory_from_filename(tmp_projects_dir):
 
 
 def test_list_get_delete_cycle():
-    a = projects.import_upload("a.pptx", b"a")
-    b = projects.import_upload("b.mp4", b"bb")
+    a = projects.import_upload("a.pptx", b"a", owner_id="u-1", owner_name="One")
+    b = projects.import_upload("b.mp4", b"bb", owner_id="u-2", owner_name="Two")
 
+    # The store lists EVERY owner's projects; the API filters (api/deps.py).
     listed = projects.list_projects()
     assert {p["id"] for p in listed} == {a["id"], b["id"]}
     assert listed[0]["created_at"] >= listed[1]["created_at"]  # newest first

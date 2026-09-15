@@ -2,10 +2,11 @@
 
 **Current version:** 0.3.1
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
-assistant, generation options, transcription, re-voice, studio settings, accounts,
-self-update, the Windows desktop installer; see CHANGELOG.md). Still to come: the music
-library and the administration screens. The NiceGUI Slide Studio Enterprise remains the
-shipping product until parity.
+assistant, generation options, transcription, re-voice, studio settings, accounts, project
+ownership and the audit log, self-update, the Windows desktop installer; see CHANGELOG.md).
+Still to come: the music library and the rest of the administration work — notifications, a
+branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
+Enterprise remains the shipping product until parity.
 
 ## Where the version string lives
 

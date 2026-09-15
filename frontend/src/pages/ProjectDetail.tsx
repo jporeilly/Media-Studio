@@ -45,6 +45,7 @@ interface Project {
   rendered_at?: string;
   revoiced_video?: string;
   revoiced_language?: string;
+  narration_audio?: string;
 }
 interface Lang {
   name: string;
@@ -607,6 +608,40 @@ export default function ProjectDetailPage() {
                   </div>
                 </div>
               )}
+
+              {/* The picture and the two voice tracks as separate files. They
+                  share a zero, so they line up when dropped onto a timeline in
+                  Camtasia or any other editor - which is how you fix by hand
+                  anything the automatic fit gets wrong. Not the same length:
+                  the narration is padded to the picture only when it is muxed
+                  into the video, so the standalone file ends where the last
+                  sentence does. */}
+              <div style={{ display: "grid", gap: 8, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>Separate tracks</div>
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                  The picture and each voice as its own file, aligned to the same start, for editing in another tool.
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {/* The project's own filename, not a hard-coded .mp4: a .mov
+                      or .mkv import keeps its container all the way through. */}
+                  <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/tracks/picture`} download={p.source_filename}>
+                    <Film size={15} /> Picture
+                  </a>
+                  <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/tracks/original-audio`} download={`${p.name}-original.wav`}>
+                    <Mic size={15} /> Original audio
+                  </a>
+                  {p.narration_audio && (
+                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/tracks/narration`} download={`${p.name}-narration.mp3`}>
+                      <Mic size={15} /> New narration
+                    </a>
+                  )}
+                </div>
+                {!p.narration_audio && (
+                  <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                    Re-voice this video to get its narration as a separate track.
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </Card>

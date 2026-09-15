@@ -16,9 +16,11 @@ the whole app suite looks and feels the same.
 > subtitles, extra formats and Vimeo output presets, video transcription with an editable
 > transcript, re-voicing in a new voice or a translated language that keeps step with the
 > picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
-> configurable password policy, self-update from Git, and a Windows desktop installer are in
-> (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound library,
-> and the administration screens (per-project ownership, audit, notifications). Until parity,
+> configurable password policy, projects that belong to whoever imported them with an audit
+> log of every change for admins, self-update from Git, and a Windows desktop installer are
+> in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound
+> library, and the rest of the administration work (notifications, a branding lock, an admin
+> page of its own, per-kind job limits). Until parity,
 > the NiceGUI app at `C:\Projects\slidestudio_enterprise` remains the shipping product.
 
 ## Stack

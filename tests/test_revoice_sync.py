@@ -96,12 +96,13 @@ def _manager(tmp_path, segments):
 
 
 def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed=1.0,
-             video_seconds=None):
+             video_seconds=None, mux_ok=True):
     """Run _revoice_video with the engine stubbed; return the aligned chunks.
 
     ``video_seconds`` is what the duration probe reports for the source video;
     None stands for a probe that failed (no ffprobe), which is the fallback the
-    last sentence's bound has to cope with.
+    last sentence's bound has to cope with. ``mux_ok`` is what the final audio
+    swap reports, for the paths that only matter when it fails.
     """
     monkeypatch.setattr(_Seg, "next_ms", clip_ms)
     pm = _manager(tmp_path, segments)
@@ -124,7 +125,7 @@ def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed
     monkeypatch.setattr(processing, "assemble_master", _assemble)
 
     import core.video_creator as vc
-    monkeypatch.setattr(vc, "replace_video_audio", lambda **kw: True)
+    monkeypatch.setattr(vc, "replace_video_audio", lambda **kw: mux_ok)
     monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
     monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
     monkeypatch.setattr(vc, "_probe_duration", lambda path: video_seconds)
@@ -132,8 +133,9 @@ def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"video")
     ok = proc._revoice_video(pm, source, tmp_path / "out.mp4")
-    assert ok, "re-voice returned False"
+    assert ok is mux_ok, f"re-voice returned {ok}"
     captured["assemble"] = real_assemble
+    captured["ok"] = ok
     return captured, tts
 
 
@@ -350,3 +352,66 @@ def test_a_re_voice_where_every_sentence_fails_reports_failure(tmp_path, monkeyp
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"video")
     assert proc._revoice_video(pm, source, tmp_path / "out.mp4") is False
+
+
+def test_the_narration_is_kept_beside_the_video_for_editing(tmp_path, monkeypatch):
+    """The assembled narration lived only in the job's scratch directory and was
+    deleted with it, so the one file an editor most wants - the new voice alone,
+    starting at the same zero as the picture - was thrown away on every run. It
+    is kept beside the re-voiced video now.
+
+    The same START, not the same length: this is the master before the mux, and
+    the pad out to the video's duration happens during the audio swap."""
+    _revoice(tmp_path, monkeypatch, GAPPY)
+
+    track = processing.narration_path_for(tmp_path / "out.mp4")
+    assert track.is_file(), f"no narration track at {track}"
+    assert track.name == "out_narration.mp3"
+
+
+def test_no_narration_is_left_behind_when_the_audio_swap_fails(tmp_path, monkeypatch):
+    """A track claiming to belong to a video that was never produced would be
+    worse than none: it would be offered for download beside nothing."""
+    _revoice(tmp_path, monkeypatch, GAPPY, mux_ok=False)
+
+    assert not processing.narration_path_for(tmp_path / "out.mp4").exists()
+
+
+def test_a_narration_copy_that_fails_does_not_fail_the_re_voice(tmp_path, monkeypatch):
+    """The video is already made by the time the track is copied; losing the
+    convenience is not worth losing the render."""
+    import shutil as _shutil
+
+    def _boom(src, dst, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_shutil, "copy2", _boom)
+    captured, _ = _revoice(tmp_path, monkeypatch, GAPPY)
+
+    assert captured["ok"] is True
+
+
+def test_a_failed_copy_does_not_leave_the_previous_run_s_track(tmp_path, monkeypatch):
+    """The track's name is the same every run, so a second re-voice whose copy
+    failed would otherwise leave the FIRST run's file sitting there and the
+    project would go on offering it - in the old voice, and the old language -
+    as the narration for the new video. A copy that dies part way through would
+    leave a truncated file the record swears is good. Either way the project
+    must end up with no track rather than a lying one."""
+    import shutil as _shutil
+
+    _revoice(tmp_path, monkeypatch, GAPPY)
+    track = processing.narration_path_for(tmp_path / "out.mp4")
+    assert track.is_file(), "the first run must leave a track for this to mean anything"
+
+    real_copy = _shutil.copy2
+
+    def _copy_then_fail(src, dst, **kw):
+        real_copy(src, dst, **kw)  # a partial write: the file exists, then it dies
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_shutil, "copy2", _copy_then_fail)
+    _revoice(tmp_path, monkeypatch, GAPPY)
+
+    assert not track.exists(), "the previous run's track must not survive a failed copy"
+    assert not track.with_name(track.name + ".part").exists(), "no half-written file left behind"

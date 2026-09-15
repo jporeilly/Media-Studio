@@ -4,6 +4,7 @@ output folder, pacing)."""
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from api.audit import SETTINGS_PASSWORD_POLICY, SETTINGS_UPDATE, audit, changed_keys
 from api.deps import admin_only, current_user
 from api.passwords import PasswordPolicy, describe_policy, load_policy, save_policy
 from api.schemas import PasswordPolicyIn, StudioSettingsIn
@@ -26,7 +27,13 @@ def get_password_policy(user: dict = Depends(current_user)):
 @router.put("/password-policy")
 def put_password_policy(body: PasswordPolicyIn, admin: dict = Depends(admin_only)):
     """Replace the policy. It applies from the next password set anywhere."""
-    return _payload(save_policy(PasswordPolicy(**body.model_dump())))
+    fields = body.model_dump()
+    payload = _payload(save_policy(PasswordPolicy(**fields)))
+    # Key names only, like every settings audit - the rule is unconditional so
+    # that nobody has to judge, per setting, whether a value is sensitive.
+    audit(SETTINGS_PASSWORD_POLICY, user=admin, entity="settings", entity_id="password_policy",
+          detail=changed_keys(fields))
+    return payload
 
 
 def _studio_payload() -> dict:
@@ -45,8 +52,11 @@ def get_studio_settings(user: dict = Depends(current_user)):
 def put_studio_settings(body: StudioSettingsIn, admin: dict = Depends(admin_only)):
     """Change some of the studio defaults (a partial body). They apply to the
     next job; a bad value is refused as a whole with a readable 400."""
+    changes = body.model_dump(exclude_none=True)
     try:
-        studio_settings.update_settings(body.model_dump(exclude_none=True))
+        studio_settings.update_settings(changes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    audit(SETTINGS_UPDATE, user=admin, entity="settings", entity_id="studio",
+          detail=changed_keys(changes))
     return _studio_payload()

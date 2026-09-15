@@ -5,6 +5,7 @@ import { api, errorMessage } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { Button, Card, ErrorBox, PageHeader, Spinner } from "../components/ui";
 import { AccountsCard } from "../components/settings/AccountsCard";
+import { AuditCard } from "../components/settings/AuditCard";
 import { PasswordCard } from "../components/settings/PasswordCard";
 import { PasswordPolicyCard } from "../components/settings/PasswordPolicyCard";
 import { StudioCard } from "../components/settings/StudioCard";
@@ -213,8 +214,11 @@ export default function SettingsPage() {
 
       <StudioCard />
       <PasswordCard />
+      {/* The admin trio. Vertical 4d moves these three onto a dedicated /admin
+          page; each is self-contained so that is a move, not a rewrite. */}
       {isAdmin && <AccountsCard />}
       {isAdmin && <PasswordPolicyCard />}
+      {isAdmin && <AuditCard />}
     </>
   );
 }

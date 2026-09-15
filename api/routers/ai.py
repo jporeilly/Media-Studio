@@ -18,6 +18,9 @@ exists for either. A model call that fails during a sync operation is a 502
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
+from api.audit import (
+    AI_ENHANCE, AI_NOTES, AI_PACING, AI_QA, AI_QA_DOC, AI_QA_FIX, AI_TONE, AI_TRANSLATE, audit,
+)
 from api.deps import current_user
 from api.routers.slides import call, guard, writable
 from api.schemas import (
@@ -44,8 +47,12 @@ def _start(pid: str, kind: str, plan, user: dict):
     """409 while a job holds the project, validate (``plan`` raises for a bad
     request; it probes Ollama and reads the deck, so it runs outside the
     start lock), then attach the job - ``jobs.start`` checks again under the
-    lock, so two requests cannot both start one."""
-    writable(pid)
+    lock, so two requests cannot both start one.
+
+    The audit row is written by the ENDPOINT, not here: each names its own
+    action constant, and the route-coverage guard (tests/test_audit.py) reads
+    the endpoint's own source."""
+    writable(pid, user)
     work = _ai(plan)
     return {"job_id": jobs.start(kind, work, project_id=pid, user_id=user["id"])}
 
@@ -54,7 +61,7 @@ def _start(pid: str, kind: str, plan, user: dict):
 def ai_status(pid: str, user: dict = Depends(current_user)):
     """Whether Ollama answers, the configured model, and whether this
     project's slide images may be shown to it (the editor's AI banner)."""
-    guard(pid)
+    guard(pid, user)
     return call(lambda: ai_slides.status(pid))
 
 
@@ -62,39 +69,53 @@ def ai_status(pid: str, user: dict = Depends(current_user)):
 def ai_notes(pid: str, body: AiNotesRequest, user: dict = Depends(current_user)):
     """Generate speaker notes from each slide's title, text and (optionally)
     image - the slides without notes by default. A job of kind ``ai-notes``."""
-    return _start(pid, "ai-notes", lambda: ai_slides.plan_notes(
+    started = _start(pid, "ai-notes", lambda: ai_slides.plan_notes(
         pid, mode="notes", scope=body.scope, slide_indexes=body.slide_indexes, use_vision=body.use_vision,
     ), user)
+    audit(AI_NOTES, user=user, entity="project", entity_id=pid,
+          detail=f"job {started['job_id']}, scope {body.scope}")
+    return started
 
 
 @router.post("/{pid}/ai/enhance")
 def ai_enhance(pid: str, body: AiEnhanceRequest, user: dict = Depends(current_user)):
     """Rewrite the notes for natural narration (every slide by default; a
     slide without notes gets them from its content). Kind ``ai-enhance``."""
-    return _start(pid, "ai-enhance", lambda: ai_slides.plan_notes(
+    started = _start(pid, "ai-enhance", lambda: ai_slides.plan_notes(
         pid, mode="enhance", scope=body.scope, slide_indexes=body.slide_indexes, use_vision=body.use_vision,
     ), user)
+    audit(AI_ENHANCE, user=user, entity="project", entity_id=pid,
+          detail=f"job {started['job_id']}, scope {body.scope}")
+    return started
 
 
 @router.post("/{pid}/ai/qa")
 def ai_qa(pid: str, user: dict = Depends(current_user)):
     """Review every slide's notes for grammar, tone, flow and transitions;
     the result lands on the project as ``qa_review``. Kind ``ai-qa``."""
-    return _start(pid, "ai-qa", lambda: ai_slides.plan_qa(pid), user)
+    started = _start(pid, "ai-qa", lambda: ai_slides.plan_qa(pid), user)
+    audit(AI_QA, user=user, entity="project", entity_id=pid, detail=f"job {started['job_id']}")
+    return started
 
 
 @router.post("/{pid}/ai/tone")
 def ai_tone(pid: str, body: AiToneRequest, user: dict = Depends(current_user)):
     """Rewrite every note for an audience (a preset, or a custom instruction). Kind ``ai-tone``."""
-    return _start(pid, "ai-tone", lambda: ai_slides.plan_tone(pid, body.tone, body.custom_prompt), user)
+    started = _start(pid, "ai-tone", lambda: ai_slides.plan_tone(pid, body.tone, body.custom_prompt), user)
+    audit(AI_TONE, user=user, entity="project", entity_id=pid,
+          detail=f"job {started['job_id']}, tone {body.tone}")
+    return started
 
 
 @router.post("/{pid}/ai/translate")
 def ai_translate(pid: str, body: AiTranslateRequest, user: dict = Depends(current_user)):
     """Translate every note in place; the result may name a matching voice. Kind ``ai-translate``."""
-    return _start(pid, "ai-translate", lambda: ai_slides.plan_translate(
+    started = _start(pid, "ai-translate", lambda: ai_slides.plan_translate(
         pid, body.language, match_voice=body.match_voice, provider=body.provider,
     ), user)
+    audit(AI_TRANSLATE, user=user, entity="project", entity_id=pid,
+          detail=f"job {started['job_id']}, {body.language}")
+    return started
 
 
 @router.post("/{pid}/ai/pacing")
@@ -102,23 +123,31 @@ def ai_pacing(pid: str, body: AiPacingRequest | None = None, user: dict = Depend
     """Insert narration pauses: the rules run now and answer with the tally;
     ``use_ai`` places them with the model per slide as a job (``ai-pacing``)."""
     if body and body.use_ai:
-        return _start(pid, "ai-pacing", lambda: ai_slides.plan_pacing_ai(pid), user)
-    writable(pid)
-    return call(lambda: ai_slides.pacing_rules(pid))
+        started = _start(pid, "ai-pacing", lambda: ai_slides.plan_pacing_ai(pid), user)
+        audit(AI_PACING, user=user, entity="project", entity_id=pid,
+              detail=f"job {started['job_id']}, model")
+        return started
+    writable(pid, user)
+    tally = call(lambda: ai_slides.pacing_rules(pid))
+    audit(AI_PACING, user=user, entity="project", entity_id=pid, detail="rules")
+    return tally
 
 
 @router.post("/{pid}/ai/qa-doc")
 def ai_qa_doc(pid: str, body: AiQaDocRequest | None = None, user: dict = Depends(current_user)):
     """Write a Q&A document (anticipated questions with answers) from the notes. Kind ``ai-qa-doc``."""
     count = body.num_questions if body else 10
-    return _start(pid, "ai-qa-doc", lambda: ai_slides.plan_qa_doc(pid, count), user)
+    started = _start(pid, "ai-qa-doc", lambda: ai_slides.plan_qa_doc(pid, count), user)
+    audit(AI_QA_DOC, user=user, entity="project", entity_id=pid,
+          detail=f"job {started['job_id']}, {count} questions")
+    return started
 
 
 @router.post("/{pid}/ai/analyze")
 def ai_analyze(pid: str, user: dict = Depends(current_user)):
     """Score the deck for video (text density, notes coverage, visuals): the
     rules always, the model's suggestions when Ollama answers. Synchronous."""
-    guard(pid)
+    guard(pid, user)
     return _ai(lambda: ai_slides.analyze(pid))
 
 
@@ -126,7 +155,7 @@ def ai_analyze(pid: str, user: dict = Depends(current_user)):
 def ai_enhance_one(pid: str, index: int, body: AiEnhanceOneRequest | None = None, user: dict = Depends(current_user)):
     """A rewrite of one slide's notes as a proposal - nothing is saved; the
     editor shows it as a draft with Revert. Synchronous (one model call)."""
-    guard(pid)
+    guard(pid, user)
     body = body or AiEnhanceOneRequest()
     return _ai(lambda: ai_slides.enhance_one(pid, index, use_vision=body.use_vision, notes=body.notes))
 
@@ -134,14 +163,17 @@ def ai_enhance_one(pid: str, index: int, body: AiEnhanceOneRequest | None = None
 @router.post("/{pid}/slides/{index}/ai/qa-fix")
 def ai_qa_fix(pid: str, index: int, body: AiQaFixRequest, user: dict = Depends(current_user)):
     """Fix one QA criterion on one slide (saved; the review marks it fixed). Returns the slide."""
-    writable(pid)
-    return _ai(lambda: ai_slides.qa_fix(pid, index, body.criterion, body.issue))
+    writable(pid, user)
+    slide = _ai(lambda: ai_slides.qa_fix(pid, index, body.criterion, body.issue))
+    audit(AI_QA_FIX, user=user, entity="project", entity_id=pid,
+          detail=f"slide {index}, {body.criterion}")
+    return slide
 
 
 @router.get("/{pid}/export/qa")
 def export_qa_doc(pid: str, user: dict = Depends(current_user)):
     """Download the Q&A document the ``ai-qa-doc`` job wrote; 404 until one has."""
-    guard(pid)
+    guard(pid, user)
     path = call(lambda: ai_slides.qa_doc_path(pid))
     if path is None:
         raise HTTPException(status_code=404, detail="No Q&A document for this project yet.")

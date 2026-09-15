@@ -1,10 +1,16 @@
-"""SQLite-backed users and sessions for Media Studio Enterprise.
+"""SQLite-backed users, sessions and audit log for Media Studio Enterprise.
 
 Mirrors OpenSight's auth approach - bcrypt password hashes and opaque session
 tokens in an HTTP-only cookie - with the account model the Enterprise edition
 needs: two roles, deactivation instead of deletion, a must-change-password flag
 for new and reset accounts, and a last-login stamp. Everything lives in a single
 SQLite file under ``data/``.
+
+This module is the only place that speaks SQL. The audit *vocabulary* and the
+never-raises ``audit()`` façade live in ``api/audit.py``; the plain row
+functions here (``record_audit`` / ``list_audit`` / ``purge_audit``) raise like
+any other database call, and it is the façade that decides a failed audit write
+is not the caller's problem.
 """
 
 import sqlite3
@@ -35,6 +41,11 @@ _USER_COLUMN_MIGRATIONS = (
     ("last_login", "TEXT"),
 )
 
+# The most rows one ``GET /api/admin/audit`` may return, and what it returns
+# when the caller names no limit.
+AUDIT_MAX_LIMIT = 1000
+AUDIT_DEFAULT_LIMIT = 100
+
 
 def _connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,12 +59,15 @@ def _now() -> str:
 
 
 def init_db() -> None:
-    """Create the users and sessions tables, and bring an older users table up to date.
+    """Create the users, sessions and audit_log tables, and bring an older users
+    table up to date.
 
     Databases created before the account columns existed (the dev one, any
     packaged install) are migrated in place: each column missing from
     ``PRAGMA table_info(users)`` is added with its default, so existing rows
-    stay active with no forced password change.
+    stay active with no forced password change. ``audit_log`` arrives the same
+    way - ``CREATE TABLE IF NOT EXISTS`` on every start - so an install from
+    before the audit log simply grows the table on its next boot.
     """
     conn = _connect()
     try:
@@ -78,6 +92,29 @@ def init_db() -> None:
                 expires_at TEXT NOT NULL
             )"""
         )
+        # ``user_id`` is nullable: an action with no authenticated actor (a failed
+        # login) is a real audit event and must still be recorded. ``username``
+        # is denormalised on purpose - the row keeps reading sensibly after the
+        # account is gone, and a failed login can name the username that was
+        # tried even though it has no user row to point at.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT REFERENCES users(id),
+                username TEXT,
+                action TEXT NOT NULL,
+                entity TEXT,
+                entity_id TEXT,
+                detail TEXT,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        # created_at for the default newest-first read; action and user_id
+        # because ``GET /api/admin/audit`` filters on them in SQL rather than
+        # in the browser.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log (action)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log (user_id)")
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
         for name, declaration in _USER_COLUMN_MIGRATIONS:
             if name not in existing:
@@ -127,6 +164,16 @@ def _row_to_user(row: sqlite3.Row | None) -> dict | None:
     user = dict(row)
     user.pop("password_hash", None)
     return user
+
+
+def display_name_of(user: dict) -> str:
+    """The human name for a user row: their display name, else their username.
+
+    One definition, because two features denormalise it: the audit log copies
+    it onto every entry and a project copies it onto its record, so both still
+    read sensibly once the account is gone.
+    """
+    return (user.get("display_name") or "").strip() or (user.get("username") or "")
 
 
 def authenticate(username: str, password: str) -> dict | None:
@@ -323,5 +370,83 @@ def delete_sessions_for_user(user_id: str) -> None:
     try:
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ── audit log ────────────────────────────────────────────────────────────────
+# Plain SQL over ``audit_log``. These raise on failure like every other call in
+# this module; ``api.audit.audit`` is the one that decides a failed audit write
+# must not fail the user's request.
+
+def record_audit(action: str, user_id: str | None = None, username: str | None = None,
+                 entity: str | None = None, entity_id: str | None = None,
+                 detail: str | None = None) -> None:
+    """Insert one audit row, stamped now (UTC, ISO 8601).
+
+    A ``user_id`` that no longer has a users row is stored as NULL rather than
+    refused, so a write can never fail on a deleted account - the denormalised
+    ``username`` is what keeps the row readable. (SQLite does not enforce the
+    REFERENCES clause unless ``PRAGMA foreign_keys`` is on, which this app never
+    turns on, so this check is the enforcement rather than a way around it.)
+    """
+    conn = _connect()
+    try:
+        if user_id is not None and conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
+            user_id = None
+        conn.execute(
+            "INSERT INTO audit_log (user_id, username, action, entity, entity_id, detail, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, username, action, entity, entity_id, detail, _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_audit(limit: int = AUDIT_DEFAULT_LIMIT, action: str | None = None,
+               user_id: str | None = None) -> list[dict]:
+    """Audit rows newest first, filtered in SQL (never in the browser).
+
+    ``limit`` is clamped to 1..``AUDIT_MAX_LIMIT`` so no caller can ask for the
+    whole table. ``username`` is on the row, so there is no join.
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = AUDIT_DEFAULT_LIMIT
+    limit = max(1, min(limit, AUDIT_MAX_LIMIT))
+
+    clauses: list[str] = []
+    params: list = []
+    if action:
+        clauses.append("action = ?")
+        params.append(action)
+    if user_id:
+        clauses.append("user_id = ?")
+        params.append(user_id)
+    sql = "SELECT * FROM audit_log"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    # id breaks a tie: two rows written in the same microsecond still come back
+    # in the order they were written.
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+
+    conn = _connect()
+    try:
+        return [dict(row) for row in conn.execute(sql, params)]
+    finally:
+        conn.close()
+
+
+def purge_audit(days: int) -> int:
+    """Delete audit rows older than ``days`` days; returns how many went."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM audit_log WHERE created_at < ?", (cutoff,))
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()

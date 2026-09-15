@@ -1,13 +1,24 @@
 """Projects: import decks / PDFs / videos, list them, delete them."""
 
 from datetime import datetime, timezone
+import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from api.deps import current_user
+from api.audit import (
+    PROJECT_DELETE,
+    PROJECT_GENERATE,
+    PROJECT_IMPORT,
+    PROJECT_REVOICE,
+    PROJECT_TRANSCRIBE,
+    PROJECT_TRANSCRIPT_EDIT,
+    audit,
+)
+from api.deps import current_user, may_access_project, require_project
 from api.schemas import GenerateRequest, RevoiceRequest, TranscribeRequest, TranscriptUpdate
+from api.store import display_name_of
 from services import jobs, projects as store, revoice, slides, studio_settings, transcription
 from services.output_presets import get_preset
 
@@ -38,9 +49,39 @@ def _narration(provider: str | None, voice_id: str | None) -> tuple[str, str]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _media_type_of(path: Path) -> str:
+    """The media type for a file served straight from a project directory.
+
+    Guessed from the extension so an imported .mov or .mkv is not served as
+    video/mp4, with a plain byte stream when the guess fails rather than a
+    claim that could be wrong.
+    """
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def _project_file(pid: str, filename: str, missing: str) -> Path:
+    """A file inside a project's directory, refused if it escapes or is absent.
+
+    Every route that serves a file names it from the project record, so the
+    name is only as trustworthy as the record: resolve it, then confirm the
+    result is still under the project directory, and a tampered entry can
+    never read an arbitrary file. Written once here because four routes need
+    it and two of the three hand-written copies this replaced had no test of
+    their own.
+    """
+    base = (store.PROJECTS_DIR / pid).resolve()
+    path = (base / filename).resolve()
+    if base not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail=missing)
+    return path
+
+
 @router.get("")
 def list_projects(user: dict = Depends(current_user)):
-    return {"projects": store.list_projects()}
+    """The caller's projects — every project for an admin, their own otherwise
+    (``api.deps.may_access_project`` is the one rule; legacy records with no
+    owner are admin-owned)."""
+    return {"projects": [p for p in store.list_projects() if may_access_project(p, user)]}
 
 
 @router.post("/import")
@@ -59,31 +100,34 @@ async def import_project(file: UploadFile = File(...), user: dict = Depends(curr
     if len(data) > MAX_UPLOAD_BYTES:  # fallback when the client sent no size
         raise HTTPException(status_code=413, detail="File is larger than the 2 GB limit.")
     try:
-        return store.import_upload(file.filename or "upload", data)
+        record = store.import_upload(
+            file.filename or "upload", data,
+            owner_id=user["id"], owner_name=display_name_of(user),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    audit(PROJECT_IMPORT, user=user, entity="project", entity_id=record["id"],
+          detail=f"{record['kind']}: {record['source_filename']}")
+    return record
 
 
 @router.get("/{pid}")
 def get_project(pid: str, user: dict = Depends(current_user)):
-    record = store.get_project(pid)
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    return record
+    return require_project(pid, user)
 
 
 @router.delete("/{pid}", status_code=204)
 def delete_project(pid: str, user: dict = Depends(current_user)):
+    record = require_project(pid, user)
     if not store.delete_project(pid):
         raise HTTPException(status_code=404, detail="Project not found.")
+    audit(PROJECT_DELETE, user=user, entity="project", entity_id=pid, detail=record.get("name"))
 
 
 @router.post("/{pid}/transcribe")
 def transcribe(pid: str, body: TranscribeRequest | None = None, user: dict = Depends(current_user)):
     """Start transcribing a video project. Returns a job id to poll at /api/jobs/{id}."""
-    record = store.get_project(pid)
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    record = require_project(pid, user)
     if record.get("kind") != "video":
         raise HTTPException(status_code=400, detail="Only video projects can be transcribed.")
     # The request's model, else the studio's, resolved now so the job is pinned
@@ -98,15 +142,19 @@ def transcribe(pid: str, body: TranscribeRequest | None = None, user: dict = Dep
         lambda progress: transcription.transcribe_project(pid, model or None, progress),
         project_id=pid, user_id=user["id"],
     )
+    audit(PROJECT_TRANSCRIBE, user=user, entity="project", entity_id=pid, detail=f"job {job_id}")
     return {"job_id": job_id}
 
 
 @router.patch("/{pid}/transcript")
 def update_transcript(pid: str, body: TranscriptUpdate, user: dict = Depends(current_user)):
     """Replace the edited transcript segments on a project."""
+    require_project(pid, user)
     updated = store.set_transcript(pid, [seg.model_dump() for seg in body.transcript])
     if updated is None:
         raise HTTPException(status_code=404, detail="Project not found.")
+    audit(PROJECT_TRANSCRIPT_EDIT, user=user, entity="project", entity_id=pid,
+          detail=f"{len(body.transcript)} segments")
     return updated
 
 
@@ -120,9 +168,7 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     ``preview_seconds`` > 0 only the first seconds render, to a separate file
     served as the ``preview`` kind; the full video is left as it was.
     """
-    record = store.get_project(pid)
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    record = require_project(pid, user)
     if record.get("kind") not in ("deck", "pdf"):
         raise HTTPException(status_code=400, detail="Only deck and PDF projects can generate a video.")
 
@@ -207,6 +253,8 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     # One job per project: a render over a running AI job would save its own
     # stale copy of the notes over everything the AI loop wrote (409 meanwhile).
     job_id = jobs.start("generate", work, project_id=pid, user_id=user["id"])
+    audit(PROJECT_GENERATE, user=user, entity="project", entity_id=pid,
+          detail=f"job {job_id}, {'preview' if preview else body.preset}, {provider}/{voice_id}")
     return {"job_id": job_id}
 
 
@@ -218,9 +266,7 @@ def revoice_video(pid: str, body: RevoiceRequest, user: dict = Depends(current_u
     poll at /api/jobs/{id}; when the job is done the MP4 is downloadable at
     /api/projects/{pid}/revoiced-video.
     """
-    record = store.get_project(pid)
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    record = require_project(pid, user)
     if record.get("kind") != "video":
         raise HTTPException(status_code=400, detail="Only video projects can be re-voiced.")
     if not record.get("transcript"):
@@ -234,28 +280,21 @@ def revoice_video(pid: str, body: RevoiceRequest, user: dict = Depends(current_u
         ),
         project_id=pid, user_id=user["id"],
     )
+    audit(PROJECT_REVOICE, user=user, entity="project", entity_id=pid,
+          detail=f"job {job_id}, {provider}/{voice_id}" + (f", {body.language}" if body.language else ""))
     return {"job_id": job_id}
 
 
 @router.get("/{pid}/video")
 def get_video(pid: str, user: dict = Depends(current_user)):
     """Stream the generated MP4 for a project, or 404 if none has been made."""
-    record = store.get_project(pid)
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    record = require_project(pid, user)
 
+    missing = "No generated video for this project."
     filename = record.get("output_video")
     if not filename:
-        raise HTTPException(status_code=404, detail="No generated video for this project.")
-
-    # Resolve the path and confirm it stays under the project directory, so a
-    # tampered ``output_video`` can never read a file outside the store.
-    base = (store.PROJECTS_DIR / pid).resolve()
-    video_path = (base / filename).resolve()
-    if base not in video_path.parents or not video_path.is_file():
-        raise HTTPException(status_code=404, detail="No generated video for this project.")
-
-    return FileResponse(str(video_path), media_type="video/mp4")
+        raise HTTPException(status_code=404, detail=missing)
+    return FileResponse(str(_project_file(pid, filename, missing)), media_type="video/mp4")
 
 
 @router.get("/{pid}/outputs/{kind}")
@@ -263,22 +302,16 @@ def get_output(pid: str, kind: str, user: dict = Depends(current_user)):
     """Serve one sidecar file of the last generate job: ``srt``, ``vtt``,
     ``webm``, ``gif`` or ``mp3`` as a download, ``preview`` (the short render)
     inline. 404 when the project has none of that kind."""
-    record = store.get_project(pid)
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    record = require_project(pid, user)
 
     if kind not in OUTPUT_KINDS:
         raise HTTPException(status_code=404, detail=f"Unknown output kind '{kind}'.")
+    missing = f"No {kind} output for this project."
     filename = (record.get("outputs") or {}).get(kind)
     if not filename:
-        raise HTTPException(status_code=404, detail=f"No {kind} output for this project.")
+        raise HTTPException(status_code=404, detail=missing)
 
-    # Same guard as get_video: the resolved path must stay under the project dir.
-    base = (store.PROJECTS_DIR / pid).resolve()
-    path = (base / filename).resolve()
-    if base not in path.parents or not path.is_file():
-        raise HTTPException(status_code=404, detail=f"No {kind} output for this project.")
-
+    path = _project_file(pid, filename, missing)
     media_type, disposition = OUTPUT_KINDS[kind]
     return FileResponse(str(path), media_type=media_type, filename=path.name, content_disposition_type=disposition)
 
@@ -286,18 +319,54 @@ def get_output(pid: str, kind: str, user: dict = Depends(current_user)):
 @router.get("/{pid}/revoiced-video")
 def get_revoiced_video(pid: str, user: dict = Depends(current_user)):
     """Stream the re-voiced MP4 for a project, or 404 if none has been made."""
-    record = store.get_project(pid)
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found.")
+    record = require_project(pid, user)
 
+    missing = "No re-voiced video for this project."
     filename = record.get("revoiced_video")
     if not filename:
-        raise HTTPException(status_code=404, detail="No re-voiced video for this project.")
+        raise HTTPException(status_code=404, detail=missing)
+    return FileResponse(str(_project_file(pid, filename, missing)), media_type="video/mp4")
 
-    # Same guard as get_video: the resolved path must stay under the project dir.
-    base = (store.PROJECTS_DIR / pid).resolve()
-    video_path = (base / filename).resolve()
-    if base not in video_path.parents or not video_path.is_file():
-        raise HTTPException(status_code=404, detail="No re-voiced video for this project.")
 
-    return FileResponse(str(video_path), media_type="video/mp4")
+# The picture and each voice as its own file. An editor wants them apart: all
+# three start at the same zero, so they line up when dropped onto a timeline in
+# Camtasia or anything else, which is how you correct by hand what an automatic
+# fit gets wrong. Two of the three already existed on disk and were simply never
+# served - the imported video, and the audio extracted from it at transcription
+# time.
+TRACK_KINDS = {
+    # kind: (media type, the record field naming the file, what to say when absent)
+    # A picture's media type is taken from its own extension: .mov, .mkv, .avi,
+    # .webm and .m4v are all importable, and calling them video/mp4 would be a lie.
+    "picture": (None, "source_filename", "This project has no source video."),
+    "original-audio": ("audio/wav", None, "Transcribe the video first - its audio is extracted then."),
+    "narration": ("audio/mpeg", "narration_audio", "Re-voice the video first."),
+}
+
+# Written by the transcription step beside the source video.
+ORIGINAL_AUDIO_FILENAME = "audio.wav"
+
+
+@router.get("/{pid}/tracks/{kind}")
+def get_track(pid: str, kind: str, user: dict = Depends(current_user)):
+    """Download one track of a video project: ``picture``, ``original-audio``
+    or ``narration``. 404 when that track does not exist yet, with a message
+    saying which step produces it."""
+    record = require_project(pid, user)
+    # Only a video project has tracks. Without this the route would happily
+    # hand back a deck's .pptx as the "picture", because every kind of project
+    # has a source file and only the track name was being checked.
+    if record.get("kind") != "video":
+        raise HTTPException(status_code=400, detail="Only video projects have separate tracks.")
+    if kind not in TRACK_KINDS:
+        known = ", ".join(sorted(TRACK_KINDS))
+        raise HTTPException(status_code=404, detail=f"Unknown track '{kind}'. Known tracks: {known}.")
+
+    media_type, field, missing = TRACK_KINDS[kind]
+    filename = ORIGINAL_AUDIO_FILENAME if field is None else record.get(field)
+    if not filename:
+        raise HTTPException(status_code=404, detail=missing)
+
+    path = _project_file(pid, filename, missing)
+    return FileResponse(str(path), media_type=media_type or _media_type_of(path),
+                        filename=path.name, content_disposition_type="attachment")

@@ -99,8 +99,15 @@ def _deck_bytes(notes=NOTES) -> bytes:
     return buf.getvalue()
 
 
-def _import_deck(name="deck.pptx", notes=NOTES) -> str:
-    return store.import_upload(name, _deck_bytes(notes))["id"]
+def _import_deck(name="deck.pptx", notes=NOTES, owner: dict | None = None) -> str:
+    """A deck in the store. With no ``owner`` the record carries none, which
+    makes it admin-owned (api/deps.py) - right for the admin `client` fixture;
+    a test acting as an editor must name that editor as the owner."""
+    return store.import_upload(
+        name, _deck_bytes(notes),
+        owner_id=owner["id"] if owner else None,
+        owner_name=owner["display_name"] if owner else None,
+    )["id"]
 
 
 def _pdf_bytes(pages=2) -> bytes:
@@ -580,7 +587,7 @@ def test_only_the_starter_or_an_admin_may_cancel(client, monkeypatch):
     from api import store as auth_store
     from api.app import app
 
-    auth_store.create_user("editor", "Editor-pass-1", "Editor", role="editor", must_change_password=False)
+    editor_account = auth_store.create_user("editor", "Editor-pass-1", "Editor", role="editor", must_change_password=False)
     with TestClient(app) as editor:
         assert editor.post("/api/auth/login", json={"username": "editor", "password": "Editor-pass-1"}).status_code == 200
 
@@ -596,8 +603,9 @@ def test_only_the_starter_or_an_admin_may_cancel(client, monkeypatch):
         gate.set()
         assert _wait_job(client, job_id)["result"]["cancelled"] is True
 
-        # The editor's own job: the editor may cancel it, and so may the admin.
-        other = _import_deck("other.pptx")
+        # The editor's own job on the editor's own project: the editor may
+        # cancel it, and so may the admin.
+        other = _import_deck("other.pptx", owner=editor_account)
         fake, entered, gate = _gated(monkeypatch)
         job_id = editor.post(f"/api/projects/{other}/ai/enhance", json={}).json()["job_id"]
         assert entered.wait(5)

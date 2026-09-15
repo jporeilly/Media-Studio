@@ -1,9 +1,16 @@
 """Project store: imported decks, PDFs and videos — one directory per project.
 
 A deliberately small filesystem store (``data/projects/<id>/`` holding the
-uploaded source file plus ``project.json``). Single-user for now; when auth grows
-users, namespace this under the user id. The render/transcribe pipeline attaches
-to a project id.
+uploaded source file plus ``project.json``). The render/transcribe pipeline
+attaches to a project id.
+
+**Ownership** lives on the record (``owner_id`` + the denormalised
+``owner_name``), not in SQLite: a project stays "a directory you can zip", and
+a database row would rot the moment somebody moved or deleted a directory
+by hand. This module only *records* the owner — who is allowed to see or touch
+a project is an authorisation question and is answered in one place,
+``api.deps.may_access_project`` / ``require_project``, which knows about roles.
+``list_projects()`` returns everything on disk; the list endpoint filters it.
 """
 
 import json
@@ -62,7 +69,13 @@ def _slide_count(kind: str, path: Path) -> int | None:
 
 
 def list_projects() -> list[dict]:
-    """All project records, newest first. Skips any unreadable project.json."""
+    """All project records on disk, newest first (skipping any unreadable
+    project.json) — every owner's.
+
+    Filtering by owner is the API's job, not the store's: see
+    ``api.deps.may_access_project``, which is the one place that knows an admin
+    sees everything and a legacy record with no owner is admin-owned.
+    """
     if not PROJECTS_DIR.exists():
         return []
     out: list[dict] = []
@@ -89,8 +102,15 @@ def get_project(pid: str) -> dict | None:
         return None
 
 
-def import_upload(filename: str, data: bytes) -> dict:
-    """Create a project from an uploaded file. Raises ValueError on a bad type."""
+def import_upload(filename: str, data: bytes, *,
+                  owner_id: str | None = None, owner_name: str | None = None) -> dict:
+    """Create a project from an uploaded file. Raises ValueError on a bad type.
+
+    ``owner_id`` is the importing user's id and ``owner_name`` their display
+    name, kept on the record so a project still says who made it after that
+    account is gone. Both are omitted only by callers with no user to name (the
+    store's own tests); such a record is treated as admin-owned on read.
+    """
     name = Path(filename).name or "upload"
     kind = kind_for_suffix(Path(name).suffix)
     if kind is None:
@@ -111,6 +131,8 @@ def import_upload(filename: str, data: bytes) -> dict:
         "size_bytes": len(data),
         "slide_count": _slide_count(kind, dest),
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "owner_id": owner_id,
+        "owner_name": owner_name,
     }
     _meta_path(pid).write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record

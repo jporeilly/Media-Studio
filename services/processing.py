@@ -82,6 +82,24 @@ def _seconds(value, fallback: float) -> float:
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
 
 
+def narration_path_for(video_path: Path) -> Path:
+    """Where a re-voice keeps its narration as a standalone audio file.
+
+    The assembled narration used to live only in the job's scratch directory
+    and be deleted with it, so the one thing an editor most wants - the new
+    voice on its own, starting at the same zero as the picture - was thrown
+    away every time. Kept beside the re-voiced video, it can be dragged onto a
+    timeline in Camtasia or any other editor and lined up against the original.
+
+    It shares the picture's START, not its length: this is the assembled master
+    as it stands before the mux, and the pad out to the video's duration is
+    ffmpeg's ``apad`` inside the audio swap, so the standalone file ends where
+    the last sentence's audio does. It is also voice only - background music,
+    when configured, is mixed in during the swap and not into this file.
+    """
+    return Path(video_path).with_name(f"{Path(video_path).stem}_narration.mp3")
+
+
 def _split_sentences(text: str) -> list:
     """Split edited notes into sentences (on . ! ? followed by whitespace)."""
     return [p.strip() for p in _SENTENCE_BOUNDARY.split(text or "") if p.strip()]
@@ -1032,6 +1050,30 @@ class VideoProcessor:
                 background_music=bg_music,
                 music_volume=music_vol,
             )
+            if ok:
+                # Only once the mux succeeded, so a failed re-voice leaves no
+                # stray track behind claiming to belong to a video that is not
+                # there. A copy that fails is not worth failing the job over:
+                # the video is already made.
+                #
+                # Written aside and moved into place, because the name is the
+                # same every run: a second re-voice whose copy failed would
+                # otherwise leave the FIRST run's track sitting there, and the
+                # project would go on offering it - in the old voice, and the
+                # old language - as the narration for the new video. A copy
+                # that dies part way through would leave a truncated file the
+                # record swears is good. So on any failure both the partial
+                # file and any previous run's track are removed, and the
+                # project simply has no narration track rather than a lying one.
+                target = narration_path_for(output_path)
+                partial = target.with_name(target.name + ".part")
+                try:
+                    shutil.copy2(master_path, partial)
+                    partial.replace(target)
+                except OSError as exc:
+                    partial.unlink(missing_ok=True)
+                    target.unlink(missing_ok=True)
+                    logger.warning("Could not keep the narration track: %s", exc)
             return ok
 
         except Exception as e:
