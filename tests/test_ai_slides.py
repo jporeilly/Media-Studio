@@ -599,6 +599,11 @@ def test_only_the_starter_or_an_admin_may_cancel(client, monkeypatch):
         r = editor.post(f"/api/jobs/{job_id}/cancel")
         assert r.status_code == 403 and "Only the user who started this job" in r.json()["detail"]
         assert jobs.get(job_id)["cancel_requested"] is False
+        # Nor may they WATCH it: a job carries its project id, its progress
+        # messages and the names of the files it produced, so reading someone
+        # else's was the last cross-tenant leak once projects gained owners.
+        assert editor.get(f"/api/jobs/{job_id}").status_code == 403
+        assert client.get(f"/api/jobs/{job_id}").status_code == 200, "the starter still reads their own"
         assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 200
         gate.set()
         assert _wait_job(client, job_id)["result"]["cancelled"] is True
@@ -609,6 +614,7 @@ def test_only_the_starter_or_an_admin_may_cancel(client, monkeypatch):
         fake, entered, gate = _gated(monkeypatch)
         job_id = editor.post(f"/api/projects/{other}/ai/enhance", json={}).json()["job_id"]
         assert entered.wait(5)
+        assert client.get(f"/api/jobs/{job_id}").status_code == 200, "an admin reads anyone's"
         assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 200, "an admin cancels anyone's"
         gate.set()
         assert _wait_job(client, job_id)["result"]["cancelled"] is True

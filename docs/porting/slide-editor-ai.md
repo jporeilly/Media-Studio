@@ -1,5 +1,13 @@
 # Porting spec — slide editor + AI assistant (vertical 3)
 
+> **Status: DONE.** Both halves shipped in 0.3.0 — 3a the slide editor (thumbnail rail,
+> notes editing with undo and reset, per-slide voice and pause overrides, export with the
+> edited notes written back, slide previews behind a shared PowerPoint lock) and 3b the AI
+> assistant (notes, enhance, QA review with per-issue fixes, tone, translate, pacing,
+> analyze, the Q&A document, and per-slide enhance as a revertible proposal). See the
+> `#slide-editor` and `#ai-assistant` entries in CHANGELOG.md. This file is now a map of
+> the code, not work to do.
+
 Read-only survey, 2026-09-14. `core/` here is a byte-identical copy of SlideStudio's
 (only relative→absolute imports differ), so every engine entry point below exists at the
 same lines. The work is API + UI + one service layer, not engine porting.

@@ -11,9 +11,20 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 @router.get("/{job_id}")
 def get_job(job_id: str, user: dict = Depends(current_user)):
+    """A job's state. Only the user who started it, or an admin, may read it.
+
+    A job carries its kind, its project id, its progress messages and, when it
+    finishes, the names of the files it produced. Once projects have owners that
+    is somebody else's work, so reading one was the last cross-tenant leak: any
+    signed-in editor holding an id could watch it. Guarded exactly as ``cancel``
+    below is, including the older jobs that carry no ``user_id`` at all - those
+    predate the field and refusing them would break a poll already in flight.
+    """
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("user_id") and job["user_id"] != user["id"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only the user who started this job, or an admin, can see it.")
     return job
 
 

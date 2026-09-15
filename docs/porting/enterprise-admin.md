@@ -58,9 +58,12 @@ instead, where they exist and are exercised.
   ownership and is admin-owned, logged once per process. No directory restructure was
   needed, as expected: the API renders into the project's own directory
   (`api/routers/projects.py`), so every output is owned by the project that produced it.
-- `services/jobs.py`: 2 workers, in-memory, no cancel, no per-kind limits. PowerPoint COM
-  (`core/pptx_exporter.py:61-93`, GetActiveObject/Dispatch) is unguarded → **two concurrent
-  deck generations race on one PowerPoint instance TODAY** (live bug).
+- `services/jobs.py`: 2 workers, in-memory, no per-kind limits. Cancel arrived with 3b
+  (`POST /api/jobs/{id}/cancel`), and reads and cancels are both owner-guarded. The
+  PowerPoint COM race this section used to call a live bug is **CLOSED by 3a**:
+  `services/slides.py::slide_export_lock` is held by every path that drives PowerPoint,
+  so two concurrent deck generations no longer fight over one instance. What remains for
+  4e is only the per-kind limit, so `status="queued"` becomes visible.
 - Studio settings (`services/studio_settings.py`) are already the "admin sets defaults,
   everyone reads" layer — what is missing is the LOCK.
 

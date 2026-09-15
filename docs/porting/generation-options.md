@@ -1,6 +1,13 @@
 # Porting spec — generation options (vertical 2)
 
-Engine-supported generation options that the React UI does not expose yet. Produced by
+> **Status: 2a is DONE**, shipped in 0.3.0 (transitions, intro and outro cards, the text
+> watermark, subtitle modes, the extra formats, the preview render, and the four engine
+> defects that had to be fixed for any of it to work — see the `#generation-options` entry
+> in CHANGELOG.md). **2b is NOT started**: the music and transition-sound library, section
+> 4 below, is the only part of this spec still outstanding. Everything above it describes
+> what shipped, so read it as a map of the code rather than as work to do.
+
+Engine-supported generation options that the React UI did not expose. Produced by
 a read-only survey of the carried-over engine on 2026-09-14; every claim cites the code.
 Vertical 2a = everything below except music/transition sounds; 2b = the media library.
 

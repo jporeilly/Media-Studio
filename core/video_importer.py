@@ -327,6 +327,16 @@ def transcribe_audio(
         _segs = []
         total_processed = 0.0
         for seg in raw_segments:
+            total_processed = seg.end
+            # Whisper emits segments with no words in them, typically a handful
+            # in the last half second of the audio. They became blank rows in
+            # the transcript editor that nobody could explain, and would become
+            # empty subtitle cues too. Dropped here rather than in the caller,
+            # so the transcript and the word-level subtitles both start clean.
+            # Progress is advanced above, so skipping one cannot stall the bar.
+            text = (seg.text or "").strip()
+            if not text:
+                continue
             words = []
             if seg.words:
                 words = [
@@ -334,9 +344,8 @@ def transcribe_audio(
                     for w in seg.words
                 ]
             _segs.append(TimedSegment(
-                start=seg.start, end=seg.end, text=seg.text.strip(), words=words,
+                start=seg.start, end=seg.end, text=text, words=words,
             ))
-            total_processed = seg.end
             if on_progress and _dur > 0:
                 pct = 0.15 + 0.75 * (total_processed / _dur)
                 on_progress(min(pct, 0.90), f"Transcribing... {total_processed:.0f}s / {_dur:.0f}s")
