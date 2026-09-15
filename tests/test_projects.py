@@ -120,3 +120,50 @@ def test_set_transcript_saves_and_missing_returns_none():
     assert updated["transcript"] == [{"start": 0.0, "end": 1.0, "text": "hi"}]
     assert projects.get_project(rec["id"])["transcript"][0]["text"] == "hi"
     assert projects.set_transcript("aabbccddeeff", []) is None  # valid shape, absent
+
+
+def test_a_delete_that_cannot_remove_a_file_leaves_the_project_whole(monkeypatch):
+    """Windows will not unlink a file a player or an encoder still has open.
+
+    The old code called ``rmtree`` with ``ignore_errors=True`` and returned True
+    regardless, and the tree walk reached project.json before the video: the
+    project fell out of the list - the list is built from project.json - while
+    its largest file stayed on disk forever, invisible and unreferenced. One
+    real case left a 76 MB orphan behind. The record is removed LAST now, so a
+    failure leaves the project listed and retryable, and says so.
+    """
+    from pathlib import Path
+
+    pid = projects.import_upload("clip.mp4", b"video-bytes")["id"]
+    locked = projects.PROJECTS_DIR / pid / "clip.mp4"
+    real_unlink = Path.unlink
+
+    def _unlink(self, *args, **kwargs):
+        if self == locked:
+            raise OSError(32, "The process cannot access the file because it is being used")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _unlink)
+
+    with pytest.raises(projects.ProjectDeleteError) as caught:
+        projects.delete_project(pid)
+
+    assert "clip.mp4" in str(caught.value)
+    assert "try again" in str(caught.value)
+    assert projects.get_project(pid) is not None, "still listed, so it can be retried"
+    assert [p["id"] for p in projects.list_projects()] == [pid]
+    assert locked.is_file(), "nothing was half-removed either"
+
+
+def test_a_successful_delete_takes_the_whole_directory(tmp_projects_dir):
+    """Including sub-directories the engine made, and leaving no empty shell -
+    a directory with no project.json is invisible to the list forever."""
+    pid = projects.import_upload("clip.mp4", b"video-bytes")["id"]
+    inner = projects.PROJECTS_DIR / pid / "revoice"
+    inner.mkdir()
+    (inner / "state.json").write_text("{}", encoding="utf-8")
+
+    assert projects.delete_project(pid) is True
+    assert not (projects.PROJECTS_DIR / pid).exists()
+    assert projects.get_project(pid) is None
+    assert projects.list_projects() == []

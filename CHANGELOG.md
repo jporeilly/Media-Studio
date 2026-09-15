@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- [fix] **Deleting a project no longer loses files without saying so.** The delete removed the project's directory with errors suppressed and then reported success whatever happened, which is a bad combination on Windows: a file a media player or an encoder still has open cannot be unlinked, and the tree walk reached `project.json` before the video. The project fell out of the list — the list is built from `project.json` — while its largest file stayed on disk forever, invisible to the app and referenced by nothing. One real case left a 76 MB orphan behind, and nothing in the app could ever have found or removed it. The record is written last now: everything else goes first, every failure is collected, and if anything survives then `project.json` is untouched, the project is still listed exactly as it was, and the route answers 409 naming the file and telling you to close whatever is holding it. Nothing is reported as deleted that is not gone. `services/projects.py` (`ProjectDeleteError`), `api/routers/projects.py`; tests `tests/test_projects.py` (+2) and the new `tests/test_project_delete.py` (3) — #delete-orphan
+
 ## [0.4.0] - 2026-09-15
 
 Projects have owners and the studio keeps an audit log, so an installation with more

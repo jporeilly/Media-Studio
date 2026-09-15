@@ -119,7 +119,14 @@ def get_project(pid: str, user: dict = Depends(current_user)):
 @router.delete("/{pid}", status_code=204)
 def delete_project(pid: str, user: dict = Depends(current_user)):
     record = require_project(pid, user)
-    if not store.delete_project(pid):
+    try:
+        deleted = store.delete_project(pid)
+    except store.ProjectDeleteError as exc:
+        # Nothing was half-removed: the project is still listed and still whole,
+        # so the answer is "try again", not a project that has quietly lost its
+        # files. 409 like the other "this project is busy" refusals.
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not deleted:
         raise HTTPException(status_code=404, detail="Project not found.")
     audit(PROJECT_DELETE, user=user, entity="project", entity_id=pid, detail=record.get("name"))
 

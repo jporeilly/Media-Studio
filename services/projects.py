@@ -138,14 +138,63 @@ def import_upload(filename: str, data: bytes, *,
     return record
 
 
+class ProjectDeleteError(RuntimeError):
+    """A project could not be fully deleted. It is still listed, so it can be
+    retried once whatever held the file has let go."""
+
+
 def delete_project(pid: str) -> bool:
-    """Delete a project and its files. Returns False if it did not exist."""
+    """Delete a project and its files. Returns False if it did not exist.
+
+    Raises ``ProjectDeleteError`` when something could not be removed, and
+    leaves the project intact and visible rather than half-gone.
+
+    This used to be ``shutil.rmtree(pdir, ignore_errors=True)`` followed by an
+    unconditional ``return True``, which is a bad combination on Windows, where
+    a file a player or an encoder still has open cannot be unlinked. The tree
+    walk would delete ``project.json`` early, fail on the video, swallow the
+    error and report success: the project vanished from the list - the list is
+    built from ``project.json`` - while its largest file stayed on disk forever,
+    invisible and unreferenced. One real case left a 76 MB orphan behind.
+
+    So the record goes LAST. Everything else is removed first and every failure
+    is collected; if anything survives, ``project.json`` is untouched, the
+    project is still there to try again, and the caller is told. Nothing is
+    reported as deleted that is not gone.
+    """
     if not _valid_pid(pid):
         return False
     pdir = PROJECTS_DIR / pid
+    meta = _meta_path(pid)
     if not pdir.exists():
         return False
-    shutil.rmtree(pdir, ignore_errors=True)
+
+    failures: list[str] = []
+    for child in sorted(pdir.iterdir()):
+        if child == meta:
+            continue
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        except OSError as exc:
+            failures.append(f"{child.name} ({exc.strerror or exc})")
+
+    if failures:
+        raise ProjectDeleteError(
+            "Could not delete this project: " + ", ".join(failures)
+            + ". Something is still using it - close the video if it is open, then try again."
+        )
+
+    meta.unlink(missing_ok=True)
+    try:
+        pdir.rmdir()
+    except OSError as exc:
+        raise ProjectDeleteError(
+            f"Could not remove the project folder: {exc.strerror or exc}"
+        ) from exc
+
     # The slide editor keeps a per-project lock and a cache of the deck's own
     # notes; neither has a reason to outlive the project. Imported here: that
     # module imports this one.
