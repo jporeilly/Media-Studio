@@ -63,7 +63,21 @@ if (-not (Test-Path -LiteralPath (Join-Path $repoRoot "main.py"))) {
 $prevEapGate = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 $branch  = (& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>&1 | Out-String).Trim()
-$dirty   = (& git -C $repoRoot status --porcelain 2>&1 | Out-String).Trim()
+# Content changes only. `git status --porcelain` also reports a file whose line
+# endings were rewritten with no change to its content - the Tauri CLI does
+# exactly that to Cargo.toml while building, and its own beforeBuildCommand then
+# re-runs this script, so a status check refuses the build the CLI just started.
+# `git diff` applies the repo's autocrlf normalisation and sees through it.
+& git -C $repoRoot diff --quiet 2>&1 | Out-Null
+$dirtyUnstaged = ($LASTEXITCODE -ne 0)
+& git -C $repoRoot diff --cached --quiet 2>&1 | Out-Null
+$dirtyStaged = ($LASTEXITCODE -ne 0)
+$untracked = (& git -C $repoRoot ls-files --others --exclude-standard 2>&1 | Out-String).Trim()
+$dirty = ""
+if ($dirtyUnstaged -or $dirtyStaged) {
+    $dirty = (& git -C $repoRoot status --porcelain --untracked-files=no 2>&1 | Out-String).Trim()
+}
+if ($untracked) { $dirty = ($dirty, $untracked -ne "" -join "`n").Trim() }
 $ahead   = (& git -C $repoRoot rev-list --count "@{u}..HEAD" 2>&1 | Out-String).Trim()
 $aheadOk = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = $prevEapGate
