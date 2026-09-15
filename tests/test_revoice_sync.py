@@ -42,6 +42,11 @@ class _Seg:
     def __len__(self):
         return self.ms
 
+    def __getitem__(self, item):
+        # Only the trim slice (``audio[trim:]``) uses this; length is all the
+        # callers here read back.
+        return _Seg(self.ms)
+
     def export(self, path, **kwargs):
         Path(path).write_bytes(b"MASTER")
 
@@ -50,13 +55,13 @@ _Seg.next_ms = 1500
 
 
 class _FakeTTS:
-    """Writes a file per sentence and records the speed it was asked for."""
+    """Writes a file per sentence and records the voice and speed it was asked for."""
 
     def __init__(self):
         self.calls = []
 
     def generate_audio(self, text, voice_id, output_path, speed=1.0, **kwargs):
-        self.calls.append({"text": text, "speed": speed})
+        self.calls.append({"text": text, "voice_id": voice_id, "speed": speed})
         Path(output_path).write_bytes(b"mp3")
         return True
 
@@ -136,7 +141,21 @@ def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed
     assert ok is mux_ok, f"re-voice returned {ok}"
     captured["assemble"] = real_assemble
     captured["ok"] = ok
+    captured["processor"] = proc
     return captured, tts
+
+
+def _windows(monkeypatch) -> list:
+    """Spy on ``_per_sentence_speed``: it is handed the window each sentence was
+    measured against, which is the number the offsets and the mutes change."""
+    seen = []
+
+    def _speed(self, text, orig_duration, baseline, user_speed):
+        seen.append((text, round(orig_duration, 3)))
+        return user_speed
+
+    monkeypatch.setattr(processing.VideoProcessor, "_per_sentence_speed", _speed)
+    return seen
 
 
 # Three sentences with real pauses between them: 2 s spoken, 3 s of silence,
@@ -415,3 +434,198 @@ def test_a_failed_copy_does_not_leave_the_previous_run_s_track(tmp_path, monkeyp
 
     assert not track.exists(), "the previous run's track must not survive a failed copy"
     assert not track.with_name(track.name + ".part").exists(), "no half-written file left behind"
+
+
+# -- per-sentence adjustments (services/narration.py) -------------------------
+#
+# The transcript may carry four optional keys per sentence, written by the
+# narration editor: offset, muted, voice and speed. They ride into the engine
+# inside ``original_segments`` and are read here. A project made before they
+# existed carries none of them, which is what every test above goes on proving.
+
+
+def _adjusted(**by_index) -> list:
+    """GAPPY with adjustments applied to the named indexes."""
+    out = [dict(s) for s in GAPPY]
+    for index, changes in by_index.items():
+        out[int(index)].update(changes)
+    return out
+
+
+def test_a_muted_sentence_is_never_synthesised(tmp_path, monkeypatch):
+    captured, tts = _revoice(tmp_path, monkeypatch, _adjusted(**{"1": {"muted": True}}))
+
+    assert [c["text"] for c in tts.calls] == ["First sentence.", "Third sentence."]
+    assert [start for start, _e, _c in captured["chunks"]] == [0.0, 10.0]
+
+
+def test_the_sentence_before_a_muted_one_inherits_its_room(tmp_path, monkeypatch):
+    """Muting is filtered BEFORE the window maths, which is the whole reason it
+    is done where it is: the room the muted sentence had becomes the previous
+    one's, instead of a hole nothing can use."""
+    seen = _windows(monkeypatch)
+    _revoice(tmp_path, monkeypatch, _adjusted(**{"1": {"muted": True}}))
+
+    # First runs until the THIRD sentence is due (10 s), not until the second (5 s).
+    assert seen == [("First sentence.", 10.0), ("Third sentence.", 2.0)]
+
+
+def test_the_last_unmuted_sentence_picks_up_the_video_tail(tmp_path, monkeypatch):
+    """The "runs to the end of the video" rule belongs to whichever sentence is
+    actually last, not to the last one in the transcript."""
+    seen = _windows(monkeypatch)
+    _revoice(tmp_path, monkeypatch, _adjusted(**{"2": {"muted": True}}), video_seconds=20.0)
+
+    assert seen == [("First sentence.", 5.0), ("Second sentence.", 15.0)]
+
+
+def test_an_offset_moves_where_a_sentence_is_pinned(tmp_path, monkeypatch):
+    captured, _ = _revoice(tmp_path, monkeypatch, _adjusted(**{"1": {"offset": 1.5}}))
+
+    assert [start for start, _e, _c in captured["chunks"]] == [0.0, 6.5, 10.0]
+
+
+def test_a_negative_offset_past_zero_is_clamped_rather_than_left_to_luck(tmp_path, monkeypatch):
+    """``assemble_master`` would floor it by accident (a non-positive gap is
+    ignored). Clamped here so the window maths, the log and the UI agree."""
+    captured, _ = _revoice(tmp_path, monkeypatch, _adjusted(**{"0": {"offset": -5.0}}))
+
+    assert [start for start, _e, _c in captured["chunks"]] == [0.0, 5.0, 10.0]
+
+
+def test_the_next_sentence_offset_changes_the_window_before_it(tmp_path, monkeypatch):
+    """Without this the squeeze is measured against a moment nothing will be
+    spoken at: moving a sentence later gives the one before it more room, and
+    moving it earlier takes room away."""
+    seen = _windows(monkeypatch)
+    _revoice(tmp_path, monkeypatch, _adjusted(**{"1": {"offset": 1.5}}))
+
+    assert seen == [
+        ("First sentence.", 6.5),   # until the second is now due
+        ("Second sentence.", 3.5),  # it starts later, so it has less room
+        ("Third sentence.", 2.0),
+    ]
+
+
+def test_an_explicit_speed_is_used_verbatim_and_skips_the_per_sentence_rule(tmp_path, monkeypatch):
+    """No automatic rate fitting: the user's number wins."""
+    seen = _windows(monkeypatch)
+    _, tts = _revoice(tmp_path, monkeypatch, _adjusted(**{"1": {"speed": 1.4}}), speed=1.0)
+
+    assert [c["speed"] for c in tts.calls] == [1.0, 1.4, 1.0]
+    assert [text for text, _d in seen] == ["First sentence.", "Third sentence."], (
+        "the adjusted sentence never reaches _per_sentence_speed"
+    )
+
+
+def test_an_explicit_speed_also_skips_the_post_synthesis_squeeze(tmp_path, monkeypatch):
+    """The user asked for that length; tempo-adjusting it afterwards would undo
+    the one thing they asked for. The overrun is absorbed at the next pause."""
+    monkeypatch.setattr(processing.VideoProcessor, "_per_sentence_speed", lambda self, *a, **k: 1.0)
+    cmds = []
+    import subprocess as sp
+    monkeypatch.setattr(sp, "run", lambda cmd, **k: cmds.append(cmd) or types.SimpleNamespace(returncode=0))
+
+    # 4 s of speech for the closing sentence's 2 s slot: squeezed without an
+    # explicit speed (test_a_sentence_borrows_the_pause_after_it... proves that).
+    _revoice(tmp_path, monkeypatch, _adjusted(**{"2": {"speed": 0.8}}), clip_ms=4000)
+
+    assert cmds == [], "a sentence with its own speed keeps the length it was asked for"
+
+
+def test_a_per_sentence_voice_is_used_when_it_belongs_to_this_provider(tmp_path, monkeypatch):
+    """Exactly the fallback the deck path relies on: an override from the other
+    provider is dropped rather than failing the synthesis."""
+    segments = _adjusted(**{
+        "1": {"voice": "en-GB-RyanNeural", "provider": "edge_tts"},
+        "2": {"voice": "af_heart", "provider": "kokoro"},  # stale: this run is Edge
+    })
+    _, tts = _revoice(tmp_path, monkeypatch, segments)
+
+    assert [c["voice_id"] for c in tts.calls] == [
+        "en-US-AriaNeural", "en-GB-RyanNeural", "en-US-AriaNeural",
+    ]
+
+
+def test_a_sentence_that_could_not_be_synthesised_is_counted_for_the_job(tmp_path, monkeypatch):
+    """A failed sentence leaves a silent hole. It used to be visible only in the
+    server log, so a whole line could vanish from the narration with nothing to
+    show for it; the job reports the tally now."""
+    _Seg.next_ms = 1500
+    pm = _manager(tmp_path, GAPPY)
+    proc = processing.VideoProcessor(voice_id="v", speed=1.0)
+
+    tts = _FakeTTS()
+    real = tts.generate_audio
+
+    def _fail_second(text, voice_id, output_path, speed=1.0, **kwargs):
+        if text == "Second sentence.":
+            raise RuntimeError("voice unavailable")
+        return real(text, voice_id, output_path, speed=speed, **kwargs)
+
+    tts.generate_audio = _fail_second
+    monkeypatch.setattr(proc, "_create_tts_generator", lambda: tts)
+    monkeypatch.setattr(proc, "_calibrate_tts_baseline", lambda *a, **k: 15.0)
+
+    import core.video_creator as vc
+    monkeypatch.setattr(vc, "replace_video_audio", lambda **kw: True)
+    monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_probe_duration", lambda path: 20.0)
+
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    assert proc._revoice_video(pm, source, tmp_path / "out.mp4") is True
+    assert proc.failed_sentences == 1
+
+
+def test_a_generator_that_writes_nothing_counts_as_a_failure_too(tmp_path, monkeypatch):
+    """The same silent hole by the other route: no exception, no file."""
+
+    class _Silent:
+        def generate_audio(self, text, voice_id, output_path, speed=1.0, **kwargs):
+            if text != "First sentence.":
+                return None  # nothing written
+            Path(output_path).write_bytes(b"mp3")
+            return True
+
+    _Seg.next_ms = 1500
+    pm = _manager(tmp_path, GAPPY)
+    proc = processing.VideoProcessor(voice_id="v", speed=1.0)
+    monkeypatch.setattr(proc, "_create_tts_generator", lambda: _Silent())
+    monkeypatch.setattr(proc, "_calibrate_tts_baseline", lambda *a, **k: 15.0)
+
+    import core.video_creator as vc
+    monkeypatch.setattr(vc, "replace_video_audio", lambda **kw: True)
+    monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_probe_duration", lambda path: 20.0)
+
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    assert proc._revoice_video(pm, source, tmp_path / "out.mp4") is True
+    assert proc.failed_sentences == 2
+
+
+def test_a_clean_run_counts_no_failures(tmp_path, monkeypatch):
+    captured, _ = _revoice(tmp_path, monkeypatch, GAPPY)
+    assert captured["processor"].failed_sentences == 0
+
+
+def test_the_speaking_rate_is_never_calibrated_on_a_muted_sentence(tmp_path, monkeypatch):
+    """The baseline is single-voice and feeds only ``_per_sentence_speed``; a
+    sentence that is never spoken standing in for a third of the measurement
+    would skew it for nothing."""
+    silence = types.ModuleType("pydub.silence")
+    silence.detect_leading_silence = lambda audio, **kwargs: 0
+    monkeypatch.setitem(sys.modules, "pydub.silence", silence)
+
+    long_enough = [
+        {"start": 0.0, "end": 4.0, "text": "A first sentence with more than thirty characters in it."},
+        {"start": 5.0, "end": 9.0, "text": "A second sentence with over thirty characters too.", "muted": True},
+    ]
+    tts = _FakeTTS()
+    proc = processing.VideoProcessor(voice_id="en-US-AriaNeural", speed=1.0)
+    proc._calibrate_tts_baseline(long_enough, tts, tmp_path)
+
+    assert [c["text"] for c in tts.calls] == [long_enough[0]["text"]]

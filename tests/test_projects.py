@@ -116,8 +116,9 @@ def test_invalid_pid_cannot_escape_the_store(tmp_projects_dir):
 
 def test_set_transcript_saves_and_missing_returns_none():
     rec = projects.import_upload("clip.mp4", b"v")
-    updated = projects.set_transcript(rec["id"], [{"start": 0.0, "end": 1.0, "text": "hi"}])
+    updated, dropped = projects.set_transcript(rec["id"], [{"start": 0.0, "end": 1.0, "text": "hi"}])
     assert updated["transcript"] == [{"start": 0.0, "end": 1.0, "text": "hi"}]
+    assert dropped == 0, "nothing to drop: the project had no adjustments"
     assert projects.get_project(rec["id"])["transcript"][0]["text"] == "hi"
     assert projects.set_transcript("aabbccddeeff", []) is None  # valid shape, absent
 

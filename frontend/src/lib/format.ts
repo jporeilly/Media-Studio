@@ -40,3 +40,17 @@ export function duration(seconds: number | null | undefined): string {
   const s = total % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
+
+/**
+ * A position in a recording as m:ss.mmm — deliberately separate from
+ * `duration()`, which rounds to whole seconds and is right for "how long is
+ * this video". A transcript sentence is nudged in tenths and hundredths of a
+ * second, so a label rounded to the second would say nothing about the change
+ * that was just made.
+ */
+export function timecode(seconds: number | null | undefined): string {
+  const total = Math.max(0, Number(seconds || 0));
+  const m = Math.floor(total / 60);
+  const s = total - m * 60;
+  return `${m}:${s.toFixed(3).padStart(6, "0")}`;
+}

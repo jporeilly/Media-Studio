@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, Strin
 from core.tone_adapter import get_available_tones
 from core.translator import get_available_languages
 from services.ai_slides import CUSTOM_TONE, MAX_ISSUE_CHARS, QA_CRITERIA
+from services.narration import MAX_OFFSET_SECONDS, MAX_SPEED, MAX_VOICE_CHARS, MIN_SPEED
 from services.slides import MAX_NOTES_CHARS, MAX_PAUSE_SECONDS
 
 # A title-card text: stripped, so a whitespace-only value makes no card, and capped.
@@ -94,6 +95,21 @@ class TranscribeRequest(BaseModel):
 
 
 class TranscriptSegment(BaseModel):
+    """One sentence of the whole-list transcript PATCH. This model is a TEXT
+    editor and nothing else: the per-sentence timing overrides (offset, mute,
+    voice, provider, speed) are NOT fields here, so a client cannot move a
+    sentence by re-posting the list.
+
+    ``extra="forbid"`` is what makes that safe. Pydantic's default is
+    ``extra="ignore"``, which would drop the override keys silently on the way
+    in - and ``set_transcript`` writes the list back wholesale, so every Save
+    of the words would have quietly deleted every adjustment. The keys are
+    carried across by index instead (``services.projects.set_transcript``):
+    editing the words never moves the sentences.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     start: float
     end: float
     text: str
@@ -101,6 +117,34 @@ class TranscriptSegment(BaseModel):
 
 class TranscriptUpdate(BaseModel):
     transcript: list[TranscriptSegment]
+
+
+class SegmentOverride(BaseModel):
+    """PATCH /api/projects/{pid}/transcript/{index}: one sentence's narration
+    adjustment. A field left out is left alone; an explicit null clears it back
+    to the default (as ``SlideUpdate``).
+
+    ``offset`` is seconds added to where the sentence is pinned - positive
+    pushes it later, negative earlier, and the UI must say that the pin is a
+    floor rather than a position: a sentence can only be pulled earlier as far
+    as the previous one's synthesised audio actually ends. ``muted`` leaves it
+    out of the narration. ``voice`` / ``provider`` name a per-sentence voice
+    and which provider it belongs to, exactly as ``SlideUpdate`` does.
+    ``speed`` is an explicit TTS speed that bypasses both the per-sentence rule
+    and the post-synthesis squeeze - the user's number wins.
+
+    An unknown key is a 422, and the numbers are strict so a boolean is not
+    coerced to 1.0 (an int is still fine), the same reason
+    ``SlideUpdate.pause_override`` is strict.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    offset: StrictFloat | None = Field(None, ge=-MAX_OFFSET_SECONDS, le=MAX_OFFSET_SECONDS)
+    muted: bool | None = None
+    voice: str | None = Field(None, max_length=MAX_VOICE_CHARS)
+    provider: str | None = None  # validated with check_voice_for_provider
+    speed: StrictFloat | None = Field(None, ge=MIN_SPEED, le=MAX_SPEED)
 
 
 class GenerateRequest(BaseModel):

@@ -17,6 +17,7 @@ from typing import List, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.file_item import FileItem, VIDEO_SUFFIXES
+from services.narration import MAX_OFFSET_SECONDS, MAX_SPEED, MIN_SPEED
 from services.slides import slide_export_lock
 from services.styles import TEMP_DIR
 from utils.config import config, CONFIG_DIR
@@ -77,6 +78,66 @@ def _seconds(value, fallback: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(fallback)
+
+
+def _offset(seg) -> float:
+    """One sentence's per-sentence offset in seconds (``services.narration``).
+
+    0.0 when the key is absent - which is every segment of every project made
+    before the narration editor existed - or unusable. Positive pushes the
+    sentence later, negative earlier.
+
+    Bounded and bool-rejecting for the same reason ``_explicit_speed`` is, and
+    more urgently: ``assemble_master`` turns a pin into
+    ``AudioSegment.silent(duration=gap)``, so a hand-edited project.json
+    carrying ``"offset": 999999`` asks pydub to allocate days of raw PCM before
+    anything else can go wrong. The API bounds it on the way in
+    (``services.narration``, whose bound this is); this is the engine refusing
+    to trust the file.
+    """
+    raw = seg.get("offset")
+    if raw is None or isinstance(raw, bool):
+        return 0.0
+    try:
+        offset = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    # NaN fails both comparisons and falls through to 0.0, which is what it should.
+    return offset if -MAX_OFFSET_SECONDS <= offset <= MAX_OFFSET_SECONDS else 0.0
+
+
+def _pin(seg, sec) -> float:
+    """Where a sentence is pinned: the moment it was spoken plus its offset.
+
+    Clamped at zero explicitly rather than leaning on ``assemble_master``'s
+    accidental floor (a negative pin there produces a non-positive gap and is
+    ignored), so the log line and what the user is told agree with what is
+    actually done. The same helper computes the NEXT sentence's pin when the
+    window is measured: an offset that moves a sentence must move the room the
+    one before it has, or the tempo squeeze fires against a window that no
+    longer exists.
+    """
+    return max(0.0, _seconds(seg.get("start"), sec["start"]) + _offset(seg))
+
+
+def _explicit_speed(seg):
+    """A sentence's own TTS speed (``services.narration``), or None.
+
+    A sentence that carries one bypasses ``_per_sentence_speed`` AND the
+    post-synthesis tempo squeeze: the user asked for that length and the user's
+    number wins. An out-of-range or unusable value is treated as absent - the
+    API bounds it on the way in (``services.narration``, whose bounds these
+    are), and a hand-edited project.json must not be able to drive the
+    synthesiser to 50x.
+    """
+    raw = seg.get("speed")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        speed = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return speed if MIN_SPEED <= speed <= MAX_SPEED else None
 
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
@@ -299,6 +360,13 @@ class VideoProcessor:
         # no slides were exported (images were already there). The generate
         # route records it on the project for the slide editor.
         self.images_backend: Optional[str] = None
+        # How many sentences of the most recent re-voice could not be
+        # synthesised. A failed sentence leaves a silent hole and used to be
+        # visible only in the server log, so a whole line could vanish from the
+        # narration with nothing to show for it; the re-voice job reads this
+        # and reports it (``services.revoice``), the way the AI loops report
+        # their own tally.
+        self.failed_sentences = 0
         self.cancel_requested = False
 
     def _create_tts_generator(self):
@@ -792,7 +860,16 @@ class VideoProcessor:
         self, segments: list, tts_gen, tmp_dir: Path,
         progress=None, file_label: str = "",
     ) -> float:
-        """Measure TTS baseline speaking rate (chars/sec at speed 1.0)."""
+        """Measure TTS baseline speaking rate (chars/sec at speed 1.0).
+
+        Single-voice on purpose: it samples at ``self.voice_id``, so a sentence
+        carrying its own voice would measure the wrong one. It feeds nothing
+        but ``_per_sentence_speed``, which a sentence with an explicit speed
+        bypasses entirely, so a per-sentence voice does not make the baseline
+        wrong for the sentences that do use it. Muted sentences are left out of
+        the sample: they are never synthesised, and one of them standing in for
+        a third of the measurement would skew it for no reason.
+        """
         from pydub import AudioSegment
         from pydub.silence import detect_leading_silence
         from core.tts_provider import get_onset_profile
@@ -802,7 +879,10 @@ class VideoProcessor:
         if progress:
             progress(0.82, f"{file_label}: Calibrating speech rate...")
 
-        sample_segs = [s for s in segments if len(s.get("text", "").strip()) > 30]
+        sample_segs = [
+            s for s in segments
+            if len(s.get("text", "").strip()) > 30 and not s.get("muted")
+        ]
         if len(sample_segs) > 3:
             step = len(sample_segs) // 3
             sample_segs = [sample_segs[i * step] for i in range(3)]
@@ -868,6 +948,19 @@ class VideoProcessor:
 
         Uses Whisper segment timestamps for fine-grained sync: each sentence
         is individually padded or sped to match the original timing.
+
+        Each sentence may carry the per-sentence adjustments the narration
+        editor writes onto the transcript (``services.narration``), which ride
+        into the engine inside ``original_segments`` and reach here through
+        ``collect_revoice_segments``: ``muted`` leaves it out (and gives its
+        room to the sentence before it), ``offset`` moves where it is pinned,
+        ``voice`` gives it its own voice when that voice belongs to this run's
+        provider, and ``speed`` is an explicit rate that bypasses both
+        ``_per_sentence_speed`` and the tempo squeeze. An older project carries
+        none of them and behaves exactly as before.
+
+        Sentences whose synthesis failed are counted in ``self.failed_sentences``
+        for the job to report.
         """
         from core.video_creator import replace_video_audio, trim_leading_silence_segment, _level_opening, _probe_duration
         from core.tts_provider import get_onset_profile
@@ -940,18 +1033,43 @@ class VideoProcessor:
 
             sections = group_by_section(all_segments)
             aligned_chunks = []
-            total_segments = len(all_segments)
             done = 0
+            failed_sentences = 0
             # Every sentence to speak, in order, each with the section it came
             # from — the section only supplies the fallback bound for its last
             # sentence now that each one is pinned on its own.
+            #
+            # A MUTED sentence is dropped here, before any window maths, and
+            # that placement is the whole point: the sentence before a muted
+            # one inherits its room (the window runs to the next sentence that
+            # is actually spoken), and the last unmuted sentence picks up the
+            # "runs to the end of the video" rule below. Filtering later would
+            # have left a hole that nothing could use.
             spoken = [
                 (seg, sec) for sec in sections for seg in sec["segments"]
-                if (seg.get("text") or "").strip()
+                if (seg.get("text") or "").strip() and not seg.get("muted")
             ]
+            # Counted over what will actually be spoken, so the progress line
+            # reaches its total instead of stopping at 8/10 on a transcript with
+            # two muted sentences.
+            total_segments = len(spoken)
             for i, (seg, sec) in enumerate(spoken):
                 done += 1
-                seg_start = _seconds(seg.get("start"), sec["start"])
+                seg_start = _pin(seg, sec)
+                if video_end > 0 and seg_start >= video_end:
+                    # replace_video_audio muxes with -shortest, so the narration
+                    # is cut at the video's end: a sentence pinned at or past it
+                    # is simply not in the render. Counted rather than dropped in
+                    # silence - a sentence vanishing with no evidence is the
+                    # thing the count exists to stop - and not synthesised,
+                    # since nothing could hear it.
+                    failed_sentences += 1
+                    logger.warning(
+                        "Sentence %d is pinned at %.1fs, at or past the end of the %.1fs video "
+                        "- its offset puts it outside the render",
+                        done, seg_start, video_end,
+                    )
+                    continue
                 # The room this sentence has is the time until the next one
                 # is due, so the pause after it is slack it may borrow from
                 # before anything is sped up. The final sentence runs to the
@@ -960,27 +1078,53 @@ class VideoProcessor:
                 # when the duration could not be probed.
                 if i + 1 < len(spoken):
                     nxt, nxt_sec = spoken[i + 1]
-                    next_start = _seconds(nxt.get("start"), nxt_sec["start"])
+                    # The NEXT sentence's own offset counts too: moving it later
+                    # gives this one more room, moving it earlier takes room
+                    # away, and measuring against its unadjusted start would fire
+                    # the squeeze below against a window nothing will use.
+                    next_start = _pin(nxt, nxt_sec)
                 else:
                     next_start = max(_seconds(sec["end"], 0.0), video_end)
                 window_s = max(0.0, next_start - seg_start)
                 window_ms = int(window_s * 1000)
                 text = seg["text"].strip()
-                speed = self.speed if is_free else self._per_sentence_speed(
-                    text, window_s, tts_baseline, self.speed,
-                )
+                # An explicit per-sentence speed wins outright: it skips the
+                # per-sentence rule AND the squeeze further down. That is the
+                # "nothing guesses a rate" rule made concrete - the user asked
+                # for this length and gets it, and any overrun is absorbed at
+                # the next real pause, where the following sentence is still
+                # pinned to its own moment.
+                explicit_speed = _explicit_speed(seg)
+                if explicit_speed is not None:
+                    speed = explicit_speed
+                elif is_free:
+                    speed = self.speed
+                else:
+                    speed = self._per_sentence_speed(text, window_s, tts_baseline, self.speed)
+                # A per-sentence voice, honoured only when it belongs to this
+                # run's provider - the same fallback the deck path relies on,
+                # so a stale Edge id under Kokoro (or the reverse) cannot fail
+                # the synthesis.
+                seg_voice = effective_voice(seg.get("voice"), self.voice_id, self.provider)
                 seg_audio_path = tmp_dir / f"seg_{done:04d}.mp3"
                 try:
                     tts_gen.generate_audio(
-                        text=text, voice_id=self.voice_id,
+                        text=text, voice_id=seg_voice,
                         output_path=seg_audio_path, speed=speed,
                     )
                 except Exception as e:
                     # This sentence stays silent; the next one is pinned to
-                    # its own moment, so nothing after it shifts.
+                    # its own moment, so nothing after it shifts. Counted, so
+                    # the job can say how many sentences are missing instead of
+                    # leaving the evidence in the server log alone.
+                    failed_sentences += 1
                     logger.warning("TTS failed for segment %d: %s", done, e)
                     continue
                 if not seg_audio_path.exists():
+                    # The generator reported nothing and wrote nothing: the
+                    # same silent hole, counted the same way.
+                    failed_sentences += 1
+                    logger.warning("TTS produced no audio for segment %d", done)
                     continue
                 clip = AudioSegment.from_file(str(seg_audio_path))
                 # Trim leading silence with the active provider's onset
@@ -1001,8 +1145,12 @@ class VideoProcessor:
                 # the speaking rate. A small overrun is inaudible on its own and
                 # is absorbed at the next real pause, where the sentence after
                 # it is still pinned to its own moment.
+                #
+                # A sentence with an explicit speed is never squeezed: the user
+                # named the rate, and tempo-adjusting it afterwards would undo
+                # the one thing they asked for.
                 last = i + 1 == len(spoken)
-                if not is_free and window_ms > 0 and len(clip) > window_ms * 1.15:
+                if not is_free and explicit_speed is None and window_ms > 0 and len(clip) > window_ms * 1.15:
                     spoken_ms = len(clip)
                     factor = spoken_ms / window_ms
                     if factor <= 2.0:
@@ -1024,6 +1172,13 @@ class VideoProcessor:
                 if done % 10 == 0 and progress:
                     pct = 0.8 + 0.15 * (done / max(total_segments, 1))
                     progress(pct, f"{file_label}: Synthesising sentence {done}/{total_segments}")
+
+            self.failed_sentences = failed_sentences
+            if failed_sentences:
+                logger.warning(
+                    "Re-voice: %d of %d sentences could not be synthesised",
+                    failed_sentences, len(spoken),
+                )
 
             if not aligned_chunks:
                 logger.error("No aligned audio chunks")

@@ -38,6 +38,7 @@ PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
     ("GET", "/api/projects/{pid}/tracks/{kind}"): None,
     ("POST", "/api/projects/{pid}/transcribe"): {},
     ("PATCH", "/api/projects/{pid}/transcript"): {"transcript": []},
+    ("PATCH", "/api/projects/{pid}/transcript/{index}"): {},
     ("POST", "/api/projects/{pid}/generate"): {},
     ("POST", "/api/projects/{pid}/revoice"): {},
     ("GET", "/api/projects/{pid}/slides"): None,
@@ -72,6 +73,9 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "save", lambda: None)
     monkeypatch.setattr(slides, "_deck_cache", {})
     monkeypatch.setattr(slides, "_locks", {})
+    # The outer project.json's own per-pid locks (the transcript Save and the
+    # narration editor both take them).
+    monkeypatch.setattr(store, "_locks", {})
     monkeypatch.setattr(processing, "TEMP_DIR", tmp_path / "temp")
     # The log-once notice is a module-level flag; reset it so a test can assert
     # it fires (and so test order cannot decide whether it does).

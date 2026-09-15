@@ -306,6 +306,79 @@ def test_a_stale_narration_claim_is_cleared_by_the_next_re_voice(client, monkeyp
     assert "narration_audio" not in store.get_project(pid)
 
 
+class _DropsSentences(_FakeVideoProcessor):
+    """A re-voice where two sentences could not be synthesised."""
+
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
+        self.failed_sentences = 2
+        return super()._revoice_video(pm, source_video, output_path, progress=progress, file_label=file_label)
+
+
+def test_the_per_sentence_adjustments_travel_into_the_engine(client, monkeypatch):
+    """``original_segments`` is a plain List[dict] that ProjectManager saves with
+    asdict, so the adjustment keys survive the round trip for free - no engine
+    dataclass needs a new field."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.captured = None
+    pid = _video_with_transcript()
+    assert client.patch(f"/api/projects/{pid}/transcript/1", json={"offset": -0.4, "speed": 1.15}).status_code == 200
+
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+
+    segments = _FakeVideoProcessor.captured.state.slides[0].original_segments
+    assert segments[0] == {"start": 0.0, "end": 2.0, "text": "Hello there."}, "an untouched sentence is unchanged"
+    assert segments[1]["offset"] == -0.4 and segments[1]["speed"] == 1.15
+
+
+def test_a_re_voice_reports_the_sentences_it_could_not_synthesise(client, monkeypatch):
+    """A failed sentence leaves a silent hole. Counted in the job result and
+    kept on the record, so the page can still say so after the job is gone."""
+    monkeypatch.setattr(processing, "VideoProcessor", _DropsSentences)
+    pid = _video_with_transcript()
+
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert job["result"]["failed_sentences"] == 2
+    assert "2 sentences could not be synthesised" in job["message"]
+    assert store.get_project(pid)["revoice_failed_sentences"] == 2
+
+    # A clean run clears it: a stale count would claim sentences are missing
+    # from a narration that has every one of them.
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"]["failed_sentences"] == 0
+    assert "revoice_failed_sentences" not in store.get_project(pid)
+
+
+class _AdjustsMidway(_FakeVideoProcessor):
+    """Stands in for a user adjusting a sentence while the job runs: the record
+    on disk changes after ``revoice_project`` read its copy."""
+
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
+        record = store.get_project(_AdjustsMidway.pid)
+        record["transcript"][0]["offset"] = -0.4
+        store.save_project(record)
+        return super()._revoice_video(pm, source_video, output_path, progress=progress, file_label=file_label)
+
+
+def test_a_re_voice_saves_onto_the_record_as_it_is_now(client, monkeypatch):
+    """The record is re-read before it is written: the transcript on it carries
+    the user's adjustments, and writing back the copy read when the job started
+    would revert anything saved since."""
+    monkeypatch.setattr(processing, "VideoProcessor", _AdjustsMidway)
+    _AdjustsMidway.pid = _video_with_transcript()
+
+    r = client.post(f"/api/projects/{_AdjustsMidway.pid}/revoice", json={"voice_id": "v"})
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+
+    saved = store.get_project(_AdjustsMidway.pid)
+    assert saved["revoiced_video"] == "clip_revoiced.mp4"
+    assert saved["transcript"][0]["offset"] == -0.4, "the adjustment made during the job survived"
+
+
 def test_the_picture_and_the_original_audio_are_downloadable(client):
     """Both already existed on disk and were simply never served: the imported
     video, and the audio extracted from it when it was transcribed."""

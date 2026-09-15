@@ -19,7 +19,7 @@ from api.audit import (
 from api.deps import current_user, may_access_project, require_project
 from api.schemas import GenerateRequest, RevoiceRequest, TranscribeRequest, TranscriptUpdate
 from api.store import display_name_of
-from services import jobs, projects as store, revoice, slides, studio_settings, transcription
+from services import jobs, narration, projects as store, revoice, slides, studio_settings, transcription
 from services.output_presets import get_preset
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -155,14 +155,35 @@ def transcribe(pid: str, body: TranscribeRequest | None = None, user: dict = Dep
 
 @router.patch("/{pid}/transcript")
 def update_transcript(pid: str, body: TranscriptUpdate, user: dict = Depends(current_user)):
-    """Replace the edited transcript segments on a project."""
+    """Replace the edited transcript segments on a project.
+
+    The words only: ``TranscriptSegment`` forbids the per-sentence timing keys,
+    and ``set_transcript`` carries them across by index, so saving the text
+    never moves a sentence. One sentence per adjustment goes through
+    ``PATCH /{pid}/transcript/{index}`` instead (``api.routers.narration``).
+
+    Takes ``jobs.require_idle`` (409) like every other writer of this record:
+    it merges the stored per-sentence adjustments rather than overwriting the
+    key blindly, and a transcribe or re-voice job holding the project has its
+    own copy of the transcript.
+
+    The answer is the project record plus ``timing_adjustments_dropped``: how
+    many sentences lost their adjustment because the saved list no longer
+    matches theirs. Usually 0; never silent when it is not.
+    """
     require_project(pid, user)
-    updated = store.set_transcript(pid, [seg.model_dump() for seg in body.transcript])
-    if updated is None:
+    jobs.require_idle(pid)
+    result = store.set_transcript(pid, [seg.model_dump() for seg in body.transcript])
+    if result is None:
         raise HTTPException(status_code=404, detail="Project not found.")
+    updated, dropped = result
+    # A saved list whose sentences are not the stored ones (a different count,
+    # or different windows) is a different set of sentences, so any adjustments
+    # on the old ones are gone. Said out loud, in the answer and in the log.
     audit(PROJECT_TRANSCRIPT_EDIT, user=user, entity="project", entity_id=pid,
-          detail=f"{len(body.transcript)} segments")
-    return updated
+          detail=f"{len(body.transcript)} segments"
+                 + (f", {dropped} timing adjustment{'' if dropped == 1 else 's'} dropped" if dropped else ""))
+    return {**updated, "timing_adjustments_dropped": dropped}
 
 
 @router.post("/{pid}/generate")
@@ -278,6 +299,15 @@ def revoice_video(pid: str, body: RevoiceRequest, user: dict = Depends(current_u
         raise HTTPException(status_code=400, detail="Only video projects can be re-voiced.")
     if not record.get("transcript"):
         raise HTTPException(status_code=400, detail="Transcribe the video first.")
+    # Every sentence muted means no audio at all, and the engine answers that
+    # with a bare "Re-voice failed" from inside the job (``_revoice_video``
+    # returns False on empty chunks). Refused here with a reason instead,
+    # exactly as an empty transcript is.
+    if not narration.count_spoken(record.get("transcript")):
+        raise HTTPException(
+            status_code=400,
+            detail="Every sentence is muted, so there would be no narration. Unmute at least one.",
+        )
 
     provider, voice_id = _narration(body.provider, body.voice_id)
     job_id = jobs.start(

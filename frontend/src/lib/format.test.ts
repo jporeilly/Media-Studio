@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { duration, titleCase } from "./format";
+import { duration, timecode, titleCase } from "./format";
 
 describe("titleCase", () => {
   it("splits on underscores and capitalises words", () => {
@@ -21,5 +21,20 @@ describe("duration", () => {
   it("clamps negatives and rounds", () => {
     expect(duration(-10)).toBe("0:00");
     expect(duration(90.6)).toBe("1:31");
+  });
+});
+
+describe("timecode", () => {
+  it("keeps the milliseconds a transcript sentence is nudged by", () => {
+    expect(timecode(0)).toBe("0:00.000");
+    expect(timecode(5.25)).toBe("0:05.250");
+    expect(timecode(65.004)).toBe("1:05.004");
+    expect(timecode(600)).toBe("10:00.000");
+  });
+  it("clamps negatives and leaves duration() alone", () => {
+    expect(timecode(-10)).toBe("0:00.000");
+    // The two are deliberately different: duration() is for "how long is this".
+    expect(duration(90.6)).toBe("1:31");
+    expect(timecode(90.6)).toBe("1:30.600");
   });
 });

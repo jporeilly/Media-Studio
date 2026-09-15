@@ -49,12 +49,20 @@ def transcribe_project(pid: str, model_size: str | None, progress) -> dict:
         {"start": round(float(s.start), 3), "end": round(float(s.end), 3), "text": s.text}
         for s in segments
     ]
-    record["transcript"] = transcript
-    record["language"] = language
-    record["duration"] = round(float(duration), 2)
-    record["transcribed_model"] = model
-    record["transcribed_device"] = last_load_device()
-    store.save_project(record)
+    # Saved onto the record as it is NOW, not the copy read when the job
+    # started: transcription takes minutes, and a whole-list text Save that
+    # landed while it ran would otherwise be reverted by this write. The new
+    # transcript legitimately replaces the old one - and with it any
+    # per-sentence adjustments, which belonged to sentences that no longer
+    # exist - but nothing ELSE on the record should be rolled back to how it
+    # looked before the job. The same re-read the generate and re-voice jobs do.
+    current = store.get_project(pid) or record
+    current["transcript"] = transcript
+    current["language"] = language
+    current["duration"] = round(float(duration), 2)
+    current["transcribed_model"] = model
+    current["transcribed_device"] = last_load_device()
+    store.save_project(current)
 
     progress(1.0, f"Transcribed {len(transcript)} segments")
-    return {"segments": len(transcript), "language": language, "duration": record["duration"]}
+    return {"segments": len(transcript), "language": language, "duration": current["duration"]}

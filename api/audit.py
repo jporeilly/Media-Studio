@@ -53,6 +53,12 @@ PROJECT_IMPORT = "project.import"
 PROJECT_DELETE = "project.delete"
 PROJECT_TRANSCRIBE = "project.transcribe"
 PROJECT_TRANSCRIPT_EDIT = "project.transcript_edit"
+# The per-sentence narration adjustment (offset / mute / voice / speed). Its own
+# action rather than ``transcript_edit``: that one changes what is SAID, this one
+# changes only when and how it is spoken, and an admin asking "who moved this
+# sentence" should not have to read through every text save. The detail carries
+# field names only - never the sentence.
+PROJECT_TRANSCRIPT_TIMING = "project.transcript_timing"
 PROJECT_GENERATE = "project.generate"
 PROJECT_REVOICE = "project.revoice"
 
@@ -84,7 +90,7 @@ ACTIONS: tuple[str, ...] = (
     USER_CREATE, USER_UPDATE, USER_RESET_PASSWORD,
     SETTINGS_UPDATE, SETTINGS_PASSWORD_POLICY,
     PROJECT_IMPORT, PROJECT_DELETE, PROJECT_TRANSCRIBE, PROJECT_TRANSCRIPT_EDIT,
-    PROJECT_GENERATE, PROJECT_REVOICE,
+    PROJECT_TRANSCRIPT_TIMING, PROJECT_GENERATE, PROJECT_REVOICE,
     SLIDES_UPDATE, SLIDES_BULK_UPDATE, SLIDES_RENDER, SLIDES_UNDO, SLIDES_RESET,
     AI_NOTES, AI_ENHANCE, AI_QA, AI_TONE, AI_TRANSLATE, AI_PACING, AI_QA_DOC, AI_QA_FIX,
     JOB_CANCEL, SYSTEM_UPDATE, SYSTEM_RESTART, AUDIT_PURGE,

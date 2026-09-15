@@ -157,7 +157,7 @@ added later; do not build it now.
 
 ## 2. Data model
 
-Four optional keys **on each transcript segment**, in the outer `project.json`:
+Five optional keys **on each transcript segment**, in the outer `project.json`:
 
 ```jsonc
 {
@@ -177,7 +177,7 @@ along with the sentences they belonged to — visible loss instead of silent cor
 also keeps "a project is a directory you can zip" (`services/projects.py:1-14`) and needs no
 new table, matching the ownership decision in `enterprise-admin.md`.
 
-**An older project has none of the four keys.** Every reader uses
+**An older project has none of the five keys.** Every reader uses
 `float(seg.get("offset") or 0.0)` / `bool(seg.get("muted"))` / `seg.get("voice") or None`.
 There is no migration, no backfill, and no version flag — absent means default, which is
 exactly today's behaviour.
@@ -202,7 +202,7 @@ class SegmentOverride(BaseModel):
 
 `TranscriptSegment` (`api/schemas.py:96-99`) gains **`model_config = ConfigDict(extra="forbid")`
 and nothing else** — the whole-list PATCH stays a text editor. Instead,
-`services/projects.py::set_transcript` copies the four override keys across by index when
+`services/projects.py::set_transcript` copies the five override keys across by index when
 the incoming list is the same length, and drops them (returning the count) when it is not.
 One sentence the UI can show: *editing the words never moves the sentences.* One writer per
 concern; today's Save button keeps working unchanged.
@@ -248,7 +248,7 @@ narration with no evidence outside the server log. Count the failures and return
 job result so the UI can say "3 sentences could not be synthesised" — the pattern the AI
 loops already use (`services/jobs.py:108-113`).
 
-`services/revoice.py:83-86` must copy the four keys into `original_segments`. Nothing else
+`services/revoice.py:83-86` must copy the five keys into `original_segments`. Nothing else
 in the engine needs to know where they came from.
 
 ---
@@ -412,14 +412,53 @@ for `tests/test_audit.py`.
 ## 7. Build order
 
 **Phase 1 — overrides the render honours (small, and it fixes the reported problem).**
-The four fields in `api/schemas.py`; `extra="forbid"` on `TranscriptSegment` plus the
-index-wise merge in `set_transcript`; `services/narration.py` with the per-pid lock;
-`PATCH …/transcript/{index}`; the five edits in `_revoice_video` (§3); an offset field and a
-mute checkbox in the **existing** list view. No waveform, no drag, no new component tree.
-The owner can nudge the one sentence that is wrong and re-voice. Tests:
-`tests/test_narration_overrides.py` (route + validation + the merge rule) and new cases in
-`tests/test_revoice_sync.py`, whose pydantic-free fake-segment harness (`:24-60`) is exactly
-the right place to prove mute, offset and explicit speed without decoding a byte.
+**DONE**, 2026-09-15; see CHANGELOG `#narration-overrides`, `#project-record-lock` and
+`#revoice-failures`. `SegmentOverride`'s five fields in `api/schemas.py`; `extra="forbid"`
+on `TranscriptSegment` plus the merge in `set_transcript`; `services/narration.py` (the
+override vocabulary, the validation, `update_segment` / `segments` / `count_spoken`);
+`PATCH /{pid}/transcript/{index}` in the new `api/routers/narration.py`; the five edits in
+`_revoice_video` (§3) plus the muted-sentence filter in `_calibrate_tts_baseline`; an offset
+box and a Mute checkbox in the **existing** list view, with `timecode()` added beside
+`duration()` in `frontend/src/lib/format.ts` (§6). No waveform, no drag, no new component
+tree — as scoped. The owner can nudge the one sentence that is wrong and re-voice. Tests:
+`tests/test_narration_overrides.py` (25 — route, validation, the merge rule, the race and
+the atomic write), `tests/test_revoice_sync.py` (+13, on the pydantic-free fake-segment
+harness exactly as expected), `tests/test_revoice.py` (+3), vitest `format.test.ts` (+2).
+
+Five things the build changed about the design above. Read them before phase 2 or 3, because
+four of them contradict a section or a trap that still reads as written:
+
+- **The lock is NOT in `services/narration.py`** (§2, trap 3 both say it is). It is
+  `services.projects.project_lock`, beside the file it guards, because `set_transcript` is a
+  read-modify-write of the SAME record — a lock owned by this feature would have protected
+  this feature from itself and from nothing else. Every read-modify-write of the outer
+  `project.json` takes it and `delete_project` drops it, `forget`-style. A new writer of this
+  record takes it from `services/projects.py`, never from a sibling.
+- **`save_project` had to become atomic** — a temp file plus `os.replace`, with a retry for
+  Windows' transient sharing refusal on the rename (2 failures in 60 concurrent runs before
+  it, 0 after). The collision above did not merely lose an adjustment: it tore
+  `project.json`, and `get_project` answers None for a record it cannot parse, so the project
+  vanished from the list and 404'd on every route with its files still on disk. Trap 3 named
+  the interleaving; it did not name the tearing.
+- **The merge matches the sentence's window, not only its index.** §2 says index-wise when
+  the incoming list is the same length — but length is not identity: a Save that deletes one
+  sentence and adds another keeps the count, and an index-only rule slides every adjustment
+  down a row, which is the silent corruption an index-keyed map was rejected for in the first
+  place. Shipped as index **and** the same `start`/`end`; the count that could not be carried
+  comes back as `timing_adjustments_dropped` and the page shows it.
+- **Trap 4 applies to the whole-list PATCH too**, not only to the new routes: it merges the
+  stored adjustments now, so `PATCH /{pid}/transcript` takes `jobs.require_idle` as well.
+  Trap 2's "re-read immediately before saving" was applied to the two existing job writers
+  while the reason was fresh — `services/transcription.py` and `services/revoice.py` both
+  save onto the record as it is when they finish.
+- **Traps 7 and 9 were closed here rather than later**, and 9 grew a third case: a sentence
+  whose offset pins it at or past the end of the video is counted as a failure too, because
+  the mux is `-shortest` and it would not be in the render at all. Trap 8 is answered in the
+  UI — the re-voice card says the adjustments do not apply to a translated re-voice — rather
+  than by refusing the combination.
+
+Left for phase 2, deliberately: the per-sentence **voice** and **speed** are stored,
+validated and honoured by the render, but neither has a control in the UI yet.
 
 **Phase 2 — per-sentence voice and speed, and hear one sentence.** Backend is two more
 fields plus `effective_voice`, already written; the preview route is the only new machinery.

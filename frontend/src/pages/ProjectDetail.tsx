@@ -6,7 +6,7 @@ import { api, errorMessage } from "../api/client";
 import { JobProgress, type Job } from "../components/project/JobProgress";
 import { SlidesCard } from "../components/project/SlidesCard";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
-import { duration, relativeTime } from "../lib/format";
+import { duration, relativeTime, timecode } from "../lib/format";
 import { slidesQueryKey } from "../lib/slides";
 import {
   CARD_DURATION,
@@ -27,7 +27,30 @@ interface Segment {
   start: number;
   end: number;
   text: string;
+  // Per-sentence narration adjustments. Absent means the default, which is
+  // exactly how every project made before they existed behaves.
+  offset?: number | null;
+  muted?: boolean | null;
+  voice?: string | null;
+  provider?: string | null;
+  speed?: number | null;
 }
+// What one sentence's PATCH may carry. A field left out is left alone; an
+// explicit null clears it. Typed field by field so it can be merged straight
+// into a Segment for the optimistic update.
+interface SegmentOverride {
+  offset?: number | null;
+  muted?: boolean | null;
+  voice?: string | null;
+  provider?: string | null;
+  speed?: number | null;
+}
+
+// The whole-list Save is a TEXT editor: the server forbids the adjustment keys
+// in its body (they would otherwise have been dropped silently and written back
+// stripped), and carries them across by index itself. Editing the words never
+// moves the sentences.
+const words = (segs: Segment[]) => segs.map((s) => ({ start: s.start, end: s.end, text: s.text }));
 interface Project {
   id: string;
   name: string;
@@ -46,6 +69,7 @@ interface Project {
   revoiced_video?: string;
   revoiced_language?: string;
   narration_audio?: string;
+  revoice_failed_sentences?: number;
 }
 interface Lang {
   name: string;
@@ -60,6 +84,10 @@ interface Preset {
 }
 
 const KIND_ICON = { deck: Presentation, pdf: FileText, video: Film } as const;
+
+// Matches services/narration.py MAX_OFFSET_SECONDS: far beyond any real
+// correction, and it stops a typo pinning a sentence into the next hour.
+const MAX_OFFSET_SECONDS = 300;
 
 function Meta({ label, value }: { label: string; value: string }) {
   return (
@@ -92,6 +120,12 @@ export default function ProjectDetailPage() {
   const qc = useQueryClient();
   const [jobId, setJobId] = useState<string | null>(null);
   const [segments, setSegments] = useState<Segment[] | null>(null);
+  // What is being TYPED into an offset box, by row, until it is committed on
+  // blur or Enter. Held as the raw text so the box shows exactly what was typed
+  // while it is being typed - a number-parsed round trip rewrites "0.40" to
+  // "0.4" and "-0." to "0" mid-keystroke - and so nothing is sent until the
+  // user has finished. The committed value is the parsed number.
+  const [offsetDrafts, setOffsetDrafts] = useState<Record<number, string>>({});
   const [provider, setProvider] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [speed, setSpeed] = useState(1.0);
@@ -200,10 +234,62 @@ export default function ProjectDetailPage() {
     if (status === "done") setJobId(null);
   }, [job.data?.status, id, qc]);
 
+  // The answer carries ``timing_adjustments_dropped``: how many sentences lost
+  // their adjustment because the saved list no longer holds the sentence it
+  // belonged to. Normally 0 - a Save posts the sentences back as they were
+  // given - and shown when it is not, rather than lost quietly.
   const save = useMutation({
-    mutationFn: (segs: Segment[]) => api.patch(`/api/projects/${id}/transcript`, { transcript: segs }),
+    mutationFn: (segs: Segment[]) =>
+      api.patch<{ timing_adjustments_dropped?: number }>(
+        `/api/projects/${id}/transcript`, { transcript: words(segs) },
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["project", id] }),
   });
+
+  // One sentence's adjustment, one request. Committed on blur / on tick, never
+  // per keystroke: the outer project.json is a read-modify-write and a request
+  // per character would interleave with itself.
+  //
+  // Optimistic, and put BACK when the server refuses: a 409 (a job holds the
+  // project) or a 400 (a voice from the other provider) would otherwise leave
+  // the page showing a value that was never saved, beside an error box saying
+  // it was not. The snapshot is the list as this render has it, which is what
+  // the event handler that fires the mutation is looking at.
+  //
+  // On success the saved sentence is folded into the editable copy rather than
+  // the whole project being refetched: a refetch would replace the entire list
+  // and throw away words the user has typed but not yet saved.
+  const adjust = useMutation({
+    mutationFn: ({ index, changes }: { index: number; changes: SegmentOverride }) =>
+      api.patch<Segment>(`/api/projects/${id}/transcript/${index}`, changes),
+    onMutate: ({ index, changes }) => {
+      const previous = segments;
+      setSegments((prev) => prev && prev.map((seg, j) => (j === index ? { ...seg, ...changes } : seg)));
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) setSegments(context.previous);
+    },
+    onSuccess: (saved, { index }) =>
+      setSegments((prev) => prev && prev.map((seg, j) => (j === index ? { ...saved, text: seg.text } : seg))),
+  });
+
+  /** Send an offset box's typed value, if it changed anything. 0 clears it. */
+  const commitOffset = (index: number, seg: Segment) => {
+    const typed = offsetDrafts[index];
+    setOffsetDrafts((drafts) => {
+      const next = { ...drafts };
+      delete next[index];
+      return next;
+    });
+    if (typed === undefined) return;
+    const parsed = typed.trim() === "" ? 0 : Number(typed);
+    // Unparseable: leave what is saved alone rather than guessing at zero.
+    if (!Number.isFinite(parsed)) return;
+    const offset = Math.round(parsed * 1000) / 1000;
+    if (offset === (seg.offset ?? 0)) return;
+    adjust.mutate({ index, changes: { offset: offset || null } });
+  };
 
   if (project.isLoading) {
     return <Card><Spinner label="Loading project…" /></Card>;
@@ -276,6 +362,15 @@ export default function ProjectDetailPage() {
 
   const transcribing = transcribe.isPending || (jobActive && activeKind === "transcribe");
   const revoicing = revoice.isPending || (jobActive && activeKind === "revoice");
+  // A refused adjustment (a 409 while a job holds the project, a 400 for a
+  // voice from the other provider) has to be visible: nothing was saved, and
+  // the row has already been put back to what the server holds.
+  const adjustError = adjust.isError ? errorMessage(adjust.error) : null;
+  // And a refused Save: a 422 from the schema or a 409 while a job runs used to
+  // leave the button going quiet with nothing written.
+  const saveError = save.isError ? errorMessage(save.error) : null;
+  const adjustmentsDropped = save.data?.timing_adjustments_dropped ?? 0;
+  const dropped = p.revoice_failed_sentences ?? 0;
   const transcribeError = transcribe.isError ? errorMessage(transcribe.error) : activeKind === "transcribe" ? jobErrText : null;
   const revoiceError = revoice.isError ? errorMessage(revoice.error) : activeKind === "revoice" ? jobErrText : null;
 
@@ -527,16 +622,76 @@ export default function ProjectDetailPage() {
             <JobProgress job={job.data} />
           ) : segments && segments.length > 0 ? (
             <div style={{ display: "grid", gap: 10 }}>
+              {adjustError && <ErrorBox message={adjustError} />}
+              {saveError && <ErrorBox message={saveError} />}
+              {/* What the two right-hand controls do, and - as honestly as it
+                  can be put - what an offset can and cannot promise. Each
+                  sentence is pinned to the moment it was spoken and the leftover
+                  time becomes silence; a pin is a floor, not a position, so a
+                  sentence can always be pushed later but can only be pulled
+                  earlier as far as the previous one's new audio actually ends. */}
+              <div className="os-muted os-small">
+                Nudge a sentence with <strong>Offset</strong> (seconds: positive is later, negative
+                earlier) or leave it out with <strong>Mute</strong>. Each change saves on its own, at
+                once. A sentence can always be pushed later; pulling it earlier only moves it as far
+                as the sentence before it finishes speaking. Editing the words never moves the
+                sentences — Save below keeps every adjustment.
+              </div>
               {segments.map((s, i) => (
-                <div key={i} style={{ display: "grid", gridTemplateColumns: "64px 1fr", gap: 10, alignItems: "start" }}>
-                  <div style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums", fontSize: 13, paddingTop: 8 }}>{duration(s.start)}</div>
+                <div key={i} style={{ display: "grid", gridTemplateColumns: "84px 1fr auto", gap: 10, alignItems: "start" }}>
+                  {/* Where it was SPOKEN, which is what this column has always
+                      meant, and - when it has been nudged - where it is now
+                      aimed. "Aimed at" in the text itself, not only in a
+                      tooltip: the pin is a floor, so a sentence pulled earlier
+                      lands there only if the one before it has finished
+                      speaking, and a bare arrow reads as a promise. */}
+                  <div style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums", fontSize: 13, paddingTop: 8 }}>
+                    {timecode(s.start)}
+                    {!!s.offset && (
+                      <div style={{ fontSize: 12 }}>
+                        aimed at {timecode(Math.max(0, s.start + s.offset))}
+                      </div>
+                    )}
+                  </div>
                   <Textarea
                     value={s.text}
                     rows={2}
+                    style={s.muted ? { opacity: 0.55 } : undefined}
                     onChange={(e) => setSegments(segments.map((seg, j) => (j === i ? { ...seg, text: e.target.value } : seg)))}
                   />
+                  <div style={{ display: "grid", gap: 6, justifyItems: "start" }}>
+                    <Input
+                      type="number"
+                      step={0.05}
+                      min={-MAX_OFFSET_SECONDS}
+                      max={MAX_OFFSET_SECONDS}
+                      aria-label={`Offset for sentence ${i + 1}, in seconds`}
+                      title="Seconds to move this sentence by. 0 leaves it where it was spoken."
+                      disabled={jobActive}
+                      value={offsetDrafts[i] ?? String(s.offset ?? 0)}
+                      onChange={(e) => setOffsetDrafts({ ...offsetDrafts, [i]: e.target.value })}
+                      onBlur={() => commitOffset(i, s)}
+                      onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+                      style={{ width: 92 }}
+                    />
+                    <label className="os-checkbox os-small" title="Leave this sentence out of the new narration.">
+                      <input
+                        type="checkbox"
+                        checked={!!s.muted}
+                        disabled={jobActive}
+                        onChange={(e) => adjust.mutate({ index: i, changes: { muted: e.target.checked } })}
+                      />
+                      Mute
+                    </label>
+                  </div>
                 </div>
               ))}
+              {adjustmentsDropped > 0 && (
+                <div className="os-muted os-small">
+                  {adjustmentsDropped} sentence{adjustmentsDropped === 1 ? "" : "s"} no longer in the
+                  saved transcript lost {adjustmentsDropped === 1 ? "its" : "their"} offset and mute.
+                </div>
+              )}
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                 <Button variant="primary" icon={<Save size={16} />} disabled={save.isPending} onClick={() => segments && save.mutate(segments)}>
                   {save.isPending ? "Saving…" : "Save transcript"}
@@ -597,6 +752,35 @@ export default function ProjectDetailPage() {
 
               {otherJobNotice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{otherJobNotice}</div>}
               {voices.data?.notice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{voices.data.notice}</div>}
+
+              {/* A translated re-voice translates the WHOLE transcript as one
+                  block, so the engine re-cuts it into sentences and spreads them
+                  across the video by length: there is no sentence left that the
+                  adjustments above could belong to. Said plainly rather than
+                  left to be discovered.
+
+                  Worded as a conditional because the condition here is only
+                  "a language is selected": the server skips the translation
+                  when the target is English or the video's own language, and in
+                  that case the adjustments DO apply. Warning a little too
+                  widely is the safe direction; claiming they are lost when they
+                  are not would not be. */}
+              {language && (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                  If this re-voice is translated, the whole transcript is translated as one block and
+                  the per-sentence offsets and mutes above do not apply — the translated sentences
+                  are spread across the video by length instead. (Choosing the video's own language,
+                  or English for an English video, translates nothing and keeps them.)
+                </div>
+              )}
+
+              {dropped > 0 && (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                  {dropped} sentence{dropped === 1 ? "" : "s"} could not be synthesised in the last
+                  re-voice and {dropped === 1 ? "is" : "are"} silent in it. Re-voice again to try
+                  {dropped === 1 ? " it" : " them"} once more.
+                </div>
+              )}
 
               {p.revoiced_video && (
                 <div style={{ display: "grid", gap: 10 }}>
