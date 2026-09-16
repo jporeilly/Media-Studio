@@ -294,11 +294,15 @@ byte, and `tests/test_revoice_sync.py` never notices.
    -map "[v]" -an -c:v libx264 -preset ultrafast -r <source fps> [-b:v <preset bitrate>] -y dst
    ```
    Picture only, no audio (`-an`): the narration is muxed on afterwards by the step that
-   already exists. `-r` is the source's own frame rate (30 here), **not** `fps_for_transition`
+   already exists. **No `-r` at all.** `trim` + `setpts=PTS-STARTPTS` + `concat` carry the
+   source's own cadence through — the proof render above passed no rate and came out at
+   exactly 30 fps (10079 frames over 335.967 s) — and there is no ffprobe to learn a rate
+   from anyway. What matters is that it is never `fps_for_transition`
    (`core/video_creator.py:35-41`), which chooses very low rates for static decks and would
-   wreck a screen recording. The bitrate comes from the chosen output preset
-   (`services/output_presets.py`), `""` meaning codec default, exactly as `write_videofile`
-   takes it (`core/video_creator.py:1169`). Between ranges the step checks
+   wreck a screen recording; not forcing a rate satisfies that by construction. The bitrate
+   comes from the output preset (`services/output_presets.py`), `""` meaning codec default,
+   exactly as `write_videofile` takes it (`core/video_creator.py:1169`); in E1 that is the
+   default preset (`youtube_1080p`), and choosing one is E2's Render button. Between ranges the step checks
    `cancel_requested_here()`; its timeout is `60 + 3 × output_duration` seconds (measured
    rate ≈ 2.8 s per minute of footage, with headroom). Writes to a `.part` and publishes
    with `replace_with_retry`.
@@ -478,17 +482,17 @@ nobody looked.
 
 ---
 
-## 10. What the owner should decide before E1 starts
+## 10. Decisions — taken by the owner 2026-09-16 ("go with your proposals")
 
-1. **The projection rule for a sentence that straddles a cut** — kept if its start is kept
-   (§3, proposed) versus kept if more than half of it is. The proposed rule is simpler to
-   explain and matches how mute already works; the alternative keeps a sentence whose first
-   word was cut. Either is a one-line change in `project_transcript`; it should be one
-   line, chosen once.
-2. **Whether the join marker should be there at all.** Proposed yes, small, with the removed
-   length in its tooltip.
-3. **Whether E1 is worth a release on its own** (an API you can drive with curl) or waits
-   for E2. Proposed: E1 is committed unversioned like 3a was, and E2 is what gets a number.
+1. **A sentence that straddles a cut is kept iff its `start` is kept** (§3). Simpler to
+   explain, and it matches how mute already works. The alternative — kept if more than half
+   survives — was considered and not chosen; it is a one-line change in
+   `project_transcript` if it is ever wanted, and it must stay one line.
+2. **The join marker is in.** Small, with the removed length in its tooltip (E2).
+3. **E1 is committed unversioned**, like phase 3a was. E2 is what gets a number.
+
+The owner's standing instruction for E2 and E3 is **"copy Camtasia"** — the gestures, the
+look and the feel of its timeline, within the scope §9 draws.
 
 ### Critical files
 
