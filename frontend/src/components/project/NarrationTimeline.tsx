@@ -71,6 +71,8 @@ const EMPTY_SCHEDULE: Schedule = { clips: [], overrunning: [], pushed: [], squee
  */
 export function NarrationTimeline({ projectId, provider, voiceId, speed, active, selected, onSelect }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** Held so the callback ref can disconnect the previous observer. */
+  const observerRef = useRef<ResizeObserver | null>(null);
   const [width, setWidth] = useState(0);
   const [zoom, setZoom] = useState(1);
 
@@ -459,14 +461,35 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
   useEffect(() => { paint(); }, [paint, pps, planSignature]);
 
   // ── the strip's own width ────────────────────────────────────────────────
-  useEffect(() => {
-    const element = scrollRef.current;
+  //
+  // A CALLBACK ref, not an effect keyed on `active`. Everything on this view is
+  // positioned from `width`, and the effect that measured it could only fire
+  // when `active` changed — but on the render where `active` first becomes
+  // true this component returns a Spinner, because the plan is still being
+  // read, and a cold plan takes about ten seconds while the speaking rate is
+  // measured. So the measurement ran against a ref that was still null,
+  // returned early, attached no observer, and never ran again: `width` stayed
+  // 0, and with it every derived number. The whole strip then drew at zero
+  // scale — all 62 sentences stacked at the left edge clamped to their 3px
+  // minimum, no filmstrip (its own effect bails when the picture is 0 wide,
+  // and bails silently because that is not a failure worth a message), and a
+  // waveform pooled to nothing. Leaving the tab and coming back fixed it,
+  // which is exactly what made it easy to miss: by then the plan was cached,
+  // so the strip existed on the first active render.
+  //
+  // A callback ref fires when the node itself attaches, whichever of the three
+  // early returns rendered before it, so there is no readiness condition to
+  // keep in step with the returns above.
+  const attachStrip = useCallback((element: HTMLDivElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    scrollRef.current = element;
     if (!element) return;
     const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
     observer.observe(element);
+    observerRef.current = observer;
     setWidth(element.clientWidth);
-    return () => observer.disconnect();
-  }, [active]);
+  }, []);
 
   // ── the filmstrip ────────────────────────────────────────────────────────
   //
@@ -651,7 +674,7 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
       )}
       {filmError && <div className="os-muted os-small">{filmError}</div>}
 
-      <div className="os-tl-scroll" ref={scrollRef}>
+      <div className="os-tl-scroll" ref={attachStrip}>
         {/* ONE time scale, `pps` pixels a second, shared by all three lanes: a
             sentence block sits over the burst it was spoken in. The body is as
             wide as the whole AUDITION; the filmstrip and the waveform are as
