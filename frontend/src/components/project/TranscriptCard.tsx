@@ -90,7 +90,13 @@ export function TranscriptCard({
   voiceOptions, studioDefaultVoice,
 }: Props) {
   const qc = useQueryClient();
-  const [view, setView] = useState("list");
+  // The Timeline is the view a video opens on. It is the visual reference -
+  // the filmstrip, the waveform and every sentence in its place - and the
+  // owner's first reaction to opening on the List (a column of offset boxes
+  // with no picture to judge them against) was that the feature did not exist.
+  // The List is one click away for fixing words. Safe as a default: the card
+  // returns before the tabs exist while there is no transcript to show.
+  const [view, setView] = useState("timeline");
   const [selected, setSelected] = useState<number | null>(null);
   // What is being TYPED into a per-sentence box (offset, speed or voice), keyed
   // by field and row, until it is committed on blur or Enter. Held as the raw

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Pencil, Plus, UserCheck, UserX } from "lucide-react";
+import { useConfirm } from "../ConfirmDialog";
 import { api, errorMessage } from "../../api/client";
 import { useAuth } from "../../context/AuthContext";
 import { relativeTime, titleCase } from "../../lib/format";
@@ -35,6 +36,9 @@ function statusOf(u: Account): string {
 export function AccountsCard() {
   const qc = useQueryClient();
   const { user: me } = useAuth();
+  // The app's own confirmation: the browser's confirm() is swallowed in the
+  // desktop shell, and a deactivation that asks it would silently never run.
+  const { confirm, dialog } = useConfirm();
   const users = useQuery({
     queryKey: ["users"],
     queryFn: () => api.get<{ users: Account[] }>("/api/users"),
@@ -54,6 +58,8 @@ export function AccountsCard() {
   const list = users.data?.users ?? [];
 
   return (
+    <>
+    {dialog}
     <Card
       title="Accounts"
       subtitle="New and reset accounts set their own password at first login. Deactivated accounts cannot sign in; nothing is deleted."
@@ -91,10 +97,14 @@ export function AccountsCard() {
                       title={isMe ? "You cannot deactivate your own account" : "Deactivate"}
                       aria-label={`Deactivate ${u.display_name}`}
                       disabled={isMe || setActive.isPending}
-                      onClick={() => {
-                        if (window.confirm(`Deactivate ${u.display_name}? They will no longer be able to sign in; you can reactivate them later.`)) {
-                          setActive.mutate({ id: u.id, active: false });
-                        }
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: "Deactivate account",
+                          message: <>Deactivate <b>{u.display_name}</b>? They will no longer be able to sign in; you can reactivate them later.</>,
+                          confirmLabel: "Deactivate",
+                          danger: true,
+                        });
+                        if (ok) setActive.mutate({ id: u.id, active: false });
                       }}
                     >
                       <UserX size={15} />
@@ -106,10 +116,13 @@ export function AccountsCard() {
                       title="Reactivate"
                       aria-label={`Reactivate ${u.display_name}`}
                       disabled={setActive.isPending}
-                      onClick={() => {
-                        if (window.confirm(`Reactivate ${u.display_name}? They will be able to sign in again.`)) {
-                          setActive.mutate({ id: u.id, active: true });
-                        }
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: "Reactivate account",
+                          message: <>Reactivate <b>{u.display_name}</b>? They will be able to sign in again.</>,
+                          confirmLabel: "Reactivate",
+                        });
+                        if (ok) setActive.mutate({ id: u.id, active: true });
                       }}
                     >
                       <UserCheck size={15} />
@@ -125,6 +138,7 @@ export function AccountsCard() {
       {editing && <AccountModal account={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); invalidate(); }} />}
       {resetting && <ResetPasswordModal account={resetting} onClose={() => setResetting(null)} onDone={() => { setResetting(null); invalidate(); }} />}
     </Card>
+    </>
   );
 }
 

@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Film, FolderOpen, Presentation, Trash2, Upload } from "lucide-react";
+import { useConfirm } from "../components/ConfirmDialog";
 import { api, errorMessage } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { Button, Card, EmptyState, ErrorBox, PageHeader, Spinner, Table } from "../components/ui";
@@ -78,6 +79,9 @@ export default function ProjectsPage() {
   const list = projects.data?.projects ?? [];
   // The empty state owns the Import button while it is showing (see the header).
   const emptyShowing = projects.isSuccess && list.length === 0;
+  // The app's own confirmation, not the browser's: in the desktop shell the
+  // native confirm() was swallowed and Delete silently did nothing.
+  const { confirm, dialog } = useConfirm();
   const muted = { color: "var(--muted)" } as const;
 
   return (
@@ -101,6 +105,7 @@ export default function ProjectsPage() {
           )
         }
       />
+      {dialog}
       <input
         ref={fileRef}
         type="file"
@@ -185,8 +190,14 @@ export default function ProjectsPage() {
                       className="os-icon-btn"
                       title="Delete project"
                       aria-label={`Delete ${p.name}`}
-                      onClick={() => {
-                        if (confirm(`Delete "${p.name}"? This removes its files.`)) deleteMut.mutate(p.id);
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: "Delete project",
+                          message: <>Delete <b>{p.name}</b>? This removes its files.</>,
+                          confirmLabel: "Delete",
+                          danger: true,
+                        });
+                        if (ok) deleteMut.mutate(p.id);
                       }}
                     >
                       <Trash2 size={16} />

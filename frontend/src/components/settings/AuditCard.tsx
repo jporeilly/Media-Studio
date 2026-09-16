@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, ScrollText, Trash2 } from "lucide-react";
+import { useConfirm } from "../ConfirmDialog";
 import { api, errorMessage, qs } from "../../api/client";
 import { relativeTime } from "../../lib/format";
 import { Button, Card, EmptyState, ErrorBox, Select, Spinner, Table } from "../ui";
@@ -41,6 +42,9 @@ const PURGE_DAYS = [30, 90, 365];
  */
 export function AuditCard() {
   const qc = useQueryClient();
+  // The app's own confirmation: the browser's confirm() is swallowed in the
+  // desktop shell, and a purge that asks it would silently never run.
+  const { confirm, dialog } = useConfirm();
   const [action, setAction] = useState("");
   const [userId, setUserId] = useState("");
   const [limit, setLimit] = useState(100);
@@ -71,6 +75,8 @@ export function AuditCard() {
   const filtered = !!action || !!userId;
 
   return (
+    <>
+    {dialog}
     <Card
       title="Audit log"
       subtitle="Every change made through the app: sign-ins, projects, slide edits, accounts and settings. Settings entries record which keys changed, never their values."
@@ -143,8 +149,14 @@ export function AuditCard() {
           variant="danger"
           icon={<Trash2 size={16} />}
           disabled={purge.isPending}
-          onClick={() => {
-            if (window.confirm(`Delete every audit entry older than ${purgeDays} days? This cannot be undone.`)) {
+          onClick={async () => {
+            const ok = await confirm({
+              title: "Purge the audit log",
+              message: <>Delete every audit entry older than <b>{purgeDays} days</b>? This cannot be undone.</>,
+              confirmLabel: "Delete entries",
+              danger: true,
+            });
+            if (ok) {
               setNotice(null);
               purge.mutate(purgeDays);
             }
@@ -154,5 +166,6 @@ export function AuditCard() {
         </Button>
       </div>
     </Card>
+    </>
   );
 }
