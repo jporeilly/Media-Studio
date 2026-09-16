@@ -14,6 +14,55 @@ export interface JobNarration {
 }
 
 /**
+ * One transcript sentence as the project record carries it. The five adjustment
+ * keys are optional and absent means the default — which is exactly how every
+ * project made before the narration editor existed behaves.
+ */
+export interface Segment {
+  start: number;
+  end: number;
+  text: string;
+  offset?: number | null;
+  muted?: boolean | null;
+  voice?: string | null;
+  provider?: string | null;
+  speed?: number | null;
+}
+
+/**
+ * What one sentence's PATCH may carry. A field left out is left alone; an
+ * explicit null clears it. Typed field by field so it can be merged straight
+ * into a Segment for the optimistic update.
+ */
+export interface SegmentOverride {
+  offset?: number | null;
+  muted?: boolean | null;
+  voice?: string | null;
+  provider?: string | null;
+  speed?: number | null;
+}
+
+/**
+ * The body of the whole-list Save, which is a TEXT editor and nothing else: the
+ * server forbids the adjustment keys here (they would otherwise be dropped
+ * silently and written back stripped) and carries them across by index and
+ * window itself. Editing the words never moves the sentences.
+ */
+export const words = (segments: Segment[]) =>
+  segments.map((s) => ({ start: s.start, end: s.end, text: s.text }));
+
+/** The draft key for one row's box: drafts are per field AND per row. */
+export const draftKey = (field: "offset" | "speed" | "voice", index: number) => `${field}:${index}`;
+
+// Mirrors services/narration.py: far beyond any real correction, and it stops a
+// typo pinning a sentence into the next hour.
+export const MAX_OFFSET_SECONDS = 300;
+// ... and its MIN_SPEED / MAX_SPEED, the same bounds the Generate and Re-voice
+// speed boxes use.
+export const MIN_SPEED = 0.5;
+export const MAX_SPEED = 2;
+
+/**
  * Where to fetch one sentence's audio from.
  *
  * The three values sent are the JOB's — what the Re-voice card is about to use.

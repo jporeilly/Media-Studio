@@ -300,7 +300,10 @@ CLAUDE.md's frontend conventions say hand-authored CSS, lucide icons, no UI kit.
   `tests/test_frontend_dist.py` until `dist` is rebuilt, because `package.json` and
   `package-lock.json` are both inside the fingerprint (`:24`).
 - **No `decodeAudioData` in the browser.** It would need the audio bytes fetched through the
-  session cookie, and a 2-hour `audio.wav` is 115 MB.
+  session cookie, and a 2-hour `audio.wav` is 115 MB. **This is about the SOURCE audio and
+  nothing else** — the per-sentence TTS clips the audition plays are ~20 kB each and are
+  decoded in the browser, which is the whole of phase 3a. See the first of phase 3a's notes in
+  §7 before "fixing" either half of this.
 - **Draw one SVG `<path>`**, not 2728 rects: `viewBox="0 0 N 100" preserveAspectRatio="none"`
   with a single filled path mirrored about the centre line. One DOM node, scales with CSS,
   no canvas ref, no resize observer.
@@ -549,7 +552,127 @@ drag with pointer capture, seconds↔pixels with a zoom level, max-pooling the p
 pixel width, block hit-testing, keyboard equivalents for every mouse gesture, a
 non-reflowing render for 1500 blocks on a 2-hour recording, and the `frontend/dist` rebuild.
 Budget it as more than phases 1 and 2 combined and do not start it until phase 1 is in the
-owner's hands.
+owner's hands. **It was split in two when it was built**: 3a is the strip and the audition,
+3b is the drag.
+
+**Phase 3a — the strip, and auditioning the narration without rendering it.** **DONE**,
+2026-09-16; see CHANGELOG `#narration-timeline` and `#tts-cache-publish`. The transcript
+finally moved out of `ProjectDetail.tsx` into
+`frontend/src/components/project/TranscriptCard.tsx` (§6's extraction, deferred by phase 2)
+with a **List / Timeline** switch over the *same* `segments` state: List is phase 1 and 2's
+row editor unchanged, Timeline is the new
+`frontend/src/components/project/NarrationTimeline.tsx` — a client-side filmstrip (a hidden
+`<video>` seeked and drawn to a canvas; no ffmpeg, no server work), the waveform strip, and
+one block per sentence at `pinned_start` with width `end - start`, plus a ghost outline at
+the original position whenever an offset is set. `GET /{pid}/waveform` and `services/waveform.py`
+are §4 as designed — stdlib `wave` + numpy, chunked, 125 ms buckets, cached on the source's
+`mtime_ns` + size beside it, one SVG `<path>` — and `GET /{pid}/narration/plan` is a route §6's
+table does not have at all (see the notes below). The pure helpers are
+`frontend/src/lib/timeline.ts` / `timeline.test.ts` as §6 named them. Server-side the render's
+rate rules were pulled to module level in `services/processing.py`
+(`sentence_window`, `per_sentence_speed`, `sentence_speed`, `calibrate_tts_baseline`,
+`DEFAULT_BASELINE_RATE`, `SQUEEZE_TOLERANCE`, `SQUEEZE_MAX_FACTOR`) with the old
+`VideoProcessor` methods kept as delegating seams, and `services/narration.py` grew `plan`,
+`baseline_rate`, `transcript_section`, `preview_url` and `forget_baseline`.
+`replace_with_retry` moved to `utils/helpers.py` beside the new `publish_to_cache`, which
+both TTS generators now use. Tests: `tests/test_narration_plan.py` (42),
+`tests/test_waveform.py` (26), `tests/test_tts_cache_publish.py` (8),
+`tests/test_project_ownership.py` (+2 routes), vitest `lib/timeline.test.ts` (34) — **603
+backend and 103 vitest across the suites**, `tsc --noEmit` clean. Deliberately left: **the
+drag** (phase 3b — offsets are still typed in the List view), the per-segment **Reset**
+(§9's "enough for v1", still unbuilt since phase 2), a **playhead that scrubs the video from
+the strip** beyond clicking a block to seek (§9), and any waveform of the *narration* (§4,
+§9 — it needs the ffmpeg decode path and it would be a predicted waveform before a render).
+
+Seven things the build changed about the design above. Read them before phase 3b, because
+several contradict a line that still reads as written:
+
+- **§4's "no `decodeAudioData` in the browser" does not mean what it looks like it means,
+  and the audition depends on that.** It was written about the *source* `audio.wav` — 115 MB
+  for a two-hour recording — which is why the waveform is drawn from server-side peaks and
+  always will be. The clips the audition plays are **per-sentence TTS mp3s, about 20 kB
+  each** (the whole narration of a 5m41s video is 1.3 MB), and they **are** fetched and
+  `decodeAudioData`'d in the browser: Web Audio is the only way to place a clip on a shared
+  clock to the millisecond, and a pile of `<audio>` elements is not a substitute. §4's bullet
+  now carries a pointer to this note. Do not "fix" it.
+- **The plan endpoint is not in §6's table, and it is the load-bearing piece.**
+  `GET /{pid}/narration/plan` exists so the render's rate rules are never reimplemented in
+  TypeScript. **The server owns what each sentence says and how fast; the client owns only
+  where the clips land.** The plan answers, per sentence, the effective voice and speed, the
+  window, whether it is squeezable, whether it is speakable at all, and a `preview_url`
+  carrying that effective pair — from the very functions `_revoice_video` calls, which is why
+  they were pulled to module level with the methods kept as delegating seams (the sync tests
+  monkeypatch `VideoProcessor._per_sentence_speed` on the class and `_calibrate_tts_baseline`
+  on the instance, and `_revoice_video` still calls both through `self`, so those patches
+  land exactly as they did). Two costs the design did not anticipate, both closed here: the plan
+  **measures the speaking rate**, which is three syntheses, so it is bounded at 45 s
+  (`BASELINE_TIMEOUT_SECONDS`, above the preview's 30 s because the first of the three pays
+  the same ~10 s cold start) and falls back to the engine's default rather than holding a
+  request; and it is **memoised per (project, provider, voice)** and dropped by
+  `forget_baseline` whenever the transcript changes or the project is deleted, because a tab
+  reopened past react-query's `staleTime` or a change in the Re-voice card re-fetched the
+  plan and used to re-pay the calibration each time.
+- **The audition must model the post-synthesis tempo squeeze, or it lies in exactly the place
+  it is supposed to help.** §6 describes blocks and slack and nothing about playback, so
+  nothing in it says this. Without the squeeze, a clip that runs more than `SQUEEZE_TOLERANCE`
+  (1.15) over its window plays at full length, pushes the next clip late, and the audition
+  shows a cascade through every sentence after it — while the render would have sped that one
+  clip up with `atempo` to fit exactly (unless the factor exceeds `SQUEEZE_MAX_FACTOR`, 2.0,
+  past which speech stops being intelligible and the overrun is let through). Both constants
+  are **named on the server and ride in the plan payload** rather than being written into the
+  client, because a second copy of the numbers would be free to drift from the loop it exists
+  to predict. One approximation is accepted and written down beside it: the render trims each
+  clip's leading silence before measuring, the browser holds the untrimmed mp3, so the
+  prediction fires a hair early and never late.
+- **A URL is not a sufficient cache key for an audition.** The obvious signature for "are the
+  decoded clips still the right ones" is the list of `preview_url`s, and it is wrong.
+  `preview_url` carries the voice and the speed but **not the text**, and it cannot be made
+  to: `per_sentence_speed` floors at the job's speed, so a sentence whose narrator was slower
+  than the TTS baseline sits exactly on that floor and its URL does not move however the words
+  are changed — and neither does the URL of any sentence carrying an explicit per-sentence
+  speed. Signed on the URL alone, fixing a Whisper mis-hearing left the **old** clip in the
+  buffer, played it back, and — because its decoded duration feeds the schedule — mis-placed
+  every sentence after it too. The text is in the signature.
+- **`replace_with_retry` moved to `utils/helpers.py`** (phase 1's note and trap 3 both put it
+  in `services/projects.py`, which now re-exports it so every caller and every test that
+  patches `store.replace_with_retry` is unaffected). The reason is the layering, and it is not
+  negotiable: the TTS generators live in `core/`, and **`core/` may import `utils/` but must
+  never import `services/`** — the engine is the layer underneath. It moved because phase 2's
+  rule ("anything that hands a generator a path must hand it a private one") turned out not to
+  go far enough: the generators themselves mirror a finished clip onto the shared cache key,
+  and both did it with a plain `shutil.copy`, so an interrupted copy left a truncated entry at
+  that key **permanently** — served by every later preview and copied out by every later
+  re-voice, which checks only that a file exists. `utils.helpers.publish_to_cache` (temp file
+  plus `replace_with_retry`, never raises) is that fix, and it is pre-existing *render*
+  behaviour rather than anything the timeline introduced; what the timeline changed is that a
+  browser GET now drives the same path concurrently with previews and a running re-voice.
+- **The last sentence's end bound: ffprobe here, the WAV header there — accepted, not
+  unified.** `_revoice_video` bounds its final spoken sentence by `_probe_duration(video)`
+  and drops any sentence pinned at or past it; the plan uses the WAV header's duration
+  (trap 5 forbids ffprobe for the timeline, trap 6 forbids spawning anything at all). When
+  ffprobe exists the two are the same recording measured two ways and agree to within a
+  frame. When it does not — which the packaged app must assume — the render gets
+  `video_end = 0.0` and falls back to the *section's* end while the plan still uses the WAV
+  duration, and those differ whenever the recording runs on after the last word. Blast
+  radius: the last spoken sentence only, and only when the bound would make it short enough
+  to be sped up. Documented in `services/narration.plan` rather than papered over.
+- **A sentence pinned past the end of the video is marked, not auditioned**, and the *server*
+  decides which sentences are speakable at all. The `-shortest` mux drops such a sentence
+  (phase 1's third failure case), so playing it would be auditioning audio the render cannot
+  produce; the plan returns `speakable` and `past_end` and the client never re-derives either.
+  That is not fussiness: "has words" is `str.strip()` on the server and would be
+  `String.trim()` in the browser, and those are different character sets (U+001C–1F strip but
+  do not trim; U+FEFF trims but does not strip), so a pasted control character would be
+  auditioned by the browser and refused 400 by the preview route — a per-sentence failure with
+  no cause anybody could see.
+
+**Phase 3b — drag.** Not built. §6's drag bullet, the ±0.05 / ±0.25 s nudges and the keyboard
+equivalents all still read as written and are all still outstanding, as is trap 3's surviving
+half: **commit on drag end, not per frame** (one `PATCH …/transcript/{index}` per committed
+change). Everything it needs is in place — `lib/timeline.ts` already owns seconds↔pixels and
+the zoom, the blocks are already positioned from `pinned_start`, and the audition already
+re-plays from the plan whenever an adjustment invalidates it — so 3b is the gesture, its
+keyboard equivalent, the hit-testing and the write, not a new data path.
 
 **Phase 4 (optional) — per-segment translation.** `core/translator.py:96-123`
 `translate_notes` already returns a list the same length as its input with failures passing
@@ -582,9 +705,9 @@ each that is a job with a progress bar, not a request.
    `os.replace`, with a retry — `os.replace` intermittently fails on Windows while anything
    holds either file for the instant of the rename, measured at 2 in 60 concurrent runs).
    The two job writers deliberately do NOT take it: they re-read immediately before saving,
-   and `jobs.require_idle` refuses an edit while a job holds the project. **Phase 3 still
-   has to commit on drag end, not per frame** — that was the other half of this trap and it
-   is the half still outstanding.
+   and `jobs.require_idle` refuses an edit while a job holds the project. **Phase 3b still
+   has to commit on drag end, not per frame** — that was the other half of this trap, phase
+   3a shipped no drag at all, and it is the half still outstanding.
 4. **The transcript PATCH does not take `jobs.require_idle`.** Every slide write does
    (`api/routers/slides.py:42-47`). The new routes must, which adds a 409 the UI has to
    render — `api/app.py:72-74` already maps `ProjectBusy` to it.

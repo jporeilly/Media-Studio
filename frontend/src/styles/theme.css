@@ -377,6 +377,38 @@ p { margin: 0 0 8px; }
   .os-qa-row .os-qa-issue { grid-column: 1 / -1; }
 }
 
+/* ── The narration timeline: a filmstrip, the waveform of the original audio and one block per sentence, all on ONE
+   horizontal time scale, with a playhead over them. Everything inside .os-tl-body is positioned in pixels computed
+   from seconds (lib/timeline.ts), so the only job the CSS has is to stack the three lanes and colour them. ── */
+.os-tl { display: grid; gap: 10px; }
+.os-tl-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.os-tl-spacer { flex: 1 1 auto; }
+.os-tl-clock { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.os-tl-scroll { overflow-x: auto; overflow-y: hidden; border-radius: var(--radius-sm); background: var(--surface-2); }
+.os-tl-body { position: relative; cursor: crosshair; user-select: none; }
+.os-tl-film { display: flex; height: 46px; overflow: hidden; background: var(--surface-3); }
+.os-tl-film img { height: 100%; flex: 1 1 0; min-width: 0; object-fit: cover; display: block; }
+.os-tl-film-empty { flex: 1; background: repeating-linear-gradient(135deg, var(--surface-3) 0 10px, var(--surface-2) 10px 20px); }
+/* preserveAspectRatio="none" on the SVG itself: the path is drawn in bucket units and stretched to the strip. */
+.os-tl-wave { display: block; width: 100%; height: 60px; }
+.os-tl-wave path { fill: var(--brand); opacity: 0.5; }
+.os-tl-blocks { position: relative; height: 60px; }
+.os-tl-block { position: absolute; top: 6px; bottom: 6px; border: 0; border-radius: 4px; padding: 2px 5px; overflow: hidden; text-align: left; font: inherit; font-size: 11px; line-height: 1.3; color: var(--text); cursor: pointer; background: color-mix(in srgb, var(--brand) 34%, transparent); box-shadow: inset 0 0 0 1px var(--brand); }
+.os-tl-block:hover { background: color-mix(in srgb, var(--brand) 48%, transparent); }
+.os-tl-block.selected { background: color-mix(in srgb, var(--brand) 62%, transparent); box-shadow: inset 0 0 0 2px var(--brand); }
+.os-tl-block.muted { background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--muted); }
+.os-tl-block.overrun { box-shadow: inset 0 0 0 1px var(--warn); }
+.os-tl-block.failed { background: color-mix(in srgb, var(--bad) 30%, transparent); box-shadow: inset 0 0 0 1px var(--bad); }
+.os-tl-block-text { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The original position, shown only once a sentence has been nudged: "what I moved", without a second panel. */
+.os-tl-ghost { position: absolute; top: 6px; bottom: 6px; border: 1px dashed var(--border-strong); border-radius: 4px; pointer-events: none; }
+/* On the CULPRIT, where its clip really ends — the pipeline never re-sorts, so this is the moment the overrun costs. */
+.os-tl-overrun { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--warn); pointer-events: none; }
+/* A sibling of the three lanes, not a child of one, so it spans all of them; moved by a transform written straight
+   to the DOM each animation frame (a setState per frame would re-render fifteen hundred blocks sixty times a second). */
+.os-tl-playhead { position: absolute; top: 0; bottom: 0; left: 0; width: 2px; background: var(--bad); pointer-events: none; will-change: transform; }
+.os-tl-picture { width: 100%; max-width: 520px; border-radius: 8px; background: #000; display: block; }
+
 /* ── Phones. The tablet rules above turn the sidebar into a drawer; here it gets a button and a backdrop, the top bar
    tightens, KPI grids drop to two columns, modals rise from the bottom, and touch targets grow on coarse pointers. ── */
 .os-menu-btn { display: none; }

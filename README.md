@@ -15,13 +15,15 @@ the whole app suite looks and feels the same.
 > local Ollama), narrated-video generation with transitions, intro/outro cards, watermark,
 > subtitles, extra formats and Vimeo output presets, video transcription with an editable
 > transcript whose sentences can each be nudged, muted, given their own voice and speed and
-> played back one at a time before a re-voice (phases 1 and 2 of the narration timeline — no
-> waveform, no drag), re-voicing in a new voice or a translated language that keeps step with
+> played back one at a time, and a timeline view of those sentences over a filmstrip and the
+> original audio's waveform that plays the whole new narration against the picture without
+> running a re-voice (phases 1 to 3a of the narration timeline — no drag yet), re-voicing in
+> a new voice or a translated language that keeps step with
 > the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
 > configurable password policy, projects that belong to whoever imported them with an audit
 > log of every change for admins, self-update from Git, and a Windows desktop installer are
 > in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound
-> library, the rest of the narration timeline (the waveform and the drag), and the rest of the
+> library, the rest of the narration timeline (dragging a sentence on the strip), and the rest of the
 > administration work (notifications, a branding lock, an admin page of its own, per-kind job
 > limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
 > `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).

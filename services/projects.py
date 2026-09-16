@@ -35,14 +35,14 @@ disk. Nothing partial is ever visible at the real path now.
 """
 
 import json
-import os
 import re
 import shutil
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from utils.helpers import replace_with_retry
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "data" / "projects"
@@ -253,51 +253,26 @@ def delete_project(pid: str) -> bool:
                 f"Could not remove the project folder: {exc.strerror or exc}"
             ) from exc
 
-    # This project's own lock, and the slide editor's lock plus its cache of the
-    # deck's notes: none has a reason to outlive the project. Imported here:
-    # that module imports this one.
-    from services import slides
+    # This project's own lock, the slide editor's lock plus its cache of the
+    # deck's notes, and the narration editor's memoised speaking rates: none has
+    # a reason to outlive the project. Imported here: both modules import this
+    # one.
+    from services import narration, slides
 
     forget(pid)
     slides.forget(pid)
+    narration.forget_baseline(pid)
     return True
 
 
-# The rename that publishes an atomically-written file, retried on a transient
-# Windows refusal. Worst case ~0.6 s before the write really fails.
-_REPLACE_ATTEMPTS = 8
-_REPLACE_BACKOFF_SECONDS = 0.02
-
-
-def replace_with_retry(tmp: Path, path: Path) -> None:
-    """``os.replace(tmp, path)``, retried briefly on a Windows sharing refusal.
-
-    Public because it is the repo's one write-a-temp-then-rename idiom, and a
-    second copy of a retry loop is a second thing to get wrong: ``save_project``
-    below publishes project.json with it, and ``services.narration`` publishes a
-    finished TTS clip onto its cache path with it.
-
-    On Windows the rename fails with ERROR_ACCESS_DENIED (WinError 5) whenever
-    anything else holds a handle to either file for the instant it takes: a
-    real-time virus scanner opening the file we have just written (IObit and
-    Defender both do - see ``core.audio_mixer._load_audio_with_retry``, which
-    exists for the same reason), the search indexer, or a reader that opened
-    the destination without FILE_SHARE_DELETE. It is transient and uncommon -
-    2 in 60 in a concurrent loop on the development machine - and it is not a
-    reason to fail a save: a few milliseconds later it succeeds. POSIX never
-    takes this path.
-
-    Retrying exposes nothing partial: the destination is either the old file or
-    the new one throughout, and only the rename is repeated.
-    """
-    for attempt in range(_REPLACE_ATTEMPTS):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == _REPLACE_ATTEMPTS - 1:
-                raise
-            time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
+# The repo's ONE write-a-temp-then-rename idiom, re-exported so every existing
+# caller and every test that patches ``store.replace_with_retry`` keeps working.
+# It moved to ``utils.helpers`` when the TTS generators needed it too: they live
+# in ``core``, which is the layer UNDERNEATH this one and must not import it.
+# ``save_project`` below publishes project.json with it, ``services.narration``
+# publishes a finished preview clip onto its cache path with it, and
+# ``utils.helpers.publish_to_cache`` publishes the render's clips with it.
+__all_reexports__ = ("replace_with_retry",)
 
 
 def save_project(record: dict) -> None:
@@ -369,7 +344,7 @@ def set_transcript(pid: str, transcript: list[dict]) -> tuple[dict, int] | None:
     ``services.narration`` owns the vocabulary and is imported here rather than
     at module scope: that module imports this one.
     """
-    from services.narration import OVERRIDE_KEYS
+    from services.narration import OVERRIDE_KEYS, forget_baseline
 
     with project_lock(pid):
         record = get_project(pid)
@@ -391,4 +366,9 @@ def set_transcript(pid: str, transcript: list[dict]) -> tuple[dict, int] | None:
 
         record["transcript"] = segments
         save_project(record)
-        return record, dropped
+
+    # The words decide which three sentences the narration timeline's speaking
+    # rate was measured from, so a Save makes that measurement stale. Outside
+    # the record's lock: it guards a different thing.
+    forget_baseline(pid)
+    return record, dropped

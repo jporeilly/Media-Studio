@@ -275,6 +275,178 @@ def assemble_master(timed_chunks, is_free: bool):
     return master
 
 
+# The speaking rate assumed when it could not be measured: 15 characters a
+# second, which is roughly an unhurried English narrator. Named because three
+# call sites fall back to it - no sample long enough, every sample failed, and
+# (for the audition plan) a provider that cannot be reached at all.
+DEFAULT_BASELINE_RATE = 15.0
+
+# The post-synthesis tempo squeeze, in ``_revoice_video``: a sentence whose clip
+# runs more than SQUEEZE_TOLERANCE over the moment the next one is due is sped
+# up with ffmpeg's atempo to fit exactly, unless it would take more than
+# SQUEEZE_MAX_FACTOR to do it - past that the speech stops being intelligible
+# and the overrun is let through instead.
+#
+# The tolerance is deliberately loose: Whisper often reports one sentence ending
+# exactly where the next begins, so a tight bound would tempo-adjust most of a
+# clip and the differing factors would be audible as a wobble in the speaking
+# rate. A small overrun is inaudible on its own and is absorbed at the next real
+# pause, where the sentence after it is still pinned to its own moment.
+#
+# Named because the narration timeline has to predict this loop to place its
+# clips - the squeeze is exactly what stops a long clip cascading into every
+# sentence after it - and it reports these two numbers to the browser
+# (``services.narration.plan``) rather than letting it carry its own copies.
+SQUEEZE_TOLERANCE = 1.15
+SQUEEZE_MAX_FACTOR = 2.0
+
+
+def sentence_window(spoken, index: int, video_end: float) -> tuple[float, float]:
+    """Where sentence ``index`` is pinned, and the moment the next one is due.
+
+    ``spoken`` is the ordered list of ``(segment, section)`` pairs that will
+    actually be synthesised - empty and muted sentences already filtered out,
+    which is what gives the sentence BEFORE a muted one its room. The room a
+    sentence has is the time until the next one is due, so the pause after it is
+    slack it may borrow from before anything is sped up; the final sentence runs
+    to the end of the VIDEO (``apad`` pads the narration to it and ``-shortest``
+    trims there), falling back to its section's end when the duration could not
+    be probed.
+
+    The NEXT sentence's own offset counts: moving it later gives this one more
+    room, moving it earlier takes room away, and measuring against its
+    unadjusted start would fire the tempo squeeze against a window nothing will
+    use.
+
+    Module-level and shared on purpose. ``_revoice_video`` computes the window
+    to decide each sentence's synthesis speed, and the timeline's audition plan
+    (``services.narration.plan``) has to report the speed the render will
+    actually use - so the two must agree by construction rather than by two
+    copies of the same arithmetic staying in step.
+    """
+    seg, sec = spoken[index]
+    start = _pin(seg, sec)
+    if index + 1 < len(spoken):
+        nxt, nxt_sec = spoken[index + 1]
+        return start, _pin(nxt, nxt_sec)
+    return start, max(_seconds(sec["end"], 0.0), video_end)
+
+
+def per_sentence_speed(
+    text: str, orig_duration: float, tts_baseline_rate: float, user_speed: float,
+) -> float:
+    """TTS speed for one sentence in synced mode.
+
+    Never slower than the user's speed: the original narrator's pauses are
+    folded into Whisper's segment windows, so fitting text to the window used to
+    drag the voice down to 0.5x and it sounded drugged. A sentence that needs
+    less time than its window ends early and the rest is silence
+    (``assemble_master`` keeps the following sentence on time). Only when the
+    original speaker was faster than the TTS baseline is the voice sped up, and
+    at most by 30% - anything beyond that is left to the post-synthesis tempo
+    adjustment so the speech stays intelligible.
+
+    Module-level so the audition plan can ask what the render will do without
+    building a ``VideoProcessor``; ``VideoProcessor._per_sentence_speed`` is
+    kept as the call site the re-voice loop (and its tests) use.
+    """
+    if not text.strip() or orig_duration <= 0 or tts_baseline_rate <= 0:
+        return user_speed
+    orig_rate = len(text.strip()) / orig_duration
+    needed = (orig_rate / tts_baseline_rate) * user_speed
+    floor = user_speed
+    ceiling = round(user_speed * 1.3, 2)
+    return round(max(floor, min(ceiling, needed)), 2)
+
+
+def sentence_speed(
+    seg, text: str, window_s: float, baseline_rate: float, user_speed: float, rule=None,
+) -> float:
+    """The speed a SYNCED re-voice synthesises one sentence at.
+
+    The sentence's own explicit speed wins outright - that is the "nothing
+    guesses a rate" rule made concrete, and it bypasses the post-synthesis tempo
+    squeeze as well (the caller checks ``_explicit_speed`` again for that). With
+    no explicit speed the per-sentence fitting rule applies over the window the
+    sentence has.
+
+    ``rule`` is the fitting rule, defaulting to :func:`per_sentence_speed`;
+    ``_revoice_video`` passes its own ``self._per_sentence_speed`` so the seam
+    the sync tests patch stays where it is. One home for the precedence, because
+    the timeline's audition plan has to report the speed the render will really
+    use and a second copy of these two lines would be free to drift from it.
+    """
+    explicit = _explicit_speed(seg)
+    if explicit is not None:
+        return explicit
+    return (rule or per_sentence_speed)(text, window_s, baseline_rate, user_speed)
+
+
+def calibrate_tts_baseline(
+    segments: list, tts_gen, tmp_dir: Path, *, provider: str, voice_id: str,
+    progress=None, file_label: str = "",
+) -> float:
+    """Measure the TTS baseline speaking rate (chars/sec at speed 1.0).
+
+    Single-voice on purpose: it samples at ``voice_id``, so a sentence carrying
+    its own voice would measure the wrong one. It feeds nothing but
+    :func:`per_sentence_speed`, which a sentence with an explicit speed bypasses
+    entirely, so a per-sentence voice does not make the baseline wrong for the
+    sentences that do use it. Muted sentences are left out of the sample: they
+    are never synthesised, and one of them standing in for a third of the
+    measurement would skew it for no reason.
+
+    The three samples go through the shared TTS cache keyed on (text, voice,
+    speed), so the audition plan calling this pays for them once and the render
+    that follows reuses the very same entries.
+    """
+    from pydub import AudioSegment
+    from pydub.silence import detect_leading_silence
+    from core.tts_provider import get_onset_profile
+
+    _onset_profile = get_onset_profile(provider)
+
+    if progress:
+        progress(0.82, f"{file_label}: Calibrating speech rate...")
+
+    sample_segs = [
+        s for s in segments
+        if len(s.get("text", "").strip()) > 30 and not s.get("muted")
+    ]
+    if len(sample_segs) > 3:
+        step = len(sample_segs) // 3
+        sample_segs = [sample_segs[i * step] for i in range(3)]
+    elif not sample_segs:
+        return DEFAULT_BASELINE_RATE
+
+    tts_chars = 0
+    tts_total_dur = 0.0
+    for i, seg in enumerate(sample_segs):
+        text = seg["text"].strip()
+        sample_path = tmp_dir / f"calibrate_{i}.mp3"
+        try:
+            tts_gen.generate_audio(
+                text=text, voice_id=voice_id,
+                output_path=sample_path, speed=1.0,
+            )
+            if sample_path.exists():
+                audio = AudioSegment.from_file(str(sample_path))
+                threshold_db = _onset_profile.resolve_threshold_db(audio)
+                trim = detect_leading_silence(audio, silence_threshold=threshold_db, chunk_size=5)
+                audio = audio[trim:]
+                tts_chars += len(text)
+                tts_total_dur += len(audio) / 1000.0
+        except Exception:
+            continue
+
+    if tts_chars == 0 or tts_total_dur == 0:
+        return DEFAULT_BASELINE_RATE
+
+    rate = tts_chars / tts_total_dur
+    logger.info("TTS baseline rate: %.1f chars/sec (from %d samples)", rate, len(sample_segs))
+    return rate
+
+
 class VideoProcessor:
     """Orchestrates the video generation pipeline.
 
@@ -860,84 +1032,31 @@ class VideoProcessor:
         self, segments: list, tts_gen, tmp_dir: Path,
         progress=None, file_label: str = "",
     ) -> float:
-        """Measure TTS baseline speaking rate (chars/sec at speed 1.0).
+        """This run's TTS baseline speaking rate - :func:`calibrate_tts_baseline`
+        at this job's provider and voice.
 
-        Single-voice on purpose: it samples at ``self.voice_id``, so a sentence
-        carrying its own voice would measure the wrong one. It feeds nothing
-        but ``_per_sentence_speed``, which a sentence with an explicit speed
-        bypasses entirely, so a per-sentence voice does not make the baseline
-        wrong for the sentences that do use it. Muted sentences are left out of
-        the sample: they are never synthesised, and one of them standing in for
-        a third of the measurement would skew it for no reason.
+        The measurement itself is module-level so the timeline's audition plan
+        can ask for the same number without building a ``VideoProcessor``; this
+        stays as the re-voice loop's call site (and the seam its tests patch).
         """
-        from pydub import AudioSegment
-        from pydub.silence import detect_leading_silence
-        from core.tts_provider import get_onset_profile
-
-        _onset_profile = get_onset_profile(self.provider)
-
-        if progress:
-            progress(0.82, f"{file_label}: Calibrating speech rate...")
-
-        sample_segs = [
-            s for s in segments
-            if len(s.get("text", "").strip()) > 30 and not s.get("muted")
-        ]
-        if len(sample_segs) > 3:
-            step = len(sample_segs) // 3
-            sample_segs = [sample_segs[i * step] for i in range(3)]
-        elif not sample_segs:
-            return 15.0
-
-        tts_chars = 0
-        tts_total_dur = 0.0
-        for i, seg in enumerate(sample_segs):
-            text = seg["text"].strip()
-            sample_path = tmp_dir / f"calibrate_{i}.mp3"
-            try:
-                tts_gen.generate_audio(
-                    text=text, voice_id=self.voice_id,
-                    output_path=sample_path, speed=1.0,
-                )
-                if sample_path.exists():
-                    audio = AudioSegment.from_file(str(sample_path))
-                    threshold_db = _onset_profile.resolve_threshold_db(audio)
-                    trim = detect_leading_silence(audio, silence_threshold=threshold_db, chunk_size=5)
-                    audio = audio[trim:]
-                    tts_chars += len(text)
-                    tts_total_dur += len(audio) / 1000.0
-            except Exception:
-                continue
-
-        if tts_chars == 0 or tts_total_dur == 0:
-            return 15.0
-
-        rate = tts_chars / tts_total_dur
-        logger.info("TTS baseline rate: %.1f chars/sec (from %d samples)", rate, len(sample_segs))
-        return rate
+        return calibrate_tts_baseline(
+            segments, tts_gen, tmp_dir,
+            provider=self.provider, voice_id=self.voice_id,
+            progress=progress, file_label=file_label,
+        )
 
     @staticmethod
     def _per_sentence_speed(
         text: str, orig_duration: float, tts_baseline_rate: float, user_speed: float,
     ) -> float:
-        """TTS speed for one sentence in synced mode.
+        """This sentence's synthesis speed - :func:`per_sentence_speed`.
 
-        Never slower than the user's speed: the original narrator's pauses are
-        folded into Whisper's segment windows, so fitting text to the window
-        used to drag the voice down to 0.5x and it sounded drugged. A sentence
-        that needs less time than its window ends early and the rest is
-        silence (assemble_master keeps the following sentence on time). Only
-        when the original speaker was faster than the TTS baseline is the
-        voice sped up, and at most by 30% — anything beyond that is left to
-        the post-synthesis tempo adjustment so the speech stays intelligible.
+        Kept as a method because it is the seam the sync tests patch to watch
+        which window each sentence was measured against; the rule itself is
+        module-level so the audition plan reports the speed the render will
+        really use rather than a second implementation of it.
         """
-        if not text.strip() or orig_duration <= 0 or tts_baseline_rate <= 0:
-            return user_speed
-        orig_rate = len(text.strip()) / orig_duration
-        needed = (orig_rate / tts_baseline_rate) * user_speed
-        floor = user_speed
-        ceiling = round(user_speed * 1.3, 2)
-        return round(max(floor, min(ceiling, needed)), 2)
+        return per_sentence_speed(text, orig_duration, tts_baseline_rate, user_speed)
 
     def _revoice_video(
         self, pm: ProjectManager, source_video: Path, output_path: Path,
@@ -998,7 +1117,7 @@ class VideoProcessor:
                 actual_source = Path(pm.state.source_video_path)
             video_end = _probe_duration(actual_source) or 0.0
 
-            tts_baseline = 15.0
+            tts_baseline = DEFAULT_BASELINE_RATE
             if not is_free:
                 tts_baseline = self._calibrate_tts_baseline(
                     all_segments, tts_gen, tmp_dir, progress, file_label,
@@ -1055,7 +1174,10 @@ class VideoProcessor:
             total_segments = len(spoken)
             for i, (seg, sec) in enumerate(spoken):
                 done += 1
-                seg_start = _pin(seg, sec)
+                # Where this sentence is pinned and when the next one is due.
+                # One helper, shared with the timeline's audition plan, so the
+                # speed the plan reports is the speed this loop will use.
+                seg_start, next_start = sentence_window(spoken, i, video_end)
                 if video_end > 0 and seg_start >= video_end:
                     # replace_video_audio muxes with -shortest, so the narration
                     # is cut at the video's end: a sentence pinned at or past it
@@ -1070,21 +1192,6 @@ class VideoProcessor:
                         done, seg_start, video_end,
                     )
                     continue
-                # The room this sentence has is the time until the next one
-                # is due, so the pause after it is slack it may borrow from
-                # before anything is sped up. The final sentence runs to the
-                # end of the VIDEO (apad pads the narration to it and
-                # -shortest trims there), falling back to its section's end
-                # when the duration could not be probed.
-                if i + 1 < len(spoken):
-                    nxt, nxt_sec = spoken[i + 1]
-                    # The NEXT sentence's own offset counts too: moving it later
-                    # gives this one more room, moving it earlier takes room
-                    # away, and measuring against its unadjusted start would fire
-                    # the squeeze below against a window nothing will use.
-                    next_start = _pin(nxt, nxt_sec)
-                else:
-                    next_start = max(_seconds(sec["end"], 0.0), video_end)
                 window_s = max(0.0, next_start - seg_start)
                 window_ms = int(window_s * 1000)
                 text = seg["text"].strip()
@@ -1095,12 +1202,20 @@ class VideoProcessor:
                 # the next real pause, where the following sentence is still
                 # pinned to its own moment.
                 explicit_speed = _explicit_speed(seg)
-                if explicit_speed is not None:
-                    speed = explicit_speed
-                elif is_free:
-                    speed = self.speed
-                else:
-                    speed = self._per_sentence_speed(text, window_s, tts_baseline, self.speed)
+                # ``sentence_speed`` owns the precedence (explicit wins, else
+                # the fitting rule over this sentence's window) and the audition
+                # plan asks it the same question, so what the timeline says a
+                # sentence will be spoken at is what this loop speaks it at.
+                # Free mode is the one case that never reaches it: nothing is
+                # pinned there, so there is no window to fit to - but an
+                # explicit speed still wins even in free mode, as it always has.
+                speed = (
+                    self.speed if (is_free and explicit_speed is None)
+                    else sentence_speed(
+                        seg, text, window_s, tts_baseline, self.speed,
+                        rule=self._per_sentence_speed,
+                    )
+                )
                 # A per-sentence voice, honoured only when it belongs to this
                 # run's provider - the same fallback the deck path relies on,
                 # so a stale Edge id under Kokoro (or the reverse) cannot fail
@@ -1150,10 +1265,11 @@ class VideoProcessor:
                 # named the rate, and tempo-adjusting it afterwards would undo
                 # the one thing they asked for.
                 last = i + 1 == len(spoken)
-                if not is_free and explicit_speed is None and window_ms > 0 and len(clip) > window_ms * 1.15:
+                if (not is_free and explicit_speed is None and window_ms > 0
+                        and len(clip) > window_ms * SQUEEZE_TOLERANCE):
                     spoken_ms = len(clip)
                     factor = spoken_ms / window_ms
-                    if factor <= 2.0:
+                    if factor <= SQUEEZE_MAX_FACTOR:
                         clip = _tempo(clip, factor, f"seg{done:04d}")
                         logger.info("Sentence %d: %.1fs of speech for a %.1fs window — tempo x%.2f",
                                     done, spoken_ms / 1000, window_s, factor)

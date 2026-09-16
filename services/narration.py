@@ -45,14 +45,20 @@ What deliberately is NOT here: anything that fits a speed automatically. See
 """
 
 import math
+import shutil
+import tempfile
 import threading
 import uuid
 from pathlib import Path
+from urllib.parse import urlencode
 
 from services import projects as store
 from services import studio_settings
 from services.voices import KOKORO_MODEL_PENDING
 from utils.helpers import get_cache_path
+from utils.logger import get_logger
+
+logger = get_logger("NARRATION")
 
 # The override vocabulary: the keys a transcript segment may carry beyond
 # ``start`` / ``end`` / ``text``. One tuple, read by the whole-list merge in
@@ -86,6 +92,22 @@ MAX_PREVIEW_CHARS = 1000
 # here, the answer is a readable 502 and the synthesis thread (a daemon) is left
 # to finish into the cache on its own.
 PREVIEW_TIMEOUT_SECONDS = 30.0
+
+# How long the audition plan waits for the speaking-rate measurement. That is
+# THREE syntheses rather than the preview's one, and the first of them pays the
+# same cold start (~10 s on this machine), so it is sized above
+# PREVIEW_TIMEOUT_SECONDS rather than equal to it. Past this the plan answers
+# with the engine's default rate instead of holding the request; the measuring
+# thread is left to finish into the shared cache, so the next press is quick.
+BASELINE_TIMEOUT_SECONDS = 45.0
+
+# Measured speaking rates, keyed on (project, provider, voice). The plan is
+# re-fetched on every tab open past react-query's staleTime and on every change
+# to the Re-voice card's narration; without this, each one re-paid three
+# syntheses. Dropped by ``forget_baseline`` whenever the transcript changes or
+# the project is deleted, so nothing here outlives what it was measured from.
+_BASELINE_CACHE: dict[tuple[str, str, str], float] = {}
+_BASELINE_GUARD = threading.Lock()
 
 NARRATION_KINDS = ("video",)
 
@@ -305,7 +327,348 @@ def update_segment(
         transcript[index] = segment
         record["transcript"] = transcript
         store.save_project(record)
-        return segment
+    # Muting a sentence changes which three the speaking rate is measured from
+    # (the measurement skips muted ones), so the memoised rate no longer
+    # describes this transcript. Outside the lock: it touches a different one.
+    forget_baseline(pid)
+    return segment
+
+
+# -- auditioning the whole narration -----------------------------------------
+
+def _job_narration(provider, voice, speed) -> tuple[str, str, float]:
+    """The (provider, voice, speed) a re-voice would run with: the Re-voice
+    card's three values, each falling back to the studio's.
+
+    The same resolution ``_preview_narration`` does for the job half of a
+    preview, before any per-sentence override is applied on top. Raises
+    ``ValueError`` (400) for an unknown provider, a voice belonging to the other
+    provider, or a speed out of range.
+    """
+    provider_id, studio_voice = studio_settings.resolve_narration(provider, None)
+    job_voice = (
+        studio_settings.check_voice_for_provider(voice, provider_id)
+        if (voice or "").strip() else studio_voice
+    )
+    asked = _speed(speed)
+    return provider_id, job_voice, DEFAULT_SPEED if asked is None else asked
+
+
+def forget_baseline(pid: str) -> None:
+    """Drop this project's memoised speaking rates.
+
+    Called when the project is deleted and whenever its transcript changes -
+    editing the words, or muting a sentence - because the measurement samples
+    three of those sentences and skips the muted ones. Re-measuring afterwards
+    is nearly free anyway: the samples are keyed on (text, voice, speed) in the
+    shared TTS cache, so unless the sampled sentences THEMSELVES were edited,
+    the three synthesis calls are three file reads.
+    """
+    with _BASELINE_GUARD:
+        for key in [k for k in _BASELINE_CACHE if k[0] == pid]:
+            del _BASELINE_CACHE[key]
+
+
+def baseline_rate(pid: str, transcript, provider_id: str, voice_id: str) -> float:
+    """The TTS speaking rate the render will fit sentences against.
+
+    The real measurement (``services.processing.calibrate_tts_baseline``):
+    three sample sentences synthesised at speed 1.0 and measured. They go
+    through the shared cache keyed on (text, voice, speed), so the audition
+    pays for them once and the re-voice that follows reuses the very entries -
+    which is the same reason a preview is free the second time.
+
+    **Bounded** at ``BASELINE_TIMEOUT_SECONDS``, with the same daemon-thread and
+    join idiom ``_synthesise`` uses and for the same reason: ``generate_audio``
+    has no timeout argument, Edge's internal ceiling is 120 s, and this makes
+    THREE calls - so an unreachable provider would otherwise hold a server
+    thread for six minutes and then answer 200 with the default rate in it,
+    behind a page that says "Reading the narration…" and offers no way out. The
+    thread is left to finish into the cache on its own; only the waiting stops.
+
+    **Memoised** per (project, provider, voice), because the plan is fetched
+    again on every tab open past react-query's staleTime and on every change to
+    the Re-voice card - three identical plan GETs used to mean three
+    calibrations. The transcript is part of the key only in the sense that any
+    change to it drops the entry (``forget_baseline``).
+
+    Every failure falls back to the engine's own default rather than failing the
+    audition: an unreachable provider, a missing pydub, a timeout, and -
+    deliberately - Kokoro with no model on disk, because the first Kokoro
+    synthesis downloads ~340 MB and asking for a timeline must not start that.
+    The plan then reports the speeds a render with an unmeasurable baseline
+    would use, which is exactly what such a render would do. A fallback is NOT
+    memoised: the provider may be reachable again by the next press.
+    """
+    from services import processing
+
+    key = (pid, provider_id, voice_id)
+    with _BASELINE_GUARD:
+        held = _BASELINE_CACHE.get(key)
+    if held is not None:
+        return held
+
+    try:
+        if provider_id == "kokoro":
+            from core.kokoro_tts_generator import kokoro_model_present
+
+            if not kokoro_model_present():
+                return processing.DEFAULT_BASELINE_RATE
+
+        from core.tts_provider import get_tts_provider
+
+        generator = get_tts_provider(provider_id)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="narration_plan_"))
+        outcome: dict = {}
+
+        def _measure() -> None:
+            try:
+                outcome["rate"] = processing.calibrate_tts_baseline(
+                    transcript, generator, tmp_dir,
+                    provider=provider_id, voice_id=voice_id,
+                )
+            except Exception as exc:  # pragma: no cover - the measurement swallows its own
+                outcome["error"] = exc
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        worker = threading.Thread(target=_measure, name="tts-baseline", daemon=True)
+        worker.start()
+        worker.join(BASELINE_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            logger.warning(
+                "The speaking rate could not be measured in %.0fs; the timeline will use %.1f chars/s",
+                BASELINE_TIMEOUT_SECONDS, processing.DEFAULT_BASELINE_RATE,
+            )
+            return processing.DEFAULT_BASELINE_RATE
+        rate = outcome.get("rate")
+        if rate is None:
+            return processing.DEFAULT_BASELINE_RATE
+    except Exception:
+        # Never a 500 for want of a speaking rate: the timeline is still worth
+        # drawing, and the sentences that carry an explicit speed do not use the
+        # baseline at all.
+        logger.warning("Could not calibrate the speaking rate for the audition plan", exc_info=True)
+        return processing.DEFAULT_BASELINE_RATE
+
+    with _BASELINE_GUARD:
+        _BASELINE_CACHE[key] = rate
+    return rate
+
+
+def transcript_section(transcript) -> dict:
+    """The ONE section a re-voice reconstructs from a transcript: it spans the
+    whole of it, from the first sentence's start to the last one's end.
+
+    Stated once because two places need it and they must agree.
+    ``services.revoice`` writes it onto the engine's single slide
+    (``original_start_time`` / ``original_end_time``), and :func:`plan` needs it
+    to work out the window the LAST sentence has - which is bounded by this
+    section's end whenever the video's own duration is not known
+    (``_probe_duration`` returns nothing without ffprobe, which the packaged app
+    may not have). Two copies of "the section is the whole transcript" would be
+    free to drift, and the timeline would then advertise a rate for the final
+    sentence that the render does not use.
+    """
+    from services import processing
+
+    if not transcript:
+        return {"start": 0.0, "end": 0.0}
+    # A hand-edited project.json can hold anything at all in the list. Both
+    # callers used to crash on a non-dict first or last entry - here with an
+    # AttributeError inside a 500, and in ``services.revoice`` with a bare
+    # "Re-voice failed" - so the coercion belongs in the one place they share.
+    first = transcript[0] if isinstance(transcript[0], dict) else {}
+    last = transcript[-1] if isinstance(transcript[-1], dict) else {}
+    return {
+        "start": processing._seconds(first.get("start"), 0.0),
+        "end": processing._seconds(last.get("end"), 0.0),
+    }
+
+
+def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
+    """What every sentence says, how fast, and in whose voice - for auditioning
+    the narration in the browser without rendering anything.
+
+    **The server owns what each sentence says and how fast; the client owns only
+    when each clip lands.** The re-voice's rate rules are not reimplementable in
+    TypeScript without becoming a second, drifting copy of them, so they are
+    answered here from the very functions the render calls
+    (``services.processing.sentence_window`` /
+    ``sentence_speed`` / ``calibrate_tts_baseline``). What is left for the client
+    is the one piece of arithmetic only it can do: where each clip actually
+    lands, which needs the real decoded length of each clip.
+
+    Each sentence comes back with
+
+    - ``start`` / ``end`` - the moment it was SPOKEN, which is what lines up
+      with the waveform underneath;
+    - ``pinned_start`` - where the render will pin it (``start`` + its offset,
+      floored at zero). A pin is a FLOOR, not a position: a clip that overruns
+      pushes the next one late, which is why the client schedules against real
+      clip lengths rather than trusting these;
+    - ``speed`` and ``voice`` - the EFFECTIVE values, i.e. what the render will
+      actually synthesise with, per-sentence overrides already applied;
+    - ``preview_url`` - carrying those effective values, so the clip the browser
+      fetches is byte-identical to the one the render will reuse from the cache.
+      (Before this, a preview was only exact for a sentence carrying an explicit
+      speed; every other sentence could still be sped up a little at render time
+      to fit its window, and the audition would not have heard that.)
+
+    ``provider`` / ``voice`` / ``speed`` are the JOB's - what the Re-voice card
+    has selected - exactly as the preview route takes them.
+
+    Muted and empty sentences are returned too, so the timeline can draw them,
+    but they take no part in the window maths: the render filters them out
+    before it measures anything, which is what gives the sentence BEFORE a muted
+    one its room. Their ``speed`` is the job's (or their own explicit one) and
+    nothing is synthesised for them.
+
+    Writes nothing, so - like the preview - it deliberately does not take
+    ``jobs.require_idle``: refusing to let someone audition while a re-voice
+    runs would be a 409 on a read.
+
+    Raises ``ProjectNotFound`` (404), ``SegmentNotFound`` (404, no transcript)
+    or ``ValueError`` (400: a deck/PDF, an unknown provider, a voice from the
+    other provider, a speed out of range).
+    """
+    from core.tts_provider import effective_voice
+    from services import processing, waveform
+
+    record = _record(pid)
+    transcript = _transcript(record)
+    if not transcript:
+        raise SegmentNotFound("This video has no transcript yet - transcribe it first.")
+
+    provider_id, job_voice, job_speed = _job_narration(provider, voice, speed)
+
+    # ONE section spanning the whole transcript - the very thing
+    # ``services.revoice`` reconstructs for the engine, so the window the last
+    # sentence is measured against is the one the render will measure it
+    # against.
+    section = transcript_section(transcript)
+    # The scale everything is drawn against: the WAV header's, never ffprobe's
+    # and never the record's if the audio can speak for itself.
+    #
+    # **Where this diverges from the render, exactly.** ``_revoice_video`` bounds
+    # its LAST spoken sentence by ``_probe_duration(video)`` and drops any
+    # sentence pinned at or past that. Two differences follow, and both are
+    # accepted rather than hidden:
+    #
+    # - when ffprobe IS available the two numbers are the same recording
+    #   measured two ways (the extracted audio is that video's own audio), so
+    #   they agree to within a frame;
+    # - when ffprobe is ABSENT - which the packaged app must assume, since the
+    #   imageio fallback ships ffmpeg only - the render gets ``video_end = 0.0``
+    #   and falls back to bounding the last sentence by the SECTION's end, while
+    #   this still uses the WAV duration. Those genuinely differ whenever the
+    #   recording runs on after the last word.
+    #
+    # Blast radius: the last spoken sentence only, and only when the bound would
+    # make it short enough to be sped up - a longer window can only lower a
+    # speed to the floor it is already at. Using ffprobe here instead is refused
+    # by the porting spec's traps 5 and 6; using the record's duration would not
+    # be the scale of the file being drawn.
+    duration = waveform.duration_for(pid)
+    if duration is None:
+        duration = float(record.get("duration") or 0.0) or section["end"]
+
+    # The sentences the render will actually speak, in order - empty and muted
+    # ones filtered out BEFORE any window maths, exactly as ``_revoice_video``
+    # filters them, which is what gives the sentence before a muted one its room.
+    spoken_at = [
+        i for i, seg in enumerate(transcript)
+        if isinstance(seg, dict) and (seg.get("text") or "").strip() and not seg.get("muted")
+    ]
+    spoken = [(transcript[i], section) for i in spoken_at]
+    rate = baseline_rate(pid, transcript, provider_id, job_voice) if spoken else processing.DEFAULT_BASELINE_RATE
+
+    # The window each spoken sentence has, and - separately - the ones the
+    # render will throw away because their pin is at or past the end of the
+    # video. ``replace_video_audio`` muxes with ``-shortest``, so such a
+    # sentence is not in the render at all and is counted a failure; the
+    # timeline must mark it and must not audition it, or it would be playing
+    # audio the render will never produce.
+    windows: dict[int, float] = {}
+    past_end: set[int] = set()
+    for position, index in enumerate(spoken_at):
+        pin, next_start = processing.sentence_window(spoken, position, duration)
+        if duration > 0 and pin >= duration:
+            past_end.add(index)
+            continue
+        windows[index] = max(0.0, next_start - pin)
+
+    sentences = []
+    for index, seg in enumerate(transcript):
+        if not isinstance(seg, dict):
+            # A hand-edited project.json can hold anything. The window pass above
+            # skips a non-dict segment; this one must not then answer 500 on it.
+            seg = {}
+        text = (seg.get("text") or "").strip()
+        seg_voice = effective_voice(seg.get("voice"), job_voice, provider_id)
+        # A sentence with no window (muted, wordless, or pinned outside the
+        # video) is never synthesised; its own explicit speed still stands, so
+        # unmuting it in the list view shows the rate it would be spoken at.
+        window = windows.get(index)
+        seg_speed = processing.sentence_speed(
+            seg, text, window if window is not None else 0.0, rate, job_speed,
+        )
+        sentences.append({
+            "index": index,
+            "text": seg.get("text") or "",
+            "start": processing._seconds(seg.get("start"), 0.0),
+            "end": processing._seconds(seg.get("end"), 0.0),
+            "pinned_start": processing._pin(seg, section),
+            "muted": bool(seg.get("muted")),
+            # Whether the render will synthesise this sentence at all. The
+            # client must NOT re-derive it: "has words" is ``str.strip()`` here
+            # and would be ``String.trim()`` there, and those are different
+            # character sets (U+001C-1F strip but do not trim; U+FEFF trims but
+            # does not strip). A pasted control character would then be
+            # auditioned by the browser and answered 400 by the preview route,
+            # surfacing as a per-sentence failure with no cause anyone could see.
+            "speakable": index in windows,
+            # ... and when it is not speakable DESPITE having words and not being
+            # muted, this says why: its offset pins it at or past the end of the
+            # video, so the mux drops it.
+            "past_end": index in past_end,
+            # The room the render measured for it, and whether the render may
+            # tempo-squeeze it into that room after synthesis. Both are the
+            # client's to model, because only the client knows how long the clip
+            # really turned out to be - see ``squeeze_tolerance`` below.
+            "window": window if window is not None else 0.0,
+            "squeezable": index in windows and processing._explicit_speed(seg) is None,
+            "speed": seg_speed,
+            "voice": seg_voice,
+            "preview_url": preview_url(pid, index, provider_id, seg_voice, seg_speed),
+        })
+
+    return {
+        "duration": duration,
+        "baseline_rate": rate,
+        # The post-synthesis tempo squeeze's two numbers, sent rather than
+        # written into the client as literals: they are the RENDER's constants
+        # (``_revoice_video``), and a second copy in TypeScript would be free to
+        # drift from the loop it is supposed to be predicting.
+        "squeeze_tolerance": processing.SQUEEZE_TOLERANCE,
+        "squeeze_max_factor": processing.SQUEEZE_MAX_FACTOR,
+        "sentences": sentences,
+    }
+
+
+def preview_url(pid: str, index: int, provider_id: str, voice_id: str, speed: float) -> str:
+    """Where the browser fetches one sentence's audio from, carrying the
+    EFFECTIVE voice and speed.
+
+    Carrying them is what makes the audition honest rather than approximate: the
+    preview route applies the sentence's own overrides on top of whatever it is
+    given, so passing the effective pair either matches what it would have
+    resolved anyway or supplies the per-sentence rate the render computed - and
+    the clip that comes back is then the byte-identical cache entry the re-voice
+    will reuse.
+    """
+    query = urlencode({"provider": provider_id, "voice": voice_id, "speed": f"{speed:g}"})
+    return f"/api/projects/{pid}/transcript/{index}/preview?{query}"
 
 
 # -- hearing one sentence ----------------------------------------------------
@@ -341,19 +704,14 @@ def _preview_narration(segment: dict, provider, voice, speed) -> tuple[str, str,
     """
     from core.tts_provider import effective_voice
 
-    # An unknown provider is a ValueError (400); ``studio_voice`` is that
-    # provider's configured default (Settings > Studio). Resolved from the
-    # asked-for provider alone, exactly as the render resolves it.
-    provider_id, studio_voice = studio_settings.resolve_narration(provider, None)
-    job_voice = (
-        studio_settings.check_voice_for_provider(voice, provider_id)
-        if (voice or "").strip() else studio_voice
-    )
+    # The job half, resolved exactly as the audition plan resolves it (one
+    # helper, so a preview and the timeline can never disagree about what the
+    # Re-voice card's three boxes mean).
+    provider_id, job_voice, job_speed = _job_narration(provider, voice, speed)
     voice_id = effective_voice(segment.get("voice"), job_voice, provider_id)
 
     stored_speed = segment.get("speed")
-    chosen_speed = _speed(stored_speed if stored_speed is not None else speed)
-    return provider_id, voice_id, DEFAULT_SPEED if chosen_speed is None else chosen_speed
+    return provider_id, voice_id, job_speed if stored_speed is None else _speed(stored_speed)
 
 
 def preview_segment(pid: str, index: int, *, provider=None, voice=None, speed=None) -> Path:

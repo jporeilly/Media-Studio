@@ -104,8 +104,14 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         }
         for s in segments
     ]
-    slide0.original_start_time = float(segments[0]["start"])
-    slide0.original_end_time = float(segments[-1]["end"])
+    # The section this re-voice runs as: the whole transcript. Taken from
+    # ``services.narration`` because the timeline's audition plan has to compute
+    # the same bound for the LAST sentence's window - the one place the section's
+    # end still decides a synthesis speed - and two spellings of "the section is
+    # the whole transcript" would be free to drift apart.
+    section = narration.transcript_section(segments)
+    slide0.original_start_time = section["start"]
+    slide0.original_end_time = section["end"]
     pm.state.source_video_path = str(source_video)
     pm.save()
 

@@ -513,11 +513,21 @@ def test_a_second_press_during_the_first_never_sees_a_half_written_entry():
             t.start()
         start.wait()
 
+        # The watcher's OWN read races the publish, and on Windows that is a
+        # PermissionError rather than a short read: os.replace briefly leaves
+        # neither name openable, which is the same transient refusal
+        # ``replace_with_retry`` absorbs on the writing side. Skipping the
+        # observation is correct and does not weaken the assertion below - what
+        # is under test is that no observation is ever a PREFIX of the clip, and
+        # an observation that could not be taken is not one. (Unguarded, this
+        # failed about 4 runs in 25 and was the suite's only flake.)
         seen: list[bytes] = []
         deadline = time.monotonic() + 10
         while any(t.is_alive() for t in threads) and time.monotonic() < deadline:
-            if entry.exists():
+            try:
                 seen.append(entry.read_bytes())
+            except (FileNotFoundError, PermissionError):
+                pass
             time.sleep(0.005)
         for t in threads:
             t.join(10)

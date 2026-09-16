@@ -40,6 +40,8 @@ PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
     ("PATCH", "/api/projects/{pid}/transcript"): {"transcript": []},
     ("PATCH", "/api/projects/{pid}/transcript/{index}"): {},
     ("GET", "/api/projects/{pid}/transcript/{index}/preview"): None,
+    ("GET", "/api/projects/{pid}/narration/plan"): None,
+    ("GET", "/api/projects/{pid}/waveform"): None,
     ("POST", "/api/projects/{pid}/generate"): {},
     ("POST", "/api/projects/{pid}/revoice"): {},
     ("GET", "/api/projects/{pid}/slides"): None,

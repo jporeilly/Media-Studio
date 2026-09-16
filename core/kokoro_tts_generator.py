@@ -19,7 +19,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from utils.helpers import get_cache_path
+from utils.helpers import get_cache_path, publish_to_cache
 from utils.logger import get_logger
 from core.tts_provider import TTSProvider, OnsetProfile, KOKORO_ONSET, Voice
 
@@ -402,10 +402,13 @@ class KokoroTTSGenerator(TTSProvider):
 
             self._write_audio(samples, rate, output_path)
 
-            # Mirror to cache if we generated to a different path.
+            # Mirror to cache if we generated to a different path - with an
+            # atomic rename, for the reason spelled out in
+            # ``utils.helpers.publish_to_cache``: a copy interrupted part way
+            # leaves a truncated entry at that key forever, and every later
+            # preview and re-voice treats it as a whole clip.
             if cache_path and cache_path != output_path and output_path.exists():
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(output_path, cache_path)
+                publish_to_cache(output_path, cache_path)
 
             return output_path if output_path.exists() else None
 

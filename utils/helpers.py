@@ -1,14 +1,107 @@
 """Utility helper functions."""
 
 import os
+import shutil
 import time
 import hashlib
 import functools
+import uuid
 from pathlib import Path
 from utils.config import CACHE_DIR, FFMPEG_PATH
 from utils.logger import get_logger
 
 _retry_logger = get_logger("RETRY")
+
+# The rename that publishes an atomically-written file, retried on a transient
+# Windows refusal. Worst case ~0.6 s before the write really fails.
+_REPLACE_ATTEMPTS = 8
+_REPLACE_BACKOFF_SECONDS = 0.02
+
+
+def replace_with_retry(tmp: Path, path: Path) -> None:
+    """``os.replace(tmp, path)``, retried briefly on a Windows sharing refusal.
+
+    The repo's ONE write-a-temp-then-rename idiom, and a second copy of a retry
+    loop is a second thing to get wrong: ``services.projects.save_project``
+    publishes project.json with it, ``services.narration`` publishes a finished
+    preview clip onto its cache path with it, and :func:`publish_to_cache` below
+    publishes the render's own clips with it.
+
+    It lives HERE rather than in ``services.projects`` (which re-exports it, so
+    every existing caller and every test that patches ``store.replace_with_retry``
+    is unaffected) because the TTS generators in ``core`` need it too, and
+    ``core`` must not import ``services``: the engine is the layer underneath.
+
+    On Windows the rename fails with ERROR_ACCESS_DENIED (WinError 5) whenever
+    anything else holds a handle to either file for the instant it takes: a
+    real-time virus scanner opening the file we have just written (IObit and
+    Defender both do - see ``core.audio_mixer._load_audio_with_retry``, which
+    exists for the same reason), the search indexer, or a reader that opened
+    the destination without FILE_SHARE_DELETE. It is transient and uncommon -
+    2 in 60 in a concurrent loop on the development machine - and it is not a
+    reason to fail a save: a few milliseconds later it succeeds. POSIX never
+    takes this path.
+
+    Retrying exposes nothing partial: the destination is either the old file or
+    the new one throughout, and only the rename is repeated.
+    """
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
+
+
+def publish_to_cache(source: Path, cache_path: Path) -> bool:
+    """Put a finished clip at its shared TTS cache key, ATOMICALLY.
+
+    Both generators used to mirror their output into the cache with a plain
+    ``shutil.copy``, which is a byte-by-byte write straight onto the shared key.
+    The only completeness check anywhere is that the file exists, so an
+    interrupted copy - a crash, a full disk, a cancelled job, the process being
+    closed - leaves a TRUNCATED entry at that key **forever**: nothing sweeps
+    ``data/cache``, every later preview serves it, and every later re-voice
+    copies it out, sees a file, and muxes the stump into the video as a
+    successful sentence. Written aside and renamed, the key names either nothing
+    or a complete clip.
+
+    It was always a race the render could lose; what makes it worth fixing now
+    is that the narration timeline drives it from a browser, so a re-voice, a
+    row's Play and a whole-transcript audition can all be filling the same keys
+    at once.
+
+    Never raises. The cache is an optimisation: failing to memoise a clip that
+    has already been synthesised successfully must not fail the synthesis, and
+    before this a copy error was caught by the generator's own blanket
+    ``except`` and turned into "this sentence produced no audio".
+
+    Returns True when the entry is in place (including when another writer got
+    there first with the same audio - the key is derived from the text, the
+    voice and the speed, so an entry already sitting there is the same clip by
+    construction).
+    """
+    source, cache_path = Path(source), Path(cache_path)
+    tmp = cache_path.with_name(f"{cache_path.stem}.{uuid.uuid4().hex[:8]}.part")
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, tmp)
+        replace_with_retry(tmp, cache_path)
+        return True
+    except OSError as exc:
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return True  # a racing writer published the same audio first
+        _retry_logger.warning("Could not cache %s: %s", cache_path.name, exc)
+        return False
+    finally:
+        # A no-op after a successful rename; the cleanup on every failure, so a
+        # half-copied scratch file is never left in the cache directory.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def retry(max_attempts: int = 3, base_delay: float = 2.0, exceptions: tuple = (Exception,)):
@@ -125,15 +218,13 @@ def check_powerpoint_installed() -> bool:
         return False
 
 
-import shutil as _shutil_helpers
-
 _libre_check_cache: list = [None]
 
 def get_libreoffice_path() -> str | None:
     """Find the LibreOffice soffice executable."""
     if _libre_check_cache[0] is not None:
         return _libre_check_cache[0]
-    path = _shutil_helpers.which("soffice")
+    path = shutil.which("soffice")
     if path:
         _libre_check_cache[0] = path
         return path

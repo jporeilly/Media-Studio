@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Optional
 from dataclasses import dataclass
 
-from utils.helpers import get_cache_path
+from utils.helpers import get_cache_path, publish_to_cache
 from utils.logger import get_logger
 from core.tts_provider import TTSProvider, OnsetProfile, EDGE_ONSET
 
@@ -149,10 +149,16 @@ class EdgeTTSGenerator(TTSProvider):
             communicate = edge_tts.Communicate(text, voice_id, rate=rate_str)
             _run_async(communicate.save(str(output_path)))
 
-            # Also save to cache if different path
+            # Also save to cache if different path. Published with an atomic
+            # rename, never copied onto the key in the open: an interrupted copy
+            # leaves a truncated entry there FOREVER (nothing sweeps data/cache,
+            # and the only completeness check anywhere is that the file exists),
+            # which every later preview serves and every later re-voice copies
+            # out and counts as a successful sentence. publish_to_cache never
+            # raises - failing to memoise a clip that was synthesised correctly
+            # is not a reason to report that this sentence produced no audio.
             if cache_path and cache_path != output_path and output_path.exists():
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(output_path, cache_path)
+                publish_to_cache(output_path, cache_path)
 
             return output_path if output_path.exists() else None
 
