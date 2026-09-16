@@ -1,5 +1,5 @@
 import { type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Pause, Play, Square, X, ZoomIn, ZoomOut } from "lucide-react";
 import { api, errorMessage, qs } from "../../api/client";
 import { timecode } from "../../lib/format";
@@ -7,6 +7,7 @@ import {
   auditionLength,
   clampTime,
   clipsFrom,
+  reachedEnd,
   frameTimes,
   narrationPlanKey,
   needsNewFrames,
@@ -83,6 +84,16 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
     ),
     enabled: active,
     staleTime: 60_000,
+    // The key carries the Re-voice card's provider, voice and speed, so a
+    // change to any of them is a NEW query - and without this its data is
+    // undefined until the answer lands. That emptiness reached everything
+    // below: `sentences` became [], the plan signature became "[]", the
+    // reset effect dropped every decoded clip and halted playback at zero,
+    // then the new plan arrived - identical, as often as not - and the
+    // audition had been destroyed for nothing. Keeping the previous plan
+    // until the next one is here means the signature only moves when the
+    // plan really differs, which is the only time a reset is right.
+    placeholderData: keepPreviousData,
   });
 
   // The peaks never change for a given audio.wav (the server caches them on its
@@ -336,7 +347,14 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
       positionRef.current = position();
       paint();
       const end = totalRef.current;
-      if (positionRef.current >= end) { halt(end); return; }
+      // Never halt on an end that is not known. `total` is derived from the
+      // plan's length, else the waveform's, and either can be momentarily
+      // absent mid-play (a query re-keyed, a refetch); a bare `position >=
+      // end` then read `position >= 0`, true at once, and halted the audition
+      // at zero a few seconds in with every clip still loaded - the "playback
+      // stops after a few seconds" report. Same rule the guard below already
+      // follows for the narration's own end.
+      if (reachedEnd(positionRef.current, end)) { halt(end); return; }
       // Ran out of prepared narration with more still coming: wait for it
       // rather than running on past sentences in silence.
       if (timingRef.current.end > 0 && positionRef.current > timingRef.current.end + 0.05

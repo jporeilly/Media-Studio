@@ -352,3 +352,16 @@ export function clipsFrom(clips: ScheduledClip[], position: number): { clip: Sch
 export function auditionLength(duration: number, scheduleEnd: number): number {
   return Math.max(duration, scheduleEnd);
 }
+
+/**
+ * Whether playback at `position` has reached the audition's end - and ONLY
+ * when that end is actually known. `total` is derived from the plan's length,
+ * else the waveform's, and either can be momentarily absent mid-play (a query
+ * re-keyed by a voice change, a refetch in flight); a bare `position >= total`
+ * then reads `position >= 0`, true at once, and the transport halted itself at
+ * zero a few seconds in with every clip still loaded. An unknown end is not an
+ * end: keep playing, and the guard resumes when the length is back.
+ */
+export function reachedEnd(position: number, total: number): boolean {
+  return total > 0 && position >= total;
+}

@@ -8,6 +8,7 @@ import {
   pixelsPerSecond,
   poolPeaks,
   pxToSeconds,
+  reachedEnd,
   renderedLength,
   schedule,
   secondsToPx,
@@ -341,5 +342,22 @@ describe("auditionLength", () => {
     // audition should still let you HEAR that it overran.
     expect(auditionLength(60, 45)).toBe(60);
     expect(auditionLength(60, 71.5)).toBe(71.5);
+  });
+});
+
+describe("reachedEnd", () => {
+  it("is true only at or past a KNOWN end", () => {
+    expect(reachedEnd(341.0, 341.0)).toBe(true);
+    expect(reachedEnd(342.5, 341.0)).toBe(true);
+    expect(reachedEnd(4.4, 341.0)).toBe(false);
+  });
+
+  it("never halts on an unknown end - a total of 0 (plan and peaks both absent) or worse", () => {
+    // The bug: position >= 0 is always true, and the audition halted at zero
+    // four seconds in with every clip still loaded.
+    expect(reachedEnd(4.4, 0)).toBe(false);
+    expect(reachedEnd(0, 0)).toBe(false);
+    expect(reachedEnd(4.4, -1)).toBe(false);
+    expect(reachedEnd(4.4, Number.NaN)).toBe(false);
   });
 });
