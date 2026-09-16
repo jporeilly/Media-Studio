@@ -121,11 +121,17 @@ export default function ProjectsPage() {
         <ErrorBox message={errorMessage(projects.error)} />
       ) : list.length === 0 ? (
         <Card>
+          {/* No action button here on purpose. The header's Import does the
+              same thing and is on screen already, so an empty page was showing
+              two primary buttons, worded differently, a couple of hundred
+              pixels apart. The sub still says which files are accepted, which
+              is the part the header cannot tell you. Elsewhere an EmptyState
+              action earns its place by going somewhere the page cannot
+              otherwise reach (Dashboard's Open); AuditCard and Docs have none. */}
           <EmptyState
             icon={<FolderOpen size={30} />}
             title="No projects yet"
             sub="Import a .pptx, .pdf, or video file to get started."
-            action={<Button variant="primary" icon={<Upload size={16} />} onClick={pick}>Import a file</Button>}
           />
         </Card>
       ) : (
