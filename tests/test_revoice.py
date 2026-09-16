@@ -128,6 +128,24 @@ def test_revoice_video_with_transcript_runs_and_saves(client, monkeypatch):
     assert v.content == b"FAKEREVOICE"
     assert v.headers["content-type"].startswith("video/mp4")
 
+    # Every re-voice rewrites the same filename, so the record carries a stamp
+    # the page can hang on the URL. Without it the browser answers the next
+    # request from the copy it cached before the file was replaced, and a
+    # cached body whose file has moved under it does not decode: the finished
+    # video came back as a black frame at 0:00, and its download as bytes that
+    # are no longer a video.
+    assert saved.get("revoiced_at"), "a re-voice must stamp when it happened"
+
+    # The server half of the same fix: without an explicit Cache-Control a
+    # browser MAY apply heuristic freshness and never revalidate at all.
+    assert v.headers.get("cache-control") == "no-cache"
+    # The track route carries it too - the narration is rewritten by every run
+    # exactly as the video is. Asserted on ``picture`` because this fake
+    # processor writes no narration file, so that kind is honestly a 404 here.
+    t = client.get(f"/api/projects/{pid}/tracks/picture")
+    assert t.status_code == 200
+    assert t.headers.get("cache-control") == "no-cache"
+
 
 def test_revoice_reconstructs_segments_on_the_slide(client, monkeypatch):
     monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)

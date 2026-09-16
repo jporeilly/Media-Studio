@@ -8,6 +8,8 @@ synthesises per-sentence TTS and swaps the audio track onto the untouched
 original frames (ffmpeg ``-c:v copy`` + ``apad`` to the video length).
 """
 
+from datetime import datetime, timezone
+
 from services import narration
 from services import projects as store
 
@@ -133,6 +135,14 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     # generate route does, and for the same reason.)
     current = store.get_project(pid) or record
     current["revoiced_video"] = out.name
+    # Every run overwrites the SAME filename, so the URL serving it never
+    # changes and a browser goes on showing the copy it cached the first time -
+    # which, for a file that has since been rewritten under it, decodes to a
+    # black frame at 0:00 rather than to the previous video. The page appends
+    # this timestamp to the media URLs so each re-voice is a new one. (The
+    # generated-video player has always done the same with ``rendered_at``;
+    # the re-voice side simply had no stamp of its own to use.)
+    current["revoiced_at"] = datetime.now(timezone.utc).isoformat()
     # The narration on its own, for editing the video elsewhere: same length as
     # the picture and starting at the same zero, so it drops straight onto a
     # timeline beside the original. Recorded only when it is really there - the

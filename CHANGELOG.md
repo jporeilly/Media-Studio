@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- [fix] **A finished re-voice would not play or download.** Every re-voice rewrites the same two files — `<stem>_revoiced.mp4` and its narration `.mp3` — in place, so the URLs serving them name a file whose bytes change underneath them while the address never does. Neither route sent a `Cache-Control` header, and a response without one may be cached on *heuristic* freshness (RFC 9111 §4.2.2: the browser is allowed to guess a lifetime from `Last-Modified` and answer the next request from its own copy without asking us). So the second re-voice onward was served the body cached from the first — and a cached body whose file has since been replaced does not play as the *previous* video, it fails to decode: a black frame stuck at 0:00, and a Download button handing over bytes that are no longer a video. It looked like the re-voice had failed when the job had in fact succeeded every time. Fixed on both sides, because either alone leaves a hole: the record now carries a `revoiced_at` stamp and the page hangs it on the media URLs (`?v=`) exactly as the generated-video player has always done with `rendered_at` — the re-voice side simply never had a stamp of its own — and the routes now send `Cache-Control: no-cache`, which does not forbid storing the file but does require revalidating it, so the `ETag` still earns a cheap 304 on the runs where nothing moved. The separate-track routes carry the same header: the narration is rewritten by every run just as the video is.
+
 ## [0.6.0] - 2026-09-16
 
 A sentence that comes out in the wrong voice, or too fast, can be given its own before

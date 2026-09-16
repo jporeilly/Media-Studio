@@ -67,6 +67,7 @@ interface Project {
   output_video?: string;
   outputs?: Outputs;
   rendered_at?: string;
+  revoiced_at?: string;
   revoiced_video?: string;
   revoiced_language?: string;
   narration_audio?: string;
@@ -448,6 +449,13 @@ export default function ProjectDetailPage() {
   const outputLinks = downloadLinks(p.outputs);
   // A re-render keeps the file names, so the players are cache-busted by the render time.
   const mediaVersion = encodeURIComponent(p.rendered_at ?? "");
+  // The same trap on the re-voice side, and worse: every run rewrites
+  // <stem>_revoiced.mp4 and <stem>_revoiced_narration.mp3 in place, so without
+  // this the browser keeps the copy it cached on the first run. A cached body
+  // whose file has since been replaced does not play as the OLD video - it
+  // fails to decode, which is a black frame at 0:00 and a download of bytes
+  // that are no longer a video.
+  const revoiceVersion = encodeURIComponent(p.revoiced_at ?? "");
 
   // The provider + voice pair, shared by the Generate and Re-voice cards (a
   // project shows one or the other).
@@ -1000,9 +1008,9 @@ export default function ProjectDetailPage() {
 
               {p.revoiced_video && (
                 <div style={{ display: "grid", gap: 10 }}>
-                  <video controls src={`/api/projects/${id}/revoiced-video`} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                  <video controls src={`/api/projects/${id}/revoiced-video?v=${revoiceVersion}`} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
                   <div>
-                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/revoiced-video`} download={`${p.name}-revoiced.mp4`}>
+                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/revoiced-video?v=${revoiceVersion}`} download={`${p.name}-revoiced.mp4`}>
                       <Download size={15} /> Download re-voiced video
                     </a>
                   </div>
@@ -1031,7 +1039,7 @@ export default function ProjectDetailPage() {
                     <Mic size={15} /> Original audio
                   </a>
                   {p.narration_audio && (
-                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/tracks/narration`} download={`${p.name}-narration.mp3`}>
+                    <a className="os-btn os-btn-secondary os-btn-sm" href={`/api/projects/${id}/tracks/narration?v=${revoiceVersion}`} download={`${p.name}-narration.mp3`}>
                       <Mic size={15} /> New narration
                     </a>
                   )}

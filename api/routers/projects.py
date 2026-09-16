@@ -353,6 +353,19 @@ def get_output(pid: str, kind: str, user: dict = Depends(current_user)):
     return FileResponse(str(path), media_type=media_type, filename=path.name, content_disposition_type=disposition)
 
 
+# A re-voice rewrites <stem>_revoiced.mp4 and its narration .mp3 IN PLACE, so
+# these two URLs name a file whose bytes change under them. Served without a
+# Cache-Control header a browser is free to apply HEURISTIC freshness (RFC 9111
+# 4.2.2: it may guess a lifetime from Last-Modified) and so answers the next
+# request from its own copy without ever asking us - which is how a finished
+# re-voice came back as a black frame at 0:00 and a download of bytes that are
+# no longer a video. ``no-cache`` does not mean "do not store": it means
+# revalidate every time, so the ETag still earns a cheap 304 when the file
+# really has not moved. The page cache-busts these URLs as well; this is the
+# half that also holds for anything else that fetches them.
+MUTABLE_MEDIA_HEADERS = {"Cache-Control": "no-cache"}
+
+
 @router.get("/{pid}/revoiced-video")
 def get_revoiced_video(pid: str, user: dict = Depends(current_user)):
     """Stream the re-voiced MP4 for a project, or 404 if none has been made."""
@@ -362,7 +375,8 @@ def get_revoiced_video(pid: str, user: dict = Depends(current_user)):
     filename = record.get("revoiced_video")
     if not filename:
         raise HTTPException(status_code=404, detail=missing)
-    return FileResponse(str(_project_file(pid, filename, missing)), media_type="video/mp4")
+    return FileResponse(str(_project_file(pid, filename, missing)), media_type="video/mp4",
+                        headers=MUTABLE_MEDIA_HEADERS)
 
 
 # The picture and each voice as its own file. An editor wants them apart: all
@@ -405,5 +419,10 @@ def get_track(pid: str, kind: str, user: dict = Depends(current_user)):
         raise HTTPException(status_code=404, detail=missing)
 
     path = _project_file(pid, filename, missing)
+    # The narration is the one track a re-voice rewrites in place; the picture
+    # and the extracted original audio are written once and never again. Giving
+    # all three the same header keeps the rule in one place rather than making
+    # the next reader work out which of them is mutable.
     return FileResponse(str(path), media_type=media_type or _media_type_of(path),
-                        filename=path.name, content_disposition_type="attachment")
+                        filename=path.name, content_disposition_type="attachment",
+                        headers=MUTABLE_MEDIA_HEADERS)
