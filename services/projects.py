@@ -35,6 +35,7 @@ disk. Nothing partial is ever visible at the real path now.
 """
 
 import json
+import os
 import re
 import shutil
 import threading
@@ -43,6 +44,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from utils.helpers import replace_with_retry
+from utils.logger import get_logger
+
+log = get_logger("PROJECTS")
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "data" / "projects"
@@ -130,6 +134,13 @@ def list_projects() -> list[dict]:
         return []
     out: list[dict] = []
     for d in PROJECTS_DIR.iterdir():
+        # Only a directory named like a project id is a project. A delete
+        # renames the directory out of the id space as its first step (see
+        # ``delete_project``), so a renamed directory still holding a
+        # project.json must not come back as a listed project - and a stray
+        # folder someone dropped in here never was one.
+        if not _valid_pid(d.name):
+            continue
         meta = d / "project.json"
         if meta.is_file():
             try:
@@ -193,65 +204,127 @@ class ProjectDeleteError(RuntimeError):
     retried once whatever held the file has let go."""
 
 
+# A delete's FIRST move is to rename the project's directory to this pattern,
+# taking it out of the id space ``list_projects`` recognises. Only then are its
+# files removed - and if that removal is interrupted, the next delete sweeps
+# up what was left.
+DELETING_SUFFIX = ".deleting-"
+
+
+def _files_in_use(pdir: Path) -> list[str]:
+    """The names of the files under ``pdir`` that another process holds open,
+    so a refused delete can say which one.
+
+    Windows only, and free of side effects: each file is opened with NO
+    sharing, which fails with a sharing violation exactly when any other
+    handle is open on it - the same condition the delete's rename fails on,
+    asked one file at a time. Elsewhere there is no such lock to detect and
+    the list is empty.
+    """
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    invalid = wintypes.HANDLE(-1).value
+    generic_read, no_sharing, open_existing, normal = 0x80000000, 0, 3, 0x80
+    sharing_violation = 32
+
+    held: list[str] = []
+    for path in sorted(p for p in pdir.rglob("*") if p.is_file()):
+        handle = kernel32.CreateFileW(str(path), generic_read, no_sharing, None, open_existing, normal, None)
+        if handle == invalid:
+            if ctypes.get_last_error() == sharing_violation:
+                held.append(path.name)
+        else:
+            kernel32.CloseHandle(handle)
+    return held
+
+
+def _remove_deleted(path: Path) -> bool:
+    """Remove a directory a delete has already renamed out of the store. A
+    failure here leaves an invisible, unreferenced folder behind rather than a
+    half-deleted project, and the sweep on the next delete tries again."""
+    try:
+        shutil.rmtree(path)
+        return True
+    except OSError as exc:
+        log.warning("A deleted project's files could not all be removed yet (%s: %s); "
+                    "the next delete will try again", path.name, exc.strerror or exc)
+        return False
+
+
+def _sweep_deleted() -> None:
+    """Finish any earlier delete that renamed its directory out of the store
+    but could not remove it. Best effort, run at the start of every delete."""
+    if not PROJECTS_DIR.exists():
+        return
+    for d in PROJECTS_DIR.iterdir():
+        if DELETING_SUFFIX in d.name and d.is_dir():
+            _remove_deleted(d)
+
+
 def delete_project(pid: str) -> bool:
     """Delete a project and its files. Returns False if it did not exist.
 
-    Raises ``ProjectDeleteError`` when something could not be removed, and
-    leaves the project intact and visible rather than half-gone.
+    Raises ``ProjectDeleteError`` when the project is in use - and then has
+    changed NOTHING: the project is still listed, still whole, and can be
+    tried again. That is the guarantee the previous version claimed and did
+    not have. It removed every file it could before discovering one was
+    locked, then raised a 409 saying "nothing was half-removed": a real project
+    lost its extracted audio, its re-voiced video and its waveform cache to a
+    delete that promised the opposite, and was left listed with a record
+    naming files that were gone.
 
-    This used to be ``shutil.rmtree(pdir, ignore_errors=True)`` followed by an
-    unconditional ``return True``, which is a bad combination on Windows, where
-    a file a player or an encoder still has open cannot be unlinked. The tree
-    walk would delete ``project.json`` early, fail on the video, swallow the
-    error and report success: the project vanished from the list - the list is
-    built from ``project.json`` - while its largest file stayed on disk forever,
-    invisible and unreferenced. One real case left a 76 MB orphan behind.
+    The first move is now to RENAME the project's directory out of the id
+    space (``<pid>.deleting-<random>``). On Windows a directory cannot be
+    renamed while any file inside it is open, and the rename is one call that
+    either moves the whole project or fails whole - so the files are touched
+    only once the directory is provably nobody's. When the rename is refused,
+    the files in use are named (``_files_in_use``) so the message says which,
+    as it always did.
 
-    So the record goes LAST. Everything else is removed first and every failure
-    is collected; if anything survives, ``project.json`` is untouched, the
-    project is still there to try again, and the caller is told. Nothing is
-    reported as deleted that is not gone.
+    After the rename the project is already gone from the store:
+    ``list_projects`` skips a directory whose name is not a project id, and
+    ``get_project`` looks only at the original path. Removing the renamed
+    directory is cleanup, and if it cannot finish (a handle opened between the
+    rename and the removal) it is retried by the sweep at the top of the next
+    delete rather than reported as a failed delete of a project that is, in
+    every way a user can see, gone.
     """
     if not _valid_pid(pid):
         return False
     pdir = PROJECTS_DIR / pid
-    meta = _meta_path(pid)
     if not pdir.exists():
         return False
 
+    _sweep_deleted()
+
     # Under the record's own lock: a transcript Save or a narration adjustment
-    # that read the record just before the delete would otherwise write it back
-    # after project.json was unlinked, resurrecting a record for files that are
-    # gone and failing the rmdir below.
+    # that read the record just before the delete must not write it back into
+    # a directory that is being renamed away.
     with project_lock(pid):
         if not pdir.exists():
             return False
-
-        failures: list[str] = []
-        for child in sorted(pdir.iterdir()):
-            if child == meta:
-                continue
-            try:
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-            except OSError as exc:
-                failures.append(f"{child.name} ({exc.strerror or exc})")
-
-        if failures:
-            raise ProjectDeleteError(
-                "Could not delete this project: " + ", ".join(failures)
-                + ". Something is still using it - close the video if it is open, then try again."
-            )
-
-        meta.unlink(missing_ok=True)
+        gone = PROJECTS_DIR / f"{pid}{DELETING_SUFFIX}{uuid.uuid4().hex[:8]}"
         try:
-            pdir.rmdir()
+            pdir.rename(gone)
         except OSError as exc:
+            held = _files_in_use(pdir)
+            what = ", ".join(held) if held else f"{pdir.name} ({exc.strerror or exc})"
             raise ProjectDeleteError(
-                f"Could not remove the project folder: {exc.strerror or exc}"
+                f"Could not delete this project: {what}. Something is still using it - "
+                "close the video if it is open, then try again."
             ) from exc
+
+    _remove_deleted(gone)
 
     # This project's own lock, the slide editor's lock plus its cache of the
     # deck's notes, and the narration editor's memoised speaking rates: none has

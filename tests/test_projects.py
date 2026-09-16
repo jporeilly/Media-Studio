@@ -130,21 +130,34 @@ def test_a_delete_that_cannot_remove_a_file_leaves_the_project_whole(monkeypatch
     regardless, and the tree walk reached project.json before the video: the
     project fell out of the list - the list is built from project.json - while
     its largest file stayed on disk forever, invisible and unreferenced. One
-    real case left a 76 MB orphan behind. The record is removed LAST now, so a
-    failure leaves the project listed and retryable, and says so.
+    real case left a 76 MB orphan behind.
+
+    The fix after that removed every file it COULD before finding the locked
+    one, then raised a 409 promising nothing was half-removed - and a real
+    project lost its extracted audio, its re-voiced video and its waveform
+    cache to exactly that promise. So the gate is now the RENAME of the whole
+    directory, one call that moves everything or nothing: this test refuses
+    the rename (the portable way to stand in for a file held open, which only
+    Windows enforces) and checks that a refused delete has touched nothing,
+    is still listed, and names the file in use.
     """
     from pathlib import Path
 
     pid = projects.import_upload("clip.mp4", b"video-bytes")["id"]
-    locked = projects.PROJECTS_DIR / pid / "clip.mp4"
-    real_unlink = Path.unlink
+    pdir = projects.PROJECTS_DIR / pid
+    locked = pdir / "clip.mp4"
+    (pdir / "audio.wav").write_bytes(b"RIFF")  # a second file the old code would have removed first
+    real_rename = Path.rename
 
-    def _unlink(self, *args, **kwargs):
-        if self == locked:
-            raise OSError(32, "The process cannot access the file because it is being used")
-        return real_unlink(self, *args, **kwargs)
+    def _rename(self, target):
+        if self == pdir:
+            raise OSError(5, "Access is denied")  # what Windows says for a directory with an open file in it
+        return real_rename(self, target)
 
-    monkeypatch.setattr(Path, "unlink", _unlink)
+    monkeypatch.setattr(Path, "rename", _rename)
+    # The probe that names the culprit is Windows-only; stand in for it here so
+    # the message contract is tested on every platform.
+    monkeypatch.setattr(projects, "_files_in_use", lambda _pdir: ["clip.mp4"])
 
     with pytest.raises(projects.ProjectDeleteError) as caught:
         projects.delete_project(pid)
@@ -153,7 +166,66 @@ def test_a_delete_that_cannot_remove_a_file_leaves_the_project_whole(monkeypatch
     assert "try again" in str(caught.value)
     assert projects.get_project(pid) is not None, "still listed, so it can be retried"
     assert [p["id"] for p in projects.list_projects()] == [pid]
-    assert locked.is_file(), "nothing was half-removed either"
+    assert locked.is_file() and (pdir / "audio.wav").is_file(), "NOTHING was removed - not even the files that were not locked"
+    assert not [d for d in projects.PROJECTS_DIR.iterdir() if projects.DELETING_SUFFIX in d.name], "no renamed directory was left behind"
+
+
+def test_a_delete_with_a_file_really_held_open_is_refused_whole(tmp_projects_dir):
+    """The real thing, on the platform that has it: a file held open by another
+    handle stops the directory rename, and the probe names it. Windows only -
+    POSIX lets a directory with open files be renamed, so there is nothing to
+    refuse there."""
+    import os
+
+    if os.name != "nt":
+        pytest.skip("only Windows refuses to rename a directory with an open file in it")
+
+    pid = projects.import_upload("clip.mp4", b"video-bytes")["id"]
+    pdir = projects.PROJECTS_DIR / pid
+    (pdir / "audio.wav").write_bytes(b"RIFF")
+
+    with open(pdir / "clip.mp4", "rb"):
+        with pytest.raises(projects.ProjectDeleteError) as caught:
+            projects.delete_project(pid)
+
+    assert "clip.mp4" in str(caught.value), "the message names the file that is in use"
+    assert "audio.wav" not in str(caught.value), "and only that one"
+    assert (pdir / "clip.mp4").is_file() and (pdir / "audio.wav").is_file() and (pdir / "project.json").is_file()
+    assert [p["id"] for p in projects.list_projects()] == [pid]
+
+    # Handle released: the same delete now succeeds and takes everything.
+    assert projects.delete_project(pid) is True
+    assert not pdir.exists()
+    assert projects.list_projects() == []
+
+
+def test_an_interrupted_removal_is_invisible_and_swept_by_the_next_delete(tmp_projects_dir, monkeypatch):
+    """Once the directory is renamed the project is gone as far as any user can
+    see; if removing the renamed directory then fails, the delete still
+    succeeds, the leftover is not listed, and the next delete finishes the job."""
+    pid = projects.import_upload("clip.mp4", b"video-bytes")["id"]
+    real_rmtree = projects.shutil.rmtree
+    refused = {"once": True}
+
+    def _rmtree(path, *args, **kwargs):
+        if refused["once"] and projects.DELETING_SUFFIX in Path(path).name:
+            refused["once"] = False
+            raise OSError(32, "The process cannot access the file because it is being used")
+        return real_rmtree(path, *args, **kwargs)
+
+    from pathlib import Path
+
+    monkeypatch.setattr(projects.shutil, "rmtree", _rmtree)
+
+    assert projects.delete_project(pid) is True, "the project is gone from the store either way"
+    assert projects.get_project(pid) is None
+    assert projects.list_projects() == [], "the renamed directory is not a listed project"
+    leftovers = [d for d in projects.PROJECTS_DIR.iterdir() if projects.DELETING_SUFFIX in d.name]
+    assert len(leftovers) == 1, "its files are still on disk, invisible, waiting for the sweep"
+
+    other = projects.import_upload("other.mp4", b"video-bytes")["id"]
+    assert projects.delete_project(other) is True
+    assert not [d for d in projects.PROJECTS_DIR.iterdir() if projects.DELETING_SUFFIX in d.name], "the next delete swept the leftover"
 
 
 def test_a_successful_delete_takes_the_whole_directory(tmp_projects_dir):
