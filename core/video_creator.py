@@ -303,6 +303,7 @@ def replace_video_audio(
     output_path: Path,
     background_music: Optional[Path] = None,
     music_volume: float = 0.15,
+    video_duration: Optional[float] = None,
 ) -> bool:
     """Replace the audio track of a video with new TTS audio.
 
@@ -315,6 +316,18 @@ def replace_video_audio(
         output_path: Where to save the output video.
         background_music: Optional background music to mix in.
         music_volume: Volume level for background music (0.0-1.0).
+        video_duration: The picture's length in seconds when the caller
+            already knows it, in which case nothing is probed. None probes
+            the source with ffprobe exactly as before (and pads to infinity
+            when there is no ffprobe to ask). Present and tested, but UNWIRED
+            in E1: an edited output's length is the sum of its kept ranges,
+            known before ffmpeg runs, yet the only caller of this function
+            is ``services.processing.VideoProcessor._revoice_video``, which
+            the edit deliberately left untouched - so an edited run still
+            takes the None path. It is unobservable either way: the mux is
+            ``-shortest``, and a plain ``apad`` and ``apad=whole_dur=<the
+            edit's length>`` give identical output whenever the narration
+            outruns the picture (measured on the 336 s edited corpus render).
 
     Returns:
         True if successful.
@@ -345,7 +358,8 @@ def replace_video_audio(
 
         # Keep the video stream, swap the audio, and pad the audio to the full
         # video length so the original ending (its closing transition) is kept.
-        video_duration = _probe_duration(source_video)
+        if video_duration is None:
+            video_duration = _probe_duration(source_video)
         cmd = _build_replace_audio_cmd(source_video, audio_to_use, temp_output, video_duration)
 
         logger.info("Replacing audio: %s -> %s (video %.1fs)",
@@ -369,6 +383,193 @@ def replace_video_audio(
         if temp_output.exists():
             temp_output.unlink()
         return False
+
+
+def cut_filtergraph(keep, origin: float = 0.0) -> str:
+    """The one ffmpeg graph that cuts a picture to ``keep`` (``[[start, end],
+    ...]`` in source seconds): every range trimmed and re-timed from zero, then
+    concatenated. ``trim``'s end is exclusive, so a range's last instant is the
+    first frame not shown. Video only (``a=0``): the narration is muxed on
+    afterwards by ``replace_video_audio``, exactly as for an uncut picture.
+
+    ``origin`` is the input seek the command puts ahead of the graph
+    (``-ss origin`` BEFORE ``-i`` resets the input's timestamps so that moment
+    is zero), so every trim is offset by it; 0 is the graph as written for the
+    whole source. See ``cut_picture`` for why the seek is there.
+
+    No frame rate is set anywhere: ``trim`` + ``setpts`` + ``concat`` carry the
+    source's own cadence through (measured: 30 fps in, 30 fps out), and it
+    must never be ``fps_for_transition``, which chooses 2 fps for a static deck
+    and would wreck a screen recording.
+    """
+    parts = [
+        f"[0:v]trim=start={float(start) - origin:.3f}:end={float(end) - origin:.3f},setpts=PTS-STARTPTS[v{i}]"
+        for i, (start, end) in enumerate(keep)
+    ]
+    inputs = "".join(f"[v{i}]" for i in range(len(keep)))
+    return ";".join(parts) + f";{inputs}concat=n={len(keep)}:v=1:a=0[v]"
+
+
+# How often the picture cut looks at its cancel flag and its deadline while
+# ffmpeg runs, and the clock it reads (a seam the tests move).
+CUT_POLL_SECONDS = 0.5
+_clock = time.monotonic
+
+
+def cut_timeout(keep) -> float:
+    """How long a cut may take: 60 s plus three times the DECODE REACH - from
+    the first kept start to the last kept end - never the output's length.
+    ``trim`` is a filter and runs after the decode, so the work is everything
+    ffmpeg has to decode to get there (the input seek in ``cut_picture`` moves
+    the start of that stretch up to the first kept range; nothing moves its
+    end). Measured rate about 2.8 s per minute of 1080p30, with headroom. Any
+    future filtergraph cut inherits this rule."""
+    return 60 + 3 * (float(keep[-1][1]) - float(keep[0][0]))
+
+
+def _stop(proc) -> None:
+    """Kill an ffmpeg that must not finish and reap it. Never raises: the
+    caller is already on a failure path, and a process that is gone by the
+    time this runs is exactly the outcome wanted."""
+    try:
+        proc.kill()
+        proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001 - see the docstring
+        pass
+
+
+def cut_picture(
+    source, keep, dst, video_bitrate: str = "",
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """Cut ``source``'s PICTURE to the kept ranges, writing a video-only MP4
+    at ``dst``. True when it is there; False (and a log line) on any failure,
+    never an exception - the same contract as ``replace_video_audio``.
+
+    One ffmpeg run, re-encoding everything at ``libx264 -preset ultrafast``
+    (the generate path's own settings; ``video_bitrate`` is the output
+    preset's, "" for the codec default, as ``write_videofile`` takes it). A
+    stream copy is not an option: a cut lands on P-frames with no reference
+    picture, and the source's keyframes are two seconds apart, so snapping to
+    one can miss by more than a sentence.
+
+    **The work is sized by how far into the source ffmpeg has to DECODE, not
+    by how much comes out.** ``trim`` is a filter: it runs after the decode,
+    so left to itself ffmpeg decodes every frame from the start of the file to
+    the last kept range's end and throws most of them away. Two things follow.
+
+    - ``-ss <first kept start>`` goes BEFORE ``-i``, so the decode starts at
+      the first range (an input seek lands on the keyframe before it and
+      discards up to the exact frame), and every trim in the graph is offset
+      by that origin, because the seek resets the input's timestamps. Measured
+      on the 341 s corpus source: a 5 s keep at its tail cost 3.9 s without the
+      seek and 0.87 s with it, and on a two-hour source the seekless cut was
+      killed by its own timeout. It is frame-exact: the decoded frames'
+      ``-f framemd5`` output is identical with and without the seek. That is a
+      DEV-ONLY check, since the suite fakes ffmpeg - run
+      ``ffmpeg -ss S0 -i src -filter_complex "<graph offset by S0>" -map "[v]"
+      -f framemd5 -`` and the same without ``-ss`` and the offset, and diff.
+    - The timeout is bound by the decode reach, ``keep[-1][1] - keep[0][0]``,
+      not by the output's length (``cut_timeout``): with the seek in place
+      that is exactly the stretch ffmpeg decodes.
+
+    ``FFMPEG_PATH`` from ``utils.config``, never the bare name: the older call
+    sites that spawn "ffmpeg" work only because that module prepends the
+    binary's directory to PATH at import, and this step is the first that
+    runs ONLY for an edited project, so it must not inherit the accident.
+
+    ``cancel_check`` (the job's ``services.jobs.cancel_requested_here``) is
+    polled every ``CUT_POLL_SECONDS`` while ffmpeg runs, and a cancel KILLS
+    it: this is the one step of a re-voice that looks at the flag, and a cut
+    can run for a minute or more, so Cancel has to mean stop rather than
+    "discard the result when it is done". A cancelled or failed cut leaves
+    nothing behind. Written to a ``.part`` file and published with
+    ``utils.helpers.replace_with_retry``, because a render holds several files
+    open across seconds and Windows refuses a rename under an open handle now
+    and then. ffmpeg's stderr goes to a file beside the part rather than a
+    pipe, so a chatty run can never fill a pipe nobody is reading and stall.
+    """
+    from utils.config import FFMPEG_PATH
+    from utils.helpers import replace_with_retry
+
+    source, dst = Path(source), Path(dst)
+    if not FFMPEG_PATH:
+        logger.error("Cannot cut the picture: ffmpeg is not available")
+        return False
+    if not keep:
+        logger.error("Cannot cut the picture: no ranges to keep")
+        return False
+
+    origin = float(keep[0][0])
+    reach = float(keep[-1][1]) - origin
+    length = sum(float(end) - float(start) for start, end in keep)
+    timeout = cut_timeout(keep)
+    part = dst.with_suffix(".part.mp4")
+    log = part.with_suffix(".log")
+    cmd = [
+        FFMPEG_PATH, "-hide_banner", "-nostats",
+        "-ss", f"{origin:.3f}", "-i", str(source),
+        "-filter_complex", cut_filtergraph(keep, origin),
+        "-map", "[v]", "-an",
+        "-c:v", "libx264", "-preset", "ultrafast",
+    ]
+    if video_bitrate:
+        cmd += ["-b:v", video_bitrate]
+    cmd += ["-y", str(part)]
+
+    def _cancelled() -> bool:
+        return bool(cancel_check and cancel_check())
+
+    try:
+        if _cancelled():
+            logger.info("Picture cut cancelled before it started")
+            return False
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Cutting the picture: %d range(s), %.1fs kept, %.1fs of %s decoded",
+                    len(keep), length, reach, source.name)
+        with open(log, "w", encoding="utf-8", errors="replace") as err:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+            deadline = _clock() + timeout
+            outcome = "finished"
+            while proc.poll() is None:
+                if _cancelled():
+                    outcome = "cancelled"
+                    break
+                if _clock() >= deadline:
+                    outcome = "timeout"
+                    break
+                time.sleep(CUT_POLL_SECONDS)
+            if outcome != "finished":
+                _stop(proc)
+        if outcome == "cancelled":
+            logger.info("Picture cut cancelled; ffmpeg stopped and the cut discarded")
+            return False
+        if outcome == "timeout":
+            logger.error("Cutting the picture took longer than %.0fs and was stopped", timeout)
+            return False
+        if proc.returncode != 0:
+            tail = log.read_text(encoding="utf-8", errors="replace")[-800:] if log.is_file() else ""
+            logger.error("ffmpeg failed to cut the picture (exit %s): %s", proc.returncode, tail)
+            return False
+        if _cancelled():
+            logger.info("Picture cut cancelled; the cut is discarded")
+            return False
+        if not part.is_file() or part.stat().st_size == 0:
+            logger.error("ffmpeg reported success but wrote no picture")
+            return False
+        replace_with_retry(part, dst)
+        logger.info("Picture cut: %s (%.1fs)", dst.name, length)
+        return True
+    except Exception as e:
+        logger.error("Error cutting the picture: %s", e)
+        return False
+    finally:
+        # No-ops after a successful publish; the cleanup on every other exit.
+        for leftover in (part, log):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _build_master_audio(

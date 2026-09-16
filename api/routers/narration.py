@@ -40,28 +40,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from api.audit import PROJECT_TRANSCRIPT_TIMING, audit
-from api.deps import current_user, require_project
+from api.deps import current_user, readable_project, writable_project
 from api.schemas import SegmentOverride
-from services import jobs, narration, waveform
+from services import narration, waveform
 
 router = APIRouter(prefix="/projects", tags=["narration"])
 
+NOT_A_VIDEO = "Only video projects have a transcript."
+
 
 def readable(pid: str, user: dict) -> dict:
-    """The record of a video project this user may see: 404 when missing, 403
-    when it is someone else's, 400 for a deck or PDF."""
-    record = require_project(pid, user)
-    if record.get("kind") not in narration.NARRATION_KINDS:
-        raise HTTPException(status_code=400, detail="Only video projects have a transcript.")
-    return record
+    """A video project this user may see (``api.deps.readable_project``):
+    404 missing, 403 someone else's, 400 a deck or PDF."""
+    return readable_project(pid, user, narration.NARRATION_KINDS, NOT_A_VIDEO)
 
 
 def writable(pid: str, user: dict) -> dict:
-    """``readable`` plus: 409 while a job is attached to the project
-    (``ProjectBusy``, answered by the app-wide handler)."""
-    record = readable(pid, user)
-    jobs.require_idle(pid)
-    return record
+    """``readable`` plus 409 while a job holds the project."""
+    return writable_project(pid, user, narration.NARRATION_KINDS, NOT_A_VIDEO)
 
 
 @router.patch("/{pid}/transcript/{index}")

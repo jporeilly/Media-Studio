@@ -1,10 +1,13 @@
 # Design spec — the edit timeline (vertical 6)
 
 Read-only survey, 2026-09-16, plus measurements taken that day on the real 5m41s 1080p
-source (`data/projects/6d808448772c/finished.mp4`). **Nothing is built.** This is the
-answer to "build something like Camtasia": a multi-track timeline on which the picture,
-the original audio and the narration can be cut together. It is written against the code
-as it stands at `4f39ae1`, and every line number below is from that tree.
+source (`data/projects/6d808448772c/finished.mp4`). **E1 — the model and the render — is
+built (2026-09-16, §7); E2 onward is not.** This is the answer to "build something like
+Camtasia": a multi-track timeline on which the picture, the original audio and the
+narration can be cut together. The survey is written against the code as it stands at
+`4f39ae1`, and every line number below is from that tree; E1's own notes in §7 cite symbols
+rather than lines, and where E1 proved a section wrong the section is corrected in place
+and says so.
 
 The one-line version: **a project gains an ordered list of the ranges of its one source
 that are kept; the transcript never moves; everything else is projection.**
@@ -134,7 +137,8 @@ The whole repository contains **no trim, no concat and no `filter_complex`** (gr
 (`core/video_importer.py:542-545`); the only `-t` caps a GIF at 30 s
 (`services/processing.py:1658`). Concatenation exists only as pydub `+` (audio) and
 moviepy `concatenate_videoclips(method="compose")` (`core/video_creator.py:1115`). Mixing
-is one music file looped at a flat volume (`:327-342`); `core/audio_mixer.py:33`
+is one music file looped at a flat volume (`:327-342` — the only music support in the
+codebase, and where E4 starts, §7); `core/audio_mixer.py:33`
 (`AudioMixer`) looks like a mixer and is **dead code** — never instantiated. Likewise
 `extract_keyframes`, `get_video_chapters` and `get_video_duration`
 (`core/video_importer.py:384-604`) sit on no API path. None of these count as capability.
@@ -176,8 +180,9 @@ mux, `core/video_creator.py:353`). A render is one more job kind and fits the mo
 unchanged, with two consequences accepted for v1 and one requirement: while it runs every
 edit is a 409 (the render takes ~16 s, so this is tolerable; it is not what Camtasia does,
 and section 9 says so); it holds one of two workers; and the **new** picture step must
-check `cancel_requested_here()` between ranges and use a timeout scaled to the output
-length, because the existing step does neither.
+poll `cancel_requested_here()` while ffmpeg runs (and stop it), and use a timeout scaled to
+the **decode reach** — from the first kept start to the last kept end, never the output
+length; E1's second and eighth notes in §7 — because the existing step does neither.
 
 ### 1.6 The frontend
 
@@ -215,11 +220,14 @@ One new key on the outer record:
 - `keep` is an ordered list of `[start, end]` in **source seconds**, ascending,
   non-overlapping, `0 <= start < end <= source_duration`, where `source_duration` is the
   WAV header's (`services/waveform.py::duration_for`). At most a few hundred entries in
-  any plausible edit; the record stays small.
+  any plausible edit; the record stays small (E1 bounds the list at `MAX_RANGES` = 5000 —
+  a bound on abuse, not on use).
 - **Absent means keep everything.** Every existing project renders byte-identically to
   today, and the first cut a user makes creates the key. No migration.
-- `version` is there so v2 (multi-source, mixing) can change the shape without guessing
-  what an old record meant.
+- `version` is there so a later shape can change without guessing what an old record
+  meant: E4's music lane is version 2 (§7); multi-source and mixing the original audio come
+  after that. `stored_keep` refuses any version but its own, so whoever bumps it must read
+  the older shape as well, never refuse it.
 - The edit is the **only** thing stored. Split, trim and ripple delete are all changes to
   `keep`: a split adds a boundary (two ranges where there was one, contiguous); a trim
   moves a range's edge; a ripple delete removes a sub-range and the ranges either side
@@ -240,7 +248,9 @@ That is the entire point.
 ## 3. Projection — the one piece of arithmetic
 
 `services/edit.py` owns four pure functions, unit-tested to exhaustion, and both the plan
-and the render call them — never a copy:
+and the render call them — never a copy (E1 put them behind one entry point, `apply`, which
+is the single call both `services/revoice.py` and `narration.plan` make; the module also
+owns `validate_keep`, `whole_source` and the two store functions — §7):
 
 ```
 output_duration(keep) -> float                 # sum of (end - start)
@@ -252,8 +262,13 @@ project_transcript(transcript, keep) -> list   # the sentences the render will s
 `project_transcript` is the rule that decides what happens to a sentence at a cut, and it
 is deliberately simple so it can be explained in one sentence to the person cutting:
 
-- A sentence is **kept iff its `start` lies inside a kept range.** Its pin becomes
-  `to_timeline(start + offset)`; its `end` becomes `min(end, range_end)` mapped likewise.
+- A sentence is **kept iff its `start` lies inside a kept range** (`[start, end)`, so a
+  sentence beginning exactly where a cut begins goes with it). Its `start` becomes
+  `to_timeline(start)` and its `end` becomes `min(end, range_end)` mapped likewise; its
+  `offset` rides through **untouched**, so the pin the engine computes (`_pin`) is
+  `to_timeline(start) + offset`, the offset applied once. *Corrected by E1:* this used to
+  read `to_timeline(start + offset)`, which has no answer when an offset crosses a cut and
+  would have applied the offset twice.
 - A sentence whose `start` lies in a removed range is **left out**, exactly as a muted one
   is today (`services/processing.py:1167-1170` filters `spoken` before any window maths,
   so the room it occupied goes to the sentence before it — the existing rule, unchanged).
@@ -262,14 +277,15 @@ is deliberately simple so it can be explained in one sentence to the person cutt
   nothing on disk changed.
 
 That output list is what `services/revoice.py` hands to the engine as
-`slide0.original_segments` (`services/revoice.py:100-106`) with the section end set to
-`output_duration(keep)` rather than `transcript_section(...)`'s end (`:112-114`), and it
-is what `narration.plan` reports. `_revoice_video` sees a transcript in a shorter
+`slide0.original_segments` (`services/revoice.py:100-106`), and it is what `narration.plan`
+reports. *As built:* the section is `transcript_section(projected sentences)` — its end is
+the last kept sentence's clamped end, not `output_duration(keep)` as this first read — and
+it is the plan's `duration` that is the output's length (E1's ninth note, §7). `_revoice_video` sees a transcript in a shorter
 recording and does what it always does. The anti-drift test's job — "the plan's speeds are
 the speeds the render really synthesises at" — gains a `keep` parameter and keeps holding.
 
-The client gets the same four functions in `frontend/src/lib/edit.ts`, tested against the
-same fixtures. This is the one deliberate duplication, and it is the same kind phase 3a
+The client gets the same four functions in `frontend/src/lib/edit.ts` (E2 — not built),
+tested against the same fixtures. This is the one deliberate duplication, and it is the same kind phase 3a
 accepted for `schedule()`: the client needs `to_source`/`to_timeline` to draw and to seek,
 and a round trip per pointer movement is not an option. The tests share fixtures so the
 two cannot drift silently.
@@ -284,14 +300,18 @@ byte, and `tests/test_revoice_sync.py` never notices.
 
 1. `services/revoice.py` reads `record.get("edit")`, validates it, computes
    `project_transcript` and `output_duration`, and builds the engine state from the
-   projection (§3). Unchanged otherwise.
-2. **New:** `core/video_creator.py::cut_picture(source, keep, dst, fps, preset)` — one
-   ffmpeg invocation, `FFMPEG_PATH`, never the bare name:
+   projection (§3). Unchanged otherwise. (Shipped as one call, `edit.apply`, whose result
+   also says whether the picture needs cutting at all.)
+2. **New:** `core/video_creator.py::cut_picture(source, keep, dst, video_bitrate,
+   cancel_check)` (as shipped — the plan's `fps` parameter never existed, since no rate is
+   passed) — one ffmpeg invocation, `FFMPEG_PATH`, never the bare name:
 
    ```
-   -filter_complex "[0:v]trim=S0:E0,setpts=PTS-STARTPTS[v0]; [0:v]trim=S1:E1,setpts=PTS-STARTPTS[v1]; …
-                    [v0][v1]…concat=n=N:v=1:a=0[v]"
-   -map "[v]" -an -c:v libx264 -preset ultrafast -r <source fps> [-b:v <preset bitrate>] -y dst
+   -ss S0 -i src                                   # an INPUT seek to the first kept start (E1)
+   -filter_complex "[0:v]trim=start=S0−S0:end=E0−S0,setpts=PTS-STARTPTS[v0];
+                    [0:v]trim=start=S1−S0:end=E1−S0,setpts=PTS-STARTPTS[v1]; …
+                    [v0][v1]…concat=n=N:v=1:a=0[v]"   # every trim offset by S0: the seek resets the timestamps
+   -map "[v]" -an -c:v libx264 -preset ultrafast [-b:v <preset bitrate>] -y dst
    ```
    Picture only, no audio (`-an`): the narration is muxed on afterwards by the step that
    already exists. **No `-r` at all.** `trim` + `setpts=PTS-STARTPTS` + `concat` carry the
@@ -302,27 +322,35 @@ byte, and `tests/test_revoice_sync.py` never notices.
    wreck a screen recording; not forcing a rate satisfies that by construction. The bitrate
    comes from the output preset (`services/output_presets.py`), `""` meaning codec default,
    exactly as `write_videofile` takes it (`core/video_creator.py:1169`); in E1 that is the
-   default preset (`youtube_1080p`), and choosing one is E2's Render button. Between ranges the step checks
-   `cancel_requested_here()`; its timeout is `60 + 3 × output_duration` seconds (measured
-   rate ≈ 2.8 s per minute of footage, with headroom). Writes to a `.part` and publishes
-   with `replace_with_retry`.
-3. `replace_video_audio(cut_picture_output, master, out, …)` as today — with one change:
-   `_build_replace_audio_cmd` takes the video duration as an **argument**, supplied by the
-   caller as `output_duration(keep)`, and only falls back to `_probe_duration` when the
-   caller passes `None`. That removes the mux's one dependence on ffprobe for the edited
-   case without altering the unedited one.
+   default preset (`youtube_1080p`), and choosing one is E2's Render button. *The next two
+   rules were wrong as first written and are corrected here (E1's second and eighth notes,
+   §7):* the step polls `cancel_requested_here()` every half second **while ffmpeg runs**
+   and kills it on a cancel — there is no "between ranges", the cut is one run — and its
+   timeout is `cut_timeout(keep) = 60 + 3 × (keep[-1][1] − keep[0][0])` seconds: the
+   **decode reach**, never the output's length (measured rate ≈ 2.8 s per minute of footage
+   decoded, with headroom). Writes to a `.part` and publishes with `replace_with_retry`.
+3. `replace_video_audio(cut_picture_output, master, out, …)` as today. The one change this
+   step asked for — the video duration as an **argument**, supplied by the caller as
+   `output_duration(keep)`, with `_probe_duration` only when the caller passes `None`, so
+   the edited mux never needs ffprobe — shipped as `video_duration` on
+   `replace_video_audio` (`_build_replace_audio_cmd` already took one), tested, and
+   **unwired**: "the caller" is `_revoice_video`, and this section's first sentence says
+   nothing in it changes. The first sentence wins. An edited run still probes, or pads to
+   infinity where there is no ffprobe, which is unobservable under `-shortest` (E1's third
+   note, §7).
 4. `record["edit_rendered_at"]` is stamped beside `revoiced_at`, for the same reason
    `revoiced_at` exists (`services/revoice.py:143-151`): the output filename does not
-   change, so the page's cache-buster must.
+   change, so the page's cache-buster must. Shipped; a whole-source run clears it, so the
+   record never claims an edit the file on disk does not carry.
 
 Measured cost on the 341 s source: 15.8 s for the picture, ~3 s for the mux, plus
 narration synthesis that is cached after the first audition. Under 25 s end to end. A
 20-minute recording is about a minute.
 
 The original audio is **not** part of the v1 output — the narration replaces it, exactly as
-a re-voice does today. It is drawn on the timeline as reference only. Keeping it, ducking
-it under the narration, or mixing music are v2 (§8), and `AudioMixer` will not be the
-starting point because nothing has ever run it.
+a re-voice does today. It is drawn on the timeline as reference only. Keeping it or ducking
+it under the narration is v2 (§9); music over the top is **E4** (§7); and `AudioMixer` will
+not be the starting point for either, because nothing has ever run it.
 
 ---
 
@@ -332,14 +360,17 @@ New router `api/routers/edit.py`, `prefix="/projects"`, following `narration.py`
 
 | Route | Notes |
 |---|---|
-| `GET /{pid}/edit` | The `keep` list, or `{"version": 1, "keep": null}` meaning everything. `readable` only; allowed during a job — it is a read. |
-| `PUT /{pid}/edit` | Replaces the whole list (it is small; a partial PATCH buys nothing). `require_project` → `jobs.require_idle` → `store.project_lock` → validate → save. Audits new constant `PROJECT_EDIT = "project.edit"` with detail = the range count only, never the times. `extra="forbid"`. 400 for overlap, order, or a bound past the source. |
-| `DELETE /{pid}/edit` | Back to keep-everything. Same guards. |
-| `POST /{pid}/render` | Starts the render job. It **is** the re-voice job with the projection applied — one job kind, one code path — so the route can simply be the existing `POST /{pid}/revoice`, which already reads the record inside the job. Listed here so the choice is explicit: **no new job kind.** |
+| `GET /{pid}/edit` | `{"version": 1, "keep": [[…]] or null, "source_duration": …, "output_duration": …}` — `null` meaning everything, the source's length from the WAV header (`null` until the video is transcribed), the output's the sum of the ranges. `readable` only; allowed during a job — it is a read. 400 for an edit this version cannot read. |
+| `PUT /{pid}/edit` | Replaces the whole list (it is small; a partial PATCH buys nothing). `require_project` → `jobs.require_idle` → validate → `store.project_lock` → re-read → save (validated before the lock, so a refused list leaves the record untouched). Audits the new constant `PROJECT_EDIT = "project.edit"` with detail = the range count and the seconds removed (`"2 ranges kept, 5.0 s removed"`), never the times. `extra="forbid"` and strict numbers (422). 400 naming the range for overlap, order, a bound past the source, NaN or infinity; 409 while a job holds the project **or while the video has no extracted audio** — the ranges are checked against its length. Answers the GET's shape. |
+| `DELETE /{pid}/edit` | Back to keep-everything: the key is removed, not written empty. Same guards. Idempotent — a project with no edit is left as it is and nothing is audited. |
+| `POST /{pid}/revoice` | The render. It **is** the re-voice job with the projection applied — one job kind, one code path — and E1 shipped exactly that: there is no `/render` route, the existing re-voice route starts it and the job reads the edit it renders. Listed here so the choice is explicit: **no new job kind.** |
 
 `GET /{pid}/narration/plan` and `GET /{pid}/waveform` gain nothing in their URLs; the plan
-applies the projection server-side and returns sentences already in timeline seconds, plus
-`edit: {keep, output_duration}` so the client draws the same edit the plan was made from.
+applies the projection server-side and returns sentences already in timeline seconds — each
+still carrying its `index` in the *stored* transcript, which is what the narration routes
+address a sentence by — with `duration` the output's length, plus
+`edit: {version, keep, source_duration, output_duration}` (the GET's shape) so the client
+draws the same edit the plan was made from.
 The waveform stays in source seconds — it is one WAV file — and the client projects it
 (§6). Three routes join `PROJECT_SCOPED_ROUTES`; one joins the audit guard.
 
@@ -394,13 +425,129 @@ lane.
 
 ## 7. Build order
 
-**E1 — the model and the render, no UI.** `services/edit.py` and its tests;
-`record["edit"]`; the three routes with ownership + audit entries;
-`services/revoice.py` applying the projection; `cut_picture` and the duration argument on
-`_build_replace_audio_cmd`; the plan returning projected sentences. Verifiable without a
-browser: `PUT` a `keep`, `GET` the plan, render, probe the output's duration equals
-`output_duration(keep)`. The anti-drift test gains its `keep` case here. This phase alone
-lets a cut be made through the API and proves the coordinate model.
+**E1 — the model and the render, no UI.** **DONE**, 2026-09-16; see CHANGELOG
+`#edit-timeline`. `record["edit"] = {"version": 1, "keep": [[start, end], …]}` in source
+seconds, absent meaning keep everything; `services/edit.py` (`validate_keep`,
+`output_duration`, `to_timeline` / `to_source`, `whole_source`, `project_transcript`,
+`stored_keep`, `apply` — the one entry point both callers use —, `payload`, `describe`,
+`set_edit`, `clear_edit`; `MAX_RANGES`, `PRECISION`, `EPSILON`); `EditIn` in
+`api/schemas.py`; `GET` / `PUT` / `DELETE /{pid}/edit` in the new `api/routers/edit.py`
+over `PROJECT_EDIT` in `api/audit.py`, the three routes in the ownership sweep; the render
+as the re-voice job in `services/revoice.py` — `edit.apply`, `cut_picture` into the job's
+scratch directory, the engine pointed at the cut, `edit_rendered_at` stamped and cleared;
+`cut_picture` / `cut_filtergraph` / `cut_timeout` / `CUT_POLL_SECONDS` and the
+`video_duration` argument on `replace_video_audio` in `core/video_creator.py` (this
+phase's plan put the argument on `_build_replace_audio_cmd`, which already had one);
+`narration.plan` returning the projected sentences (each with its `index` in the stored
+transcript), the output's `duration` and the `edit` block; `readable_project` /
+`writable_project` in `api/deps.py`; `NO_AUDIO_MESSAGE` in `services/waveform.py`. Proven
+without a browser exactly as this paragraph asked — `PUT` a `keep`, `GET` the plan, render:
+the 5 s cut on the corpus source came out 336.008 s by the WAV arithmetic and 10079 frames /
+335.967 s by the picture (its video stream is 41 ms shorter than its audio), first frame an
+I-frame at 0.000, framemd5-identical to the un-seeked graph. `frontend/` is untouched.
+Tests: `tests/test_edit.py` (80 — 41 functions, three parametrised: the arithmetic to
+exhaustion, the routes, the plan), `tests/test_generation_options.py` (+10, the picture
+step against a fake ffmpeg it polls, and the mux told its length), `tests/test_revoice.py`
+(+9, the render as the re-voice job), `tests/test_narration_plan.py` (+1, the anti-drift
+pin's `keep` case — a real plan beside the real `revoice_project` under the same edit),
+`tests/test_project_ownership.py` (+3 routes in the sweep) — **703 backend and 103 vitest
+across the suites**, ruff clean. Deliberately left: **the UI** — no gesture, nothing on the
+strip is drawn in timeline seconds, and a project carrying an edit shows the phase-3a
+timeline with *projected* blocks over a filmstrip and waveform still in source seconds
+(E2); the `video_duration` argument, which nothing passes (the third note below); the
+client copy of the projection (`frontend/src/lib/edit.ts`, E2); and per-range input seeking
+(the second note below).
+
+Nine things the build changed about the design above. Read them before E2, because several
+contradicted a line that read as written until E1 corrected it in place:
+
+- **§3's pin formula was wrong and the build is right.** The projection remaps `start` and
+  `end` only and leaves `offset` exactly as stored; the engine's `_pin`
+  (`services/processing.py`) adds the offset once, so the pin is `to_timeline(start) +
+  offset`. The formula as first written, `to_timeline(start + offset)`, has no answer when
+  an offset crosses a cut — the moment it names is in the hole — and applying the offset in
+  the projection as well would have applied it twice. §3 is corrected in place, because it
+  is the formula the next reader (E2's `edit.ts`) will copy.
+- **§4's timeout rule `60 + 3 × output_duration` was wrong, and the Reviewer proved it on
+  real footage.** `trim` is a filter and runs *after* the decode, so the work is bound by
+  how far into the source the last kept range **ends**, not by how much comes out: a 5 s
+  keep at the tail of the 341 s corpus source cost 3.9 s, and a seekless cut on a two-hour
+  source was killed by its own 75 s timeout (`cut_picture`'s docstring records both).
+  Shipped: an **input seek**, `-ss <first kept start>` before `-i` — which resets the
+  input's timestamps, so every trim in the graph is offset by that origin — and
+  `cut_timeout(keep) = 60 + 3 × (keep[-1][1] − keep[0][0])`. The seek is frame-exact: the
+  decoded frames' `-f framemd5` output is identical with and without it (a dev-only check,
+  since the suite fakes ffmpeg; the recipe is in the docstring), and the tail keep fell to
+  0.87 s. **The reusable rule:** size any filtergraph cut by its decode reach — the first
+  kept start to the last kept end — and move the start of that reach with an input seek.
+  The remaining limit: a head-plus-tail keep still decodes the whole file (correctly timed
+  now, rather than wrongly killed), and the fix when it matters is one seeked input per
+  range, concatenated — per-range input seeking.
+- **§4 step 3 contradicted §4's own first sentence, and the first sentence wins.** "The
+  caller supplies the duration" — but the caller of the mux *is* `_revoice_video`, and the
+  section opens with "nothing in `_revoice_video`". The argument shipped (`video_duration`
+  on `replace_video_audio`; `_build_replace_audio_cmd` already took one), is tested, and is
+  **unwired**: an edited run still probes, or pads to infinity where there is no ffprobe.
+  Measured unobservable: the mux is `-shortest`, and a plain `apad` and
+  `apad=whole_dur=336.008` produce identical output on the edited corpus render. Recorded in
+  the function's docstring and here rather than hidden; it is wired the day
+  `_revoice_video` is opened for some other reason.
+- **Trap 11 is false with offsets.** A sentence's *start* is clamped inside the output by
+  the projection, but its pin is that start plus an offset the projection does not touch,
+  so a sentence can still be pinned at or past the output's end under an edit and
+  `past_end` fires exactly as it does unedited — the plan marks it, the audition skips it,
+  the render's `-shortest` drops it. That machinery stays load-bearing; trap 11 is corrected
+  in place.
+- **Trap 14's "an edit can land mid-job" is false.** `PUT` and `DELETE /edit` take
+  `jobs.require_idle` like every other write of the record, so nothing lands on a project
+  while a job holds it. The re-read in the generate job still matters, for the reason the
+  comment in `api/routers/projects.py` (fixed in E1, as trap 14 asked) now gives:
+  `record_images_source` writes the record earlier in the *same* job, and a write that
+  passed `require_idle` an instant before the job was registered can land on it too; the
+  captured copy would revert either. §1.2's picture — job writers re-read and rely on
+  `require_idle` — was right; the parenthetical was not.
+- **`to_source` at a join returns the later range.** The end of one kept range and the
+  start of the next are the same output instant, and `to_timeline` maps both to it; but the
+  earlier range's end is a frame the output never shows (`trim`'s end is exclusive), so a
+  filmstrip or a playhead seeked there would show a cut frame. The later range wins, the
+  round trip still holds, and E2's `edit.ts` must copy that rule rather than take the first
+  match.
+- **Three consolidations the router forced.** The narration, slides and edit routers'
+  `readable` / `writable` (`guard` / `writable`) pairs were one thing spelled three times;
+  they live once in `api/deps.py` as `readable_project` / `writable_project`, with the
+  order (403 before the kind, the kind before the job) pinned by the ownership sweep.
+  `clear_edit` returns `(payload, had_edit)`, so a DELETE on a project with no edit writes
+  nothing and is not audited — an audit row for a no-op would be a lie. And the
+  "transcribe first" sentence the tracks route, the waveform's 404 and the edit's 409 all
+  say is one constant, `waveform.NO_AUDIO_MESSAGE`, shared with `TRACK_KINDS`.
+- **Cancel during the cut stops ffmpeg**, which is more than `_revoice_video` has ever
+  done. §1.5 asked the step to check the flag "between ranges", but the cut is one ffmpeg
+  run over every range, so there is no between: `cut_picture` runs it under `Popen`, polls
+  the flag and its deadline every `CUT_POLL_SECONDS` (0.5 s), kills the process on either,
+  and leaves nothing behind (the `.part` and the log are removed). The job ends as
+  cancelled with nothing rendered and nothing stamped. The flag is read once more before
+  the publish, so a cancel that lands between ffmpeg finishing and the rename discards the
+  finished part.
+- **The section end is the last kept sentence's, not `output_duration(keep)`.** §3 said
+  the engine's section end would be set to the sum of the ranges; as built the section is
+  `transcript_section(projected sentences)` — the one helper the plan and the render
+  share — so its end is the last kept sentence's clamped end, and it is the plan's
+  `duration` that is the output's length. The consequence is the one phase 3a already
+  accepted: the last spoken sentence's window is bounded in the render by ffprobe of the
+  cut picture (the sum less the 41 ms the video stream is shorter by), or by the section's
+  end where there is no ffprobe, and in the plan by the WAV-derived sum. Blast radius
+  unchanged: the last sentence, only when the bound would make it short enough to speed up.
+
+Three refusals E1 added that the design did not specify, and E2 must show rather than
+swallow: an edit written by a different `version` is a 400 on the GET and on the plan and
+an error from the render, never a silent keep-everything (rendering the whole video while
+the user believes a cut is applied is the one quiet failure this must never have); an edit
+whose `audio.wav` has since gone is read back with `source_duration: null` but neither
+applied nor ignored — the plan is a 400 and the render fails saying so; and an edit that
+removes every spoken sentence fails the render with "keep at least one, or clear the edit".
+Storing or clearing an edit also drops the memoised speaking rate (`forget_baseline`),
+because the rate is measured over the sentences the render will speak and the edit decides
+which those are.
 
 **E2 — the gesture.** Timeline-second drawing, range selection, ripple delete, the join
 marker, the undo stack, the Render button. This is the phase the owner drives.
@@ -408,6 +555,43 @@ marker, the undo stack, the Render button. This is the phase the owner drives.
 **E3 — the rest of Camtasia's editing set, in this order:** trim handles on a kept range's
 edges; split at the playhead as a first-class gesture (today it is "select a zero-length
 range"); markers; keyboard `J`/`K`/`L`; snapping to the playhead and to sentence pins.
+
+**E4 — the music lane.** Asked for by the owner on 2026-09-16 — *"I should be able to add
+music tracks over the top — another channel like Camtasia"* — and moved here out of §9's
+v2 list (§9 keeps mixing and ducking the *original* audio). Sketched to the model rather
+than designed: a second lane on the same timeline, which must fit the one-list shape above.
+
+- **The model.** `edit.version` 2 gains `"music": [{file, at, in, out, gain, fade_in,
+  fade_out}]` — `file` a name in the music **library**, `at` where the clip starts in
+  **timeline seconds** (the output's: music is placed on the cut, not on the source, so a
+  ripple delete before it moves it with the picture, which is what a Camtasia lane does),
+  `in` / `out` the slice of the file used, `gain` the clip's level, `fade_in` / `fade_out`
+  in seconds. `keep` is unchanged. The bump means `stored_keep`, which refuses any version
+  but its own, must read a version-1 record as "no music" rather than refuse it; and the
+  route payload and the plan's `edit` block carry the lane, so E2's drawing has it from the
+  same fetch as the ranges.
+- **The library.** Upload / list / delete under `assets/music` — porting vertical 2b
+  (`docs/porting/generation-options.md` §4), surveyed 2026-09-14 and never built: today
+  `assets/music/` does not exist and nothing serves it. The library API (filenames
+  validated like `_PID_RE`, audited) is the prerequisite, and it is the same work 2b needs
+  for the generate path, so it is built once, for both.
+- **The render** generalises the one-file pydub overlay in `replace_video_audio`
+  (`core/video_creator.py:327-342` at `4f39ae1`; the function gained the `video_duration`
+  lines above it in E1) — one file, looped to the narration's length, at a flat volume
+  from Studio settings; the only music support there is — to clips placed at `at`, sliced
+  `in`–`out`, faded, and summed under the master before the mux. `AudioMixer` is still not
+  the starting point (§1.3).
+- **The audition** schedules a music `AudioBuffer` at `at` exactly as `schedule()` places
+  the sentence clips, on the same Web Audio clock, with the clip's gain and fades applied
+  there; the library file is fetched and decoded once, like a sentence clip.
+- **Two rules the owner set earlier bind it, and neither is a design question:** **no
+  ducking** — the music sits at one static lower volume under the voice for the whole clip
+  (dynamic ducking was rejected for the choppy playback it produced) — and **music may
+  fade in and out while the voice never does** (the narration starts and stops clean, as
+  `assemble_master` leaves it).
+
+Sequenced **after E2**, because the lane needs E2's timeline-second drawing and transport
+to be placed and heard at all; it does not depend on E3.
 
 Budget E1 as phase-3a-sized and E2 as larger than E1: the drawing change touches every
 lane and the transport, and it is where the first-open-at-zero-scale class of bug lives.
@@ -424,36 +608,51 @@ nobody looked.
    Project; do not mutate.
 2. **No ffprobe, anywhere, ever.** `_FFPROBE_PATH` cannot be queried from outside
    `utils/config.py`; the packaged app has none. Source length = WAV header; output length =
-   `output_duration(keep)`; pass it into the mux.
+   `output_duration(keep)`; pass it into the mux. (E1: the argument to pass it exists on
+   `replace_video_audio` and is unwired — §7, third note — so an edited mux still probes;
+   harmless under `-shortest`.)
 3. **`FFMPEG_PATH`, not `"ffmpeg"`.** The eleven bare-name sites work by accident of
    `PATH` mutation. The new step is the first code that runs *only* in an edited project
    and must not inherit the accident.
 4. **Stream copy cannot cross a cut.** Measured: P-frames at the head, 2 s GOP. Re-encode.
    If someone later proposes "copy the middle ranges and re-encode only the boundary GOPs",
    the answer is the benchmark: 15.8 s for the whole file is not worth the complexity.
-5. **`-r` is the source frame rate.** Not `fps_for_transition`. A screen recording rendered
-   at 2 fps is the bug that would follow.
+5. **No `-r` at all.** `trim` + `setpts` + `concat` carry the source's own cadence through
+   (measured: 30 fps in, 30 fps out), and `cut_picture` passes no rate — its test forbids
+   one. What this trap guards is that it is never `fps_for_transition`: a screen recording
+   rendered at 2 fps is the bug that would follow. (This read "`-r` is the source frame
+   rate" until E1, while §4 already said no `-r`; the build is the latter.)
 6. **`extra="forbid"` on the edit schema.** Phase 1's lesson, and the whole-list PATCH still
    pays for it (`tests/test_narration_overrides.py:332-341`).
 7. **Take `store.project_lock`; never `slides.project_lock`; never none.** The two wrong
    writers in `ai_slides.py` are a smell, not a precedent.
 8. **Commit on release, never per frame.** The record is rewritten whole and served whole.
 9. **The new picture step must check cancellation** and scale its timeout; the existing
-   render checks nothing and has a fixed 600 s.
+   render checks nothing and has a fixed 600 s. Done in E1 — the flag polled while ffmpeg
+   runs and the process killed; the timeout scaled to the **decode reach**, not the output
+   (§7, second and eighth notes).
 10. **Write to `.part`, publish with `replace_with_retry`.** Windows sharing refusals are
     measured at 2 in 60 (`utils/helpers.py:21-55`), and a render holds several files open
     across seconds.
-11. **A sentence pinned past the output's end is now impossible by construction** — the
-    projection drops sentences in removed ranges and clamps the rest to the output. The
-    `past_end` machinery (`services/processing.py:1181-1194`, `frontend/src/lib/timeline.ts:38-39`)
-    stays for the unedited case and simply has nothing to do in the edited one.
+11. **A sentence can still be pinned past the output's end — by its offset.** The
+    projection drops sentences in removed ranges and clamps the rest's `start` to the
+    output, but the offset is applied after the projection (§3), so an offset can carry a
+    pin past the end under an edit exactly as it can without one. The `past_end` machinery
+    (`services/processing.py:1181-1194`, `frontend/src/lib/timeline.ts:38-39`) stays
+    load-bearing in both cases. (This read "impossible by construction" until E1; §7,
+    fourth note.)
 12. **The `revoice_sync_mode == "free"` branch is ignored.** Nothing writes it
     (`core/project_manager.py:66`; no route sets it); an edit is meaningless without pins.
 13. **`edit_rendered_at` busts the cache** for the same reason `revoiced_at` does — same
-    filename every run (`services/revoice.py:143-151`, `MUTABLE_MEDIA_HEADERS`).
-14. **The stale comment at `api/routers/projects.py:258-260`** says a preview and a full
-    render can run at once; `require_idle` refuses the second. The re-read is still right
-    for a different reason (an edit can land mid-job). Fix the comment in E1.
+    filename every run (`services/revoice.py:143-151`, `MUTABLE_MEDIA_HEADERS`). Shipped in
+    E1, and cleared by a whole-source run.
+14. **The stale comment at `api/routers/projects.py:258-260`** said a preview and a full
+    render can run at once; `require_idle` refuses the second. Fixed in E1. The re-read is
+    still right, but **not** because "an edit can land mid-job", as this trap first said:
+    `PUT` / `DELETE /edit` take `require_idle`, so no edit lands on a project a job holds.
+    It is right because `record_images_source` writes the record earlier in the same job,
+    and a write that passed `require_idle` an instant before the job was registered can
+    land on it too (§7, fifth note).
 15. **`data/cache` grows** exactly as before (trap 19 of the narration spec). Unchanged, and
     still not to be swept.
 16. **Dead code that looks like capability**: `AudioMixer`, `extract_keyframes`,
@@ -470,8 +669,9 @@ nobody looked.
   transport drive one `<video>`; the waveform is one WAV. Ranges of one source deliver
   cutting, trimming and ripple delete — which is what the owner cuts *for*. A second source
   is v2, with its own `version` of the edit and its own survey.
-- **Keeping or mixing the original audio, ducking, music envelopes.** v2. The narration
-  replacing the original is today's product and the reason people use it.
+- **Keeping or mixing the original audio, ducking.** v2. The narration replacing the
+  original is today's product and the reason people use it. Music over the top is **no
+  longer on this list**: it is E4 in §7, at the owner's request (2026-09-16).
 - **Transitions, callouts, cursor effects, animations, green screen, multi-camera,
   quizzing, screen recording.** Camtasia's, not ours. None serves a narrated demo.
 - **Editing while a render runs.** Camtasia does; the one-job rule forbids it; the render
@@ -501,9 +701,10 @@ look and the feel of its timeline, within the scope §9 draws.
 | `services/edit.py` (new) | validation, `to_timeline`/`to_source`, `project_transcript`, `output_duration` |
 | `services/revoice.py:79-118` | apply the projection before building the engine state |
 | `services/narration.py::plan` | return projected sentences and the edit |
-| `core/video_creator.py` | new `cut_picture`; duration argument on `_build_replace_audio_cmd:273` |
+| `core/video_creator.py` | `cut_picture`, `cut_filtergraph`, `cut_timeout` (E1); `video_duration` on `replace_video_audio` (E1, unwired) |
 | `api/routers/edit.py` (new) | the three routes |
 | `api/audit.py` | `PROJECT_EDIT` |
-| `frontend/src/lib/edit.ts` (new) | the client copy of the projection, shared fixtures |
-| `frontend/src/components/project/NarrationTimeline.tsx` | timeline-second drawing, selection, ripple delete, undo |
-| `tests/test_edit.py` (new), `tests/test_narration_plan.py`, `tests/test_project_ownership.py`, `tests/test_audit.py` | the guards |
+| `api/deps.py`, `api/schemas.py` | `readable_project` / `writable_project`; `EditIn` (E1) |
+| `frontend/src/lib/edit.ts` (new, E2) | the client copy of the projection, shared fixtures |
+| `frontend/src/components/project/NarrationTimeline.tsx` (E2) | timeline-second drawing, selection, ripple delete, undo |
+| `tests/test_edit.py` (new), `tests/test_revoice.py`, `tests/test_generation_options.py`, `tests/test_narration_plan.py`, `tests/test_project_ownership.py`, `tests/test_audit.py` | the guards |

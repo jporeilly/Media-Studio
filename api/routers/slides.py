@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from api.audit import SLIDES_BULK_UPDATE, SLIDES_RENDER, SLIDES_RESET, SLIDES_UNDO, SLIDES_UPDATE, audit
-from api.deps import current_user, require_project
+from api.deps import current_user, readable_project, writable_project
 from api.schemas import RenderRequest, SlidesBulkUpdate, SlideUpdate
 from core.project_manager import ProjectStateError
 from services import jobs, slides
@@ -29,22 +29,18 @@ router = APIRouter(prefix="/projects", tags=["slides"])
 PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 RENDER_JOB_KIND = "render-slides"
 
+NOT_A_DECK = "Only deck and PDF projects have slides."
+
 
 def guard(pid: str, user: dict) -> dict:
-    """The record of a deck or PDF project this user may touch: 404 when
-    missing, 403 when it is someone else's, 400 for a video."""
-    record = require_project(pid, user)
-    if record.get("kind") not in slides.SLIDE_KINDS:
-        raise HTTPException(status_code=400, detail="Only deck and PDF projects have slides.")
-    return record
+    """A deck or PDF project this user may touch (``api.deps.readable_project``):
+    404 missing, 403 someone else's, 400 a video."""
+    return readable_project(pid, user, slides.SLIDE_KINDS, NOT_A_DECK)
 
 
 def writable(pid: str, user: dict) -> dict:
-    """``guard`` plus: 409 while a job is attached to the project (``ProjectBusy``,
-    answered by the app-wide handler)."""
-    record = guard(pid, user)
-    jobs.require_idle(pid)
-    return record
+    """``guard`` plus 409 while a job holds the project."""
+    return writable_project(pid, user, slides.SLIDE_KINDS, NOT_A_DECK)
 
 
 def call(func):

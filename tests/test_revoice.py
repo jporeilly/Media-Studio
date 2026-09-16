@@ -29,6 +29,7 @@ class _FakeVideoProcessor:
 
     last = None
     captured = None
+    source = None  # the picture the engine was told to mux onto
 
     def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", provider="", **kwargs):
         self.voice_id = voice_id
@@ -43,6 +44,7 @@ class _FakeVideoProcessor:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"FAKEREVOICE")
         _FakeVideoProcessor.captured = pm
+        _FakeVideoProcessor.source = source_video
         return True
 
 
@@ -53,6 +55,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "PROJECTS_DIR", tmp_path / "projects")
     monkeypatch.setattr(config, "_config", {})
     monkeypatch.setattr(config, "save", lambda: None)
+    # An edited re-voice cuts the picture into a scratch directory under here.
+    monkeypatch.setattr(processing, "TEMP_DIR", tmp_path / "temp")
 
     from api import store as auth_store
 
@@ -453,3 +457,236 @@ def test_the_picture_keeps_its_own_container_type(client):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("video/quicktime"), r.headers["content-type"]
     assert "clip.mov" in r.headers["content-disposition"]
+
+
+# ── the edit: the render is this same job (porting vertical 6, phase E1) ──────
+
+def _wav(pid: str, seconds: float) -> None:
+    """The audio the transcribe step extracts, at the length the edit is
+    measured against."""
+    import wave
+
+    import numpy as np
+
+    with wave.open(str(store.PROJECTS_DIR / pid / "audio.wav"), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(1000)
+        wf.writeframes(np.zeros(int(round(seconds * 1000)), dtype="<i2").tobytes())
+
+
+def _cut_recorder(monkeypatch, *, ok=True, on_call=None):
+    """Stand in for ``core.video_creator.cut_picture``: records what it was
+    asked to cut and writes the intermediate the engine will be pointed at."""
+    from pathlib import Path
+
+    import core.video_creator as vc
+
+    calls = []
+
+    def fake_cut(source, keep, dst, video_bitrate="", cancel_check=None):
+        calls.append({"source": Path(source), "keep": keep, "dst": Path(dst),
+                      "video_bitrate": video_bitrate, "cancel_check": cancel_check})
+        if on_call:
+            on_call()
+        if ok:
+            Path(dst).write_bytes(b"CUT-PICTURE")
+        return ok
+
+    monkeypatch.setattr(vc, "cut_picture", fake_cut)
+    return calls
+
+
+def _revoice(client, pid):
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v"})
+    assert r.status_code == 200, r.text
+    return _wait_job(client, r.json()["job_id"])
+
+
+def test_a_project_with_no_edit_renders_exactly_as_before(client, monkeypatch):
+    """The path every project has always taken, byte for byte: the engine is
+    handed the source itself, nothing is cut, nothing new is stamped."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+
+    assert _revoice(client, pid)["status"] == "done"
+    assert cuts == []
+    source = store.PROJECTS_DIR / pid / "clip.mp4"
+    assert _FakeVideoProcessor.source == source
+    assert _FakeVideoProcessor.captured.state.source_video_path == str(source)
+    slide = _FakeVideoProcessor.captured.state.slides[0]
+    assert slide.original_segments == [
+        {"start": 0.0, "end": 2.0, "text": "Hello there."},
+        {"start": 2.0, "end": 4.0, "text": "This is a test."},
+    ]
+    assert "edit_rendered_at" not in store.get_project(pid)
+
+
+def test_an_edit_that_keeps_everything_takes_the_untouched_path(client, monkeypatch):
+    """A split removes nothing, so there is no picture step and no stamp."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[0.0, 2.0], [2.0, 4.0]]}).status_code == 200
+
+    assert _revoice(client, pid)["status"] == "done"
+    assert cuts == []
+    assert _FakeVideoProcessor.source == store.PROJECTS_DIR / pid / "clip.mp4"
+    assert _FakeVideoProcessor.captured.state.slides[0].original_segments[1] == {"start": 2.0, "end": 4.0, "text": "This is a test."}
+    assert "edit_rendered_at" not in store.get_project(pid)
+
+
+def test_an_edit_cuts_the_picture_first_and_renders_onto_the_cut(client, monkeypatch):
+    """The render IS the re-voice job with the projection applied: the kept
+    ranges become a picture-only intermediate under the job's scratch
+    directory, the engine is told THAT is the source, and it is handed the
+    transcript in timeline seconds - adjustments riding along untouched - so it
+    sees a transcript in a shorter recording and does what it always does."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.patch(f"/api/projects/{pid}/transcript/1", json={"offset": -0.4}).status_code == 200
+    keep = [[0.0, 1.0], [1.5, 4.0]]  # 3.5 s out of 4
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": keep}).status_code == 200
+    transcript_before = store.get_project(pid)["transcript"]
+
+    job = _revoice(client, pid)
+    assert job["status"] == "done", job
+
+    (cut,) = cuts
+    assert cut["source"] == store.PROJECTS_DIR / pid / "clip.mp4"
+    assert cut["keep"] == keep
+    assert cut["dst"].name == "clip_cut.mp4"
+    assert cut["dst"].parent.parent == processing.TEMP_DIR, "under the job's scratch directory"
+    assert cut["video_bitrate"] == "", "the default output preset's: the codec's own default"
+    from services import jobs as jobs_module
+
+    assert cut["cancel_check"] is jobs_module.cancel_requested_here
+
+    # The engine muxes onto the cut picture, not the source.
+    assert _FakeVideoProcessor.source == cut["dst"]
+    pm = _FakeVideoProcessor.captured
+    assert pm.state.source_video_path == str(cut["dst"])
+    slide = pm.state.slides[0]
+    assert slide.original_segments == [
+        {"start": 0.0, "end": 1.0, "text": "Hello there."},                    # clamped at its range's end
+        {"start": 1.5, "end": 3.5, "text": "This is a test.", "offset": -0.4},  # moved with the picture, offset untouched
+    ], "timeline seconds; the projection's own index does not reach the engine"
+    assert (slide.original_start_time, slide.original_end_time) == (0.0, 3.5)
+    assert slide.speaker_notes == "Hello there. This is a test.", "the joined PROJECTED text, so the engine takes the per-sentence path"
+
+    saved = store.get_project(pid)
+    assert saved["revoiced_video"] == "clip_revoiced.mp4"
+    assert saved["edit_rendered_at"] == saved["revoiced_at"], "stamped beside revoiced_at: same filename, so the cache-buster must move"
+    assert saved["transcript"] == transcript_before, "the transcript never moves"
+    assert saved["transcript"][1] == {"start": 2.0, "end": 4.0, "text": "This is a test.", "offset": -0.4}
+    assert not cut["dst"].parent.exists(), "the scratch directory is removed once the mux is done"
+
+
+def test_a_sentence_the_edit_removes_is_not_spoken(client, monkeypatch):
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _cut_recorder(monkeypatch)
+    rec = store.import_upload("clip.mp4", b"video-bytes")
+    pid = rec["id"]
+    store.set_transcript(pid, [
+        {"start": 0.0, "end": 2.0, "text": "Kept."},
+        {"start": 3.0, "end": 4.0, "text": "Cut away."},
+        {"start": 6.0, "end": 8.0, "text": "Kept too."},
+    ])
+    _wav(pid, 8.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[0.0, 2.5], [5.0, 8.0]]}).status_code == 200
+
+    assert _revoice(client, pid)["status"] == "done"
+    slide = _FakeVideoProcessor.captured.state.slides[0]
+    assert [s["text"] for s in slide.original_segments] == ["Kept.", "Kept too."]
+    assert [(s["start"], s["end"]) for s in slide.original_segments] == [(0.0, 2.0), (3.5, 5.5)]
+    assert slide.speaker_notes == "Kept. Kept too."
+
+
+def test_a_whole_source_run_clears_the_edit_stamp(client, monkeypatch):
+    """The record must never claim an edit the file on disk does not carry -
+    the same idiom as ``narration_audio``."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[0.0, 3.0]]}).status_code == 200
+    assert _revoice(client, pid)["status"] == "done"
+    assert store.get_project(pid).get("edit_rendered_at")
+
+    assert client.delete(f"/api/projects/{pid}/edit").status_code == 200
+    assert _revoice(client, pid)["status"] == "done"
+    assert "edit_rendered_at" not in store.get_project(pid)
+
+
+def test_a_cut_that_fails_fails_the_job_with_the_reason(client, monkeypatch):
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.captured = None
+    _cut_recorder(monkeypatch, ok=False)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[0.0, 3.0]]}).status_code == 200
+
+    job = _revoice(client, pid)
+    assert job["status"] == "error"
+    assert "could not be cut" in job["error"]
+    assert _FakeVideoProcessor.captured is None, "the engine never ran"
+    saved = store.get_project(pid)
+    assert "revoiced_video" not in saved and "edit_rendered_at" not in saved
+
+
+def test_a_cancel_during_the_cut_ends_the_job_as_cancelled(client, monkeypatch):
+    """The picture step is the one place a re-voice consults the cancel flag
+    (``_revoice_video`` never has); a cancelled cut ends the job the way the
+    AI loops end theirs, with nothing rendered and nothing stamped."""
+    from services import jobs as jobs_module
+
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.captured = None
+
+    def _cancel_this_job():
+        jobs_module.cancel(jobs_module.current_job_id())
+
+    _cut_recorder(monkeypatch, ok=False, on_call=_cancel_this_job)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[0.0, 3.0]]}).status_code == 200
+
+    job = _revoice(client, pid)
+    assert job["status"] == "done" and job["message"] == "Cancelled", job
+    assert job["result"] == {"cancelled": True}
+    assert _FakeVideoProcessor.captured is None
+    assert "revoiced_video" not in store.get_project(pid)
+
+
+def test_an_edit_that_cuts_every_spoken_sentence_is_refused(client, monkeypatch):
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[2.5, 4.0]]}).status_code == 200, "no sentence starts here"
+
+    job = _revoice(client, pid)
+    assert job["status"] == "error"
+    assert "removes every sentence" in job["error"]
+    assert cuts == []
+
+
+def test_an_edit_whose_audio_is_gone_is_refused_rather_than_rendered_on_trust(client, monkeypatch):
+    """The audio removed by hand after the edit was made: the ranges cannot be
+    measured, so the edit is neither applied nor silently ignored."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[0.0, 3.0]]}).status_code == 200
+    (store.PROJECTS_DIR / pid / "audio.wav").unlink()
+
+    job = _revoice(client, pid)
+    assert job["status"] == "error"
+    assert "extracted audio is missing" in job["error"]
+    assert cuts == []

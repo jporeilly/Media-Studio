@@ -64,6 +64,12 @@ class UnreadableAudio(Exception):
     """``audio.wav`` exists but is not PCM this module can read."""
 
 
+# What is said when the extracted audio is not there yet - by the waveform (a
+# 404) and by the edit (a 409: without the audio's length there is nothing to
+# check a cut against). One string, so the two never drift apart.
+NO_AUDIO_MESSAGE = "Transcribe the video first - its audio is extracted then."
+
+
 def audio_path(pid: str) -> Path:
     return store.PROJECTS_DIR / pid / AUDIO_NAME
 
@@ -260,7 +266,7 @@ def peaks_for(pid: str) -> dict:
     """
     path = audio_path(pid)
     if not path.is_file():
-        raise NoAudio("Transcribe the video first - its audio is extracted then.")
+        raise NoAudio(NO_AUDIO_MESSAGE)
 
     stat = path.stat()
     cache = _cache_path(pid)

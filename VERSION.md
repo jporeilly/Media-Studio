@@ -5,10 +5,13 @@
 assistant, generation options, transcription, re-voice, per-sentence narration adjustments
 on a transcript — phases 1 to 3a of the narration timeline, so an offset, a mute, a voice, a
 speed, a per-sentence preview and a timeline view with a filmstrip, a waveform and live
-audition of the whole narration against the picture, but no drag yet —, studio settings,
+audition of the whole narration against the picture, but no drag yet —, an edit on a video
+project — the kept ranges of its source, rendered by the re-voice with the picture cut
+first — through the API only, with no timeline gesture yet, studio settings,
 accounts, project ownership and the audit log, self-update, the Windows desktop installer;
 see CHANGELOG.md). Still to come: the music library, the rest of the narration timeline
-(dragging a sentence on the strip), and the rest of the administration work — notifications,
+(dragging a sentence on the strip), the edit timeline's gesture (cutting on the strip), and
+the rest of the administration work — notifications,
 a branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
 Enterprise remains the shipping product until parity.
 

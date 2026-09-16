@@ -524,16 +524,28 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
     one its room. Their ``speed`` is the job's (or their own explicit one) and
     nothing is synthesised for them.
 
+    **The edit is applied here, server-side** (``services.edit``): when the
+    project carries one that removes anything, every sentence comes back in
+    TIMELINE seconds - where it lands in the output, holes closed - ``duration``
+    is the output's length, and a sentence whose start was cut is not in the
+    list at all, exactly as it is not in the render. The projection is the
+    very function the render calls (``services.edit.apply``), never a copy of
+    it, for the same reason the rate rules are: the client must never
+    reimplement render arithmetic. ``edit`` in the payload is the edit the
+    sentences were projected through, so the timeline draws the one the plan
+    was made from.
+
     Writes nothing, so - like the preview - it deliberately does not take
     ``jobs.require_idle``: refusing to let someone audition while a re-voice
     runs would be a 409 on a read.
 
     Raises ``ProjectNotFound`` (404), ``SegmentNotFound`` (404, no transcript)
     or ``ValueError`` (400: a deck/PDF, an unknown provider, a voice from the
-    other provider, a speed out of range).
+    other provider, a speed out of range, an edit that cannot be read or
+    measured).
     """
     from core.tts_provider import effective_voice
-    from services import processing, waveform
+    from services import edit, processing, waveform
 
     record = _record(pid)
     transcript = _transcript(record)
@@ -542,11 +554,6 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
 
     provider_id, job_voice, job_speed = _job_narration(provider, voice, speed)
 
-    # ONE section spanning the whole transcript - the very thing
-    # ``services.revoice`` reconstructs for the engine, so the window the last
-    # sentence is measured against is the one the render will measure it
-    # against.
-    section = transcript_section(transcript)
     # The scale everything is drawn against: the WAV header's, never ffprobe's
     # and never the record's if the audio can speak for itself.
     #
@@ -569,19 +576,46 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
     # speed to the floor it is already at. Using ffprobe here instead is refused
     # by the porting spec's traps 5 and 6; using the record's duration would not
     # be the scale of the file being drawn.
-    duration = waveform.duration_for(pid)
+    source_duration = waveform.duration_for(pid)
+
+    # The edit, applied by the very function the render applies it with, so
+    # the two cannot disagree about whether it changes anything or where a
+    # sentence lands once it has. With no edit, or one that keeps everything,
+    # ``sentences`` is the transcript itself and nothing below changes.
+    # ``listed`` pairs each sentence with its index in the STORED transcript -
+    # what the narration routes address a sentence by; the projection drops
+    # sentences, so a position in its list is not it.
+    applied = edit.apply(record, transcript, source_duration)
+    listed = (
+        [(seg["index"], seg) for seg in applied.sentences] if applied.cut
+        else list(enumerate(transcript))
+    )
+
+    # ONE section spanning the whole transcript - the very thing
+    # ``services.revoice`` reconstructs for the engine, so the window the last
+    # sentence is measured against is the one the render will measure it
+    # against. Over the projected sentences when there is a cut, as the
+    # render's is.
+    section = transcript_section(applied.sentences)
+    duration = source_duration
     if duration is None:
         duration = float(record.get("duration") or 0.0) or section["end"]
+    if applied.cut:
+        duration = applied.output_duration
 
     # The sentences the render will actually speak, in order - empty and muted
     # ones filtered out BEFORE any window maths, exactly as ``_revoice_video``
     # filters them, which is what gives the sentence before a muted one its room.
-    spoken_at = [
-        i for i, seg in enumerate(transcript)
+    spoken_pairs = [
+        (index, seg) for index, seg in listed
         if isinstance(seg, dict) and (seg.get("text") or "").strip() and not seg.get("muted")
     ]
-    spoken = [(transcript[i], section) for i in spoken_at]
-    rate = baseline_rate(pid, transcript, provider_id, job_voice) if spoken else processing.DEFAULT_BASELINE_RATE
+    spoken_at = [index for index, _ in spoken_pairs]
+    spoken = [(seg, section) for _, seg in spoken_pairs]
+    # Measured over the sentences the render will measure it over: the
+    # projected ones when there is a cut (``_revoice_video`` calibrates on the
+    # segments it is handed, and it is handed the projection).
+    rate = baseline_rate(pid, applied.sentences, provider_id, job_voice) if spoken else processing.DEFAULT_BASELINE_RATE
 
     # The window each spoken sentence has, and - separately - the ones the
     # render will throw away because their pin is at or past the end of the
@@ -599,7 +633,7 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
         windows[index] = max(0.0, next_start - pin)
 
     sentences = []
-    for index, seg in enumerate(transcript):
+    for index, seg in listed:
         if not isinstance(seg, dict):
             # A hand-edited project.json can hold anything. The window pass above
             # skips a non-dict segment; this one must not then answer 500 on it.
@@ -652,6 +686,11 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
         # drift from the loop it is supposed to be predicting.
         "squeeze_tolerance": processing.SQUEEZE_TOLERANCE,
         "squeeze_max_factor": processing.SQUEEZE_MAX_FACTOR,
+        # The edit the sentences above were projected through - the kept
+        # ranges in SOURCE seconds (null = everything), the source's length and
+        # the output's - so the client draws the very edit the plan was made
+        # from rather than fetching it separately and risking a newer one.
+        "edit": edit.payload(applied.keep, source_duration),
         "sentences": sentences,
     }
 

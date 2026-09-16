@@ -713,3 +713,292 @@ def test_build_video_threads_each_slides_pause_override_into_its_clip(tmp_path, 
     assert seen["pauses"] == [2.5, None, None], "the creator falls back to the job's pause for None"
     assert seen["transition_pause"] == 1.0
     assert processor._pause_after(pm.state.slides[0]) == 2.5 and processor._pause_after(pm.state.slides[2]) == 1.0
+
+
+# -- the edit's picture step, and the mux told its length (vertical 6, phase E1) --
+
+# The real 5m41s source's edit from the spec: 5 s cut out of 341.008.
+KEEP = [[0.0, 47.3], [52.3, 341.008]]
+
+
+class _FakeFfmpeg:
+    """A ``subprocess.Popen`` stand-in for the picture cut, which POLLS ffmpeg
+    rather than blocking on it: records the command, "runs" for ``polls``
+    polls, then writes the output file (the last argument) and exits with
+    ``returncode`` - or, with a huge ``polls``, never exits on its own, so the
+    loop has to kill it."""
+
+    script: dict = {}
+    instances: list = []
+
+    def __init__(self, cmd, **kwargs):
+        self.cmd = list(cmd)
+        self.kwargs = kwargs
+        self.returncode = None
+        self.polls = 0
+        self.killed = False
+        type(self).instances.append(self)
+        if self.script.get("raise"):
+            raise self.script["raise"]
+
+    def poll(self):
+        if self.returncode is not None:
+            return self.returncode
+        if self.polls >= self.script.get("polls", 0):
+            if self.script.get("writes", True):
+                Path(self.cmd[-1]).write_bytes(b"x")
+            stderr = self.kwargs.get("stderr")
+            if self.script.get("stderr") and hasattr(stderr, "write"):
+                stderr.write(self.script["stderr"])
+            self.returncode = self.script.get("returncode", 0)
+            return self.returncode
+        self.polls += 1
+        return None
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _fake_cut(monkeypatch, path="ffmpeg-test", **script):
+    """Install the fake ffmpeg the cut polls; returns the processes started."""
+    _FakeFfmpeg.script = script
+    _FakeFfmpeg.instances = []
+    monkeypatch.setattr(subprocess, "Popen", _FakeFfmpeg)
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", path)
+    monkeypatch.setattr(video_creator, "CUT_POLL_SECONDS", 0)
+    return _FakeFfmpeg.instances
+
+
+def _leaves_nothing(dst: Path) -> bool:
+    part = dst.with_suffix(".part.mp4")
+    return not dst.exists() and not part.exists() and not part.with_suffix(".log").exists()
+
+
+def test_the_cut_uses_the_resolved_ffmpeg_and_the_proven_filtergraph(tmp_path, monkeypatch):
+    """One ffmpeg run, and ``FFMPEG_PATH`` rather than the bare name: the older
+    call sites work only because utils.config prepends the binary's directory
+    to PATH at import, and this is the first step that runs ONLY for an edited
+    project. Every range trimmed and re-timed from zero, then concatenated;
+    picture only; a full re-encode (a cut lands on P-frames, so a stream copy
+    cannot start there); and NO frame rate - the graph carries the source's
+    own cadence, and it must never be ``fps_for_transition``'s 2 fps."""
+    started = _fake_cut(monkeypatch, path="C:/tools/ffmpeg.exe")
+    source = tmp_path / "finished.mp4"
+    source.write_bytes(b"mp4")
+    dst = tmp_path / "scratch" / "finished_cut.mp4"
+
+    assert video_creator.cut_picture(source, KEEP, dst) is True
+    (proc,) = started
+    cmd = proc.cmd
+    assert cmd[0] == "C:/tools/ffmpeg.exe"
+    assert cmd[cmd.index("-ss") + 1] == "0.000" and cmd.index("-ss") < cmd.index("-i")
+    assert cmd[cmd.index("-i") + 1] == str(source)
+    # The graph as the spec wrote it: an edit from the head has no offset.
+    assert cmd[cmd.index("-filter_complex") + 1] == video_creator.cut_filtergraph(KEEP) == (
+        "[0:v]trim=start=0.000:end=47.300,setpts=PTS-STARTPTS[v0];"
+        "[0:v]trim=start=52.300:end=341.008,setpts=PTS-STARTPTS[v1];"
+        "[v0][v1]concat=n=2:v=1:a=0[v]"
+    )
+    assert cmd[cmd.index("-map") + 1] == "[v]" and "-an" in cmd and "-nostats" in cmd
+    assert cmd[cmd.index("-c:v") + 1] == "libx264" and cmd[cmd.index("-preset") + 1] == "ultrafast"
+    assert "copy" not in cmd and "-r" not in cmd and "-b:v" not in cmd
+    part = dst.with_suffix(".part.mp4")
+    assert cmd[-2:] == ["-y", str(part)], "written aside, then published"
+    assert proc.kwargs["stdin"] is subprocess.DEVNULL and hasattr(proc.kwargs["stderr"], "write"), (
+        "stderr goes to a file, never a pipe nobody reads"
+    )
+    assert dst.exists() and not part.exists() and not part.with_suffix(".log").exists()
+
+
+def test_the_cut_seeks_to_the_first_kept_range_and_offsets_every_trim(tmp_path, monkeypatch):
+    """``trim`` is a filter and runs AFTER the decode, so without an input
+    seek ffmpeg decodes every frame from 0 to the last kept end and discards
+    most of them: a 5 s keep at the tail of the 341 s corpus source cost 3.9 s
+    without the seek and 0.87 s with it, and on a two-hour source the seekless
+    cut was killed by its own timeout. ``-ss`` before ``-i`` starts the decode
+    at the first kept range and resets the input's timestamps, so every trim
+    is offset by it. Frame-exact - the decoded frames' framemd5 is identical
+    with and without the seek - which is a dev-only check, since this suite
+    fakes ffmpeg (the recipe is in ``cut_picture``'s docstring)."""
+    started = _fake_cut(monkeypatch)
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"mp4")
+    keep = [[52.3, 60.0], [70.0, 80.5]]
+
+    assert video_creator.cut_picture(source, keep, tmp_path / "cut.mp4") is True
+    (proc,) = started
+    cmd = proc.cmd
+    assert cmd.index("-ss") < cmd.index("-i"), "an INPUT seek: before -i, never after"
+    assert cmd[cmd.index("-ss") + 1] == "52.300"
+    assert cmd[cmd.index("-filter_complex") + 1] == (
+        "[0:v]trim=start=0.000:end=7.700,setpts=PTS-STARTPTS[v0];"
+        "[0:v]trim=start=17.700:end=28.200,setpts=PTS-STARTPTS[v1];"
+        "[v0][v1]concat=n=2:v=1:a=0[v]"
+    )
+    assert video_creator.cut_filtergraph(keep, 52.3) == cmd[cmd.index("-filter_complex") + 1]
+
+
+def test_a_single_range_still_concatenates_and_a_preset_bitrate_is_passed_through(tmp_path, monkeypatch):
+    started = _fake_cut(monkeypatch)
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"mp4")
+
+    assert video_creator.cut_picture(source, [[10.0, 20.0]], tmp_path / "cut.mp4", video_bitrate="10M") is True
+    (proc,) = started
+    cmd = proc.cmd
+    assert cmd[cmd.index("-ss") + 1] == "10.000"
+    assert cmd[cmd.index("-filter_complex") + 1] == (
+        "[0:v]trim=start=0.000:end=10.000,setpts=PTS-STARTPTS[v0];[v0]concat=n=1:v=1:a=0[v]"
+    )
+    assert cmd[cmd.index("-b:v") + 1] == "10M"
+    assert video_creator.cut_filtergraph([[0, 1], [2, 3], [4, 5]]).endswith("[v0][v1][v2]concat=n=3:v=1:a=0[v]")
+
+
+def test_the_cuts_timeout_is_bound_by_the_decode_reach_not_the_output():
+    """The work is how far into the source ffmpeg has to decode - from the
+    first kept start to the last kept end - not how much comes out. A 5 s keep
+    at the tail of a two-hour source decodes nothing but those 5 s once the
+    seek is in place; a 5 s keep at the head PLUS one at the tail decodes the
+    whole two hours. Sized to the output, the second was killed at 75 s."""
+    assert video_creator.cut_timeout([[300.0, 305.0]]) == pytest.approx(75.0)
+    assert video_creator.cut_timeout([[0.0, 5.0], [300.0, 305.0]]) == pytest.approx(975.0), (
+        "the same 10 s of output, 300 s of decode"
+    )
+    assert video_creator.cut_timeout([[7200.0, 7205.0]]) == pytest.approx(75.0)
+    assert video_creator.cut_timeout(KEEP) == pytest.approx(60 + 3 * 341.008)
+
+
+def test_a_stalled_cut_is_killed_at_its_deadline_and_leaves_nothing_behind(tmp_path, monkeypatch):
+    """The loop keeps the timeout: an ffmpeg that never finishes is killed
+    once the deadline passes, not waited on."""
+    started = _fake_cut(monkeypatch, polls=10**9)
+    ticks = iter(range(0, 100_000, 50))
+    monkeypatch.setattr(video_creator, "_clock", lambda: float(next(ticks)))
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"mp4")
+    dst = tmp_path / "cut.mp4"
+
+    assert video_creator.cut_picture(source, [[300.0, 305.0]], dst) is False
+    (proc,) = started
+    assert proc.killed is True
+    assert proc.polls <= 3, "a 75 s deadline on a clock ticking 50 s a poll"
+    assert _leaves_nothing(dst)
+
+
+def test_a_cancel_while_ffmpeg_runs_kills_it(tmp_path, monkeypatch):
+    """Cancel means stop. This is the one step of a re-voice that looks at the
+    flag, and a cut can run for a minute or more, so it is polled while
+    ffmpeg runs and the process is killed - not merely its result discarded
+    when it is done."""
+    started = _fake_cut(monkeypatch, polls=10**9)
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"mp4")
+    dst = tmp_path / "cut.mp4"
+    asked = {"n": 0}
+
+    def cancel_check():
+        asked["n"] += 1
+        return asked["n"] >= 3  # not before it starts; on the second poll
+
+    assert video_creator.cut_picture(source, KEEP, dst, cancel_check=cancel_check) is False
+    (proc,) = started
+    assert proc.killed is True and proc.returncode == -9
+    assert _leaves_nothing(dst)
+
+
+def test_the_cut_consults_the_cancel_flag_before_ffmpeg_starts_and_before_publishing(tmp_path, monkeypatch):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"mp4")
+    dst = tmp_path / "cut.mp4"
+
+    started = _fake_cut(monkeypatch)
+    assert video_creator.cut_picture(source, KEEP, dst, cancel_check=lambda: True) is False
+    assert started == [] and _leaves_nothing(dst)
+
+    # A cancel that lands between ffmpeg finishing and the publish: the
+    # finished part is discarded rather than published. (The fake exits on
+    # its first poll, so the flag is read exactly twice: before the start and
+    # before the publish.)
+    started = _fake_cut(monkeypatch)
+    answers = iter([False, True])
+    assert video_creator.cut_picture(source, KEEP, dst, cancel_check=lambda: next(answers, True)) is False
+    (proc,) = started
+    assert proc.killed is False and proc.returncode == 0
+    assert _leaves_nothing(dst)
+
+
+def test_a_failed_cut_answers_false_and_leaves_nothing_behind(tmp_path, monkeypatch):
+    """The same contract as ``replace_video_audio``: never an exception past
+    the boundary, and never a half-written picture at the destination."""
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"mp4")
+    dst = tmp_path / "cut.mp4"
+
+    _fake_cut(monkeypatch, returncode=1, stderr="Invalid argument")
+    assert video_creator.cut_picture(source, KEEP, dst) is False
+    assert _leaves_nothing(dst), "the partial file and the log are removed"
+
+    _fake_cut(monkeypatch, writes=False)
+    assert video_creator.cut_picture(source, KEEP, dst) is False, "exit 0 but no picture"
+    assert _leaves_nothing(dst)
+
+    _fake_cut(monkeypatch, **{"raise": OSError("ffmpeg crashed")})
+    assert video_creator.cut_picture(source, KEEP, dst) is False, "ffmpeg could not even start"
+    assert _leaves_nothing(dst)
+
+    started = _fake_cut(monkeypatch, path=None)
+    assert video_creator.cut_picture(source, KEEP, dst) is False, "no ffmpeg at all"
+    assert started == []
+    started = _fake_cut(monkeypatch)
+    assert video_creator.cut_picture(source, [], dst) is False, "nothing to keep"
+    assert started == []
+
+
+def test_the_mux_takes_the_edits_length_and_never_probes_for_it(tmp_path, monkeypatch):
+    """An edited output's length is the sum of its kept ranges, known before
+    ffmpeg runs, so the mux is told it: ``apad`` pads the narration to exactly
+    that and ffprobe - which the packaged app does not have - is never asked."""
+    calls = _fake_ffmpeg(monkeypatch)
+    cut = tmp_path / "finished_cut.mp4"
+    cut.write_bytes(b"mp4")
+    master = tmp_path / "master.mp3"
+    master.write_bytes(b"mp3")
+    out = tmp_path / "finished_revoiced.mp4"
+
+    assert video_creator.replace_video_audio(cut, master, out, video_duration=336.008) is True
+    (cmd,) = calls
+    assert "ffprobe" not in cmd[0]
+    assert cmd[cmd.index("-af") + 1] == "apad=whole_dur=336.008"
+    assert cmd[cmd.index("-c:v") + 1] == "copy", "the picture was already re-encoded by the cut; the mux copies it"
+    assert out.exists()
+
+
+def test_without_a_length_the_mux_probes_exactly_as_before(tmp_path, monkeypatch):
+    """The unedited path is unchanged: no argument, one ffprobe, its answer in
+    ``whole_dur`` - and a plain ``apad`` when the probe answers nothing."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "ffprobe" in cmd[0]:
+            return types.SimpleNamespace(returncode=0, stdout="12.5\n", stderr="")
+        Path(cmd[-1]).write_bytes(b"x")
+        return types.SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"mp4")
+    master = tmp_path / "master.mp3"
+    master.write_bytes(b"mp3")
+
+    assert video_creator.replace_video_audio(video, master, tmp_path / "out.mp4") is True
+    assert calls[0][0] == "ffprobe" and calls[1][calls[1].index("-af") + 1] == "apad=whole_dur=12.500"
+
+    calls.clear()
+    monkeypatch.setattr(video_creator, "_probe_duration", lambda path: None)
+    assert video_creator.replace_video_audio(video, master, tmp_path / "out2.mp4") is True
+    assert calls[0][calls[0].index("-af") + 1] == "apad", "no length known: pad to infinity, -shortest bounds it"

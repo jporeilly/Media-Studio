@@ -10,6 +10,7 @@ through ``require_project`` rather than each repeating ``get_project`` + a 404.
 from fastapi import Depends, HTTPException, Request, status
 
 from api.store import validate_session
+from services import jobs
 from services import projects as project_store
 from utils.logger import get_logger
 
@@ -149,4 +150,33 @@ def require_project(pid: str, user: dict) -> dict:
         # user_id is one nobody claimed, so anyone may cancel it; a project with
         # no owner_id predates ownership and belongs to the admins.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PROJECT_FORBIDDEN)
+    return record
+
+
+# ── projects of one kind ─────────────────────────────────────────────────────
+# Every feature router works on projects of certain kinds only - the slide
+# editor and the AI assistant on decks and PDFs, the narration editor and the
+# edit on videos - and each of them used to spell the same two helpers out for
+# itself. The pair lives here once: ``require_project`` (404 / 403), then the
+# kind (400 with the feature's own wording), then, for a write, ``require_idle``
+# (409, answered by the app-wide ``ProjectBusy`` handler). The order matters
+# and is pinned by the ownership sweep: another editor gets the 403 before the
+# kind or the job is looked at.
+
+def readable_project(pid: str, user: dict, kinds: tuple[str, ...], refusal: str) -> dict:
+    """The record of a project of one of ``kinds`` this user may see: 404 when
+    missing, 403 when it is someone else's, 400 (``refusal``) when it is a
+    project of another kind."""
+    record = require_project(pid, user)
+    if record.get("kind") not in kinds:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=refusal)
+    return record
+
+
+def writable_project(pid: str, user: dict, kinds: tuple[str, ...], refusal: str) -> dict:
+    """``readable_project`` plus: 409 while a job is attached to the project
+    (``services.jobs.ProjectBusy``) - a job holds its own copy of what a write
+    would change."""
+    record = readable_project(pid, user, kinds, refusal)
+    jobs.require_idle(pid)
     return record

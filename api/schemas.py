@@ -147,6 +147,25 @@ class SegmentOverride(BaseModel):
     speed: StrictFloat | None = Field(None, ge=MIN_SPEED, le=MAX_SPEED)
 
 
+class EditIn(BaseModel):
+    """PUT /api/projects/{pid}/edit: the whole list of kept ranges of the
+    source, in source seconds, replacing whatever was stored (the list is
+    small; a partial PATCH would buy nothing).
+
+    The numbers are strict so a boolean is not coerced to 1.0 (an int is still
+    fine), and an unknown key is a 422 - ``extra="forbid"``, the lesson
+    ``TranscriptSegment`` learned, because pydantic's default would drop it
+    silently. Everything else about a range - its order, an overlap, a bound
+    past the source, NaN and infinity (which JSON lets through and a strict
+    float accepts) - is ``services.edit.validate_keep``'s to refuse, with a
+    400 that names the range.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    keep: list[list[StrictFloat | StrictInt]]
+
+
 class GenerateRequest(BaseModel):
     """POST /api/projects/{pid}/generate. Every field is optional and defaults
     to today's behaviour: the narration and the six render options that have a

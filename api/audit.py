@@ -61,6 +61,10 @@ PROJECT_TRANSCRIPT_EDIT = "project.transcript_edit"
 PROJECT_TRANSCRIPT_TIMING = "project.transcript_timing"
 PROJECT_GENERATE = "project.generate"
 PROJECT_REVOICE = "project.revoice"
+# The edit: which ranges of the source are kept (``services.edit``), stored or
+# cleared. The detail carries the range count and the seconds removed - never
+# the times, which would say where every cut is, and never any text.
+PROJECT_EDIT = "project.edit"
 
 # The slide editor.
 SLIDES_UPDATE = "slides.update"
@@ -90,7 +94,7 @@ ACTIONS: tuple[str, ...] = (
     USER_CREATE, USER_UPDATE, USER_RESET_PASSWORD,
     SETTINGS_UPDATE, SETTINGS_PASSWORD_POLICY,
     PROJECT_IMPORT, PROJECT_DELETE, PROJECT_TRANSCRIBE, PROJECT_TRANSCRIPT_EDIT,
-    PROJECT_TRANSCRIPT_TIMING, PROJECT_GENERATE, PROJECT_REVOICE,
+    PROJECT_TRANSCRIPT_TIMING, PROJECT_GENERATE, PROJECT_REVOICE, PROJECT_EDIT,
     SLIDES_UPDATE, SLIDES_BULK_UPDATE, SLIDES_RENDER, SLIDES_UNDO, SLIDES_RESET,
     AI_NOTES, AI_ENHANCE, AI_QA, AI_TONE, AI_TRANSLATE, AI_PACING, AI_QA_DOC, AI_QA_FIX,
     JOB_CANCEL, SYSTEM_UPDATE, SYSTEM_RESTART, AUDIT_PURGE,

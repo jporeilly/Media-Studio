@@ -19,7 +19,7 @@ from api.audit import (
 from api.deps import current_user, may_access_project, require_project
 from api.schemas import GenerateRequest, RevoiceRequest, TranscribeRequest, TranscriptUpdate
 from api.store import display_name_of
-from services import jobs, narration, projects as store, revoice, slides, studio_settings, transcription
+from services import jobs, narration, projects as store, revoice, slides, studio_settings, transcription, waveform
 from services.output_presets import get_preset
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -256,8 +256,13 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
 
         video_path = get_output_filename(source_path, output_dir)
         # Saved onto the record as it is NOW, not the copy captured at request
-        # time: a preview and a full render of the same project can run at
-        # once, and the copy would overwrite whatever the other job saved.
+        # time. (This used to say a preview and a full render of the same
+        # project can run at once; they cannot - ``jobs.start`` refuses a
+        # second job while one holds the project. The re-read still matters:
+        # ``record_images_source`` above has already written the record during
+        # this very job, and a write that passed ``require_idle`` an instant
+        # before the job was registered can land on it too. The captured copy
+        # would revert either.)
         current = store.get_project(pid) or record
         outputs = dict(current.get("outputs") or {})
         # Lets the UI cache-bust the players: a re-render keeps the file names.
@@ -390,7 +395,8 @@ TRACK_KINDS = {
     # A picture's media type is taken from its own extension: .mov, .mkv, .avi,
     # .webm and .m4v are all importable, and calling them video/mp4 would be a lie.
     "picture": (None, "source_filename", "This project has no source video."),
-    "original-audio": ("audio/wav", None, "Transcribe the video first - its audio is extracted then."),
+    # The same words the waveform and the edit use for the same missing file.
+    "original-audio": ("audio/wav", None, waveform.NO_AUDIO_MESSAGE),
     "narration": ("audio/mpeg", "narration_audio", "Re-voice the video first."),
 }
 

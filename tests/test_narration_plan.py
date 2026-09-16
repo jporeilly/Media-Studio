@@ -261,31 +261,17 @@ def test_a_sentence_with_its_own_speed_bypasses_the_rule_entirely(client):
     assert sentences[1]["speed"] == 1.3
 
 
-def test_the_plans_speeds_are_the_speeds_the_render_really_synthesises_at(client, tmp_path, monkeypatch):
-    """The anti-drift pin, and the reason the plan is a server route at all.
-
-    A real ``_revoice_video`` runs beside a real plan over the SAME transcript,
-    with the same baseline and the same job narration, and the speeds it asks
-    the provider for must be the speeds the plan advertised. Reimplementing the
-    window maths in TypeScript would have passed every other test in this file
-    and failed this one the first time either side changed.
-    """
+def _stub_media_engine(monkeypatch, tmp_path, *, video_seconds: float) -> FakeTTS:
+    """Everything BELOW the rate rules, stubbed, so a real ``_revoice_video``
+    can run: pydub (segments carry only a length), the scratch directory, the
+    two clip fixes, the mux (which writes the output it claims to have made)
+    and the duration probe. Returns the provider the render will synthesise
+    with, patched onto the class so a processor built inside
+    ``services.revoice`` gets it too."""
     import sys
     import types
+    from pathlib import Path
 
-    from core.project_manager import ProjectManager
-
-    segments = [
-        {"start": 0.0, "end": 2.0, "text": FAST[0]["text"]},
-        {"start": 5.0, "end": 7.0, "text": "A short one."},
-        {"start": 8.0, "end": 9.0, "text": FAST[1]["text"], "speed": 1.45},
-        {"start": 12.0, "end": 14.0, "text": "Muted, so the one before it inherits its room.", "muted": True},
-        {"start": 20.0, "end": 24.0, "text": "The last sentence, which runs to the end of the video."},
-    ]
-    pid = _video(segments, audio_seconds=30.0)
-    plan = _plan(client, pid, speed=1.1).json()
-
-    # --- and now the render, with only the media engine stubbed out ----------
     class _Seg:
         def __init__(self, ms=0):
             self.ms = ms
@@ -308,8 +294,6 @@ def test_the_plans_speeds_are_the_speeds_the_render_really_synthesises_at(client
             return _Seg(self.ms)
 
         def export(self, path, **kwargs):
-            from pathlib import Path
-
             Path(path).write_bytes(b"MASTER")
 
     fake_pydub = types.ModuleType("pydub")
@@ -322,6 +306,48 @@ def test_the_plans_speeds_are_the_speeds_the_render_really_synthesises_at(client
         return d
 
     monkeypatch.setattr(processing, "_job_scratch", _scratch)
+
+    rendered = FakeTTS()
+    monkeypatch.setattr(processing.VideoProcessor, "_create_tts_generator", lambda self: rendered)
+    monkeypatch.setattr(processing.VideoProcessor, "_calibrate_tts_baseline",
+                        lambda self, *a, **k: processing.DEFAULT_BASELINE_RATE)
+
+    import core.video_creator as vc
+
+    def _mux(**kw):
+        Path(kw["output_path"]).write_bytes(b"MP4")
+        return True
+
+    monkeypatch.setattr(vc, "replace_video_audio", _mux)
+    monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_probe_duration", lambda path: video_seconds)
+    return rendered
+
+
+def test_the_plans_speeds_are_the_speeds_the_render_really_synthesises_at(client, tmp_path, monkeypatch):
+    """The anti-drift pin, and the reason the plan is a server route at all.
+
+    A real ``_revoice_video`` runs beside a real plan over the SAME transcript,
+    with the same baseline and the same job narration, and the speeds it asks
+    the provider for must be the speeds the plan advertised. Reimplementing the
+    window maths in TypeScript would have passed every other test in this file
+    and failed this one the first time either side changed.
+    """
+    from core.project_manager import ProjectManager
+
+    segments = [
+        {"start": 0.0, "end": 2.0, "text": FAST[0]["text"]},
+        {"start": 5.0, "end": 7.0, "text": "A short one."},
+        {"start": 8.0, "end": 9.0, "text": FAST[1]["text"], "speed": 1.45},
+        {"start": 12.0, "end": 14.0, "text": "Muted, so the one before it inherits its room.", "muted": True},
+        {"start": 20.0, "end": 24.0, "text": "The last sentence, which runs to the end of the video."},
+    ]
+    pid = _video(segments, audio_seconds=30.0)
+    plan = _plan(client, pid, speed=1.1).json()
+
+    # --- and now the render, with only the media engine stubbed out ----------
+    rendered = _stub_media_engine(monkeypatch, tmp_path, video_seconds=30.0)
 
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"video")
@@ -336,17 +362,7 @@ def test_the_plans_speeds_are_the_speeds_the_render_really_synthesises_at(client
     slide0.original_end_time = section["end"]
     pm.state.source_video_path = str(source)
 
-    rendered = FakeTTS()
     proc = processing.VideoProcessor(voice_id=STUDIO_EDGE_VOICE, speed=1.1)
-    monkeypatch.setattr(proc, "_create_tts_generator", lambda: rendered)
-    monkeypatch.setattr(proc, "_calibrate_tts_baseline", lambda *a, **k: processing.DEFAULT_BASELINE_RATE)
-
-    import core.video_creator as vc
-    monkeypatch.setattr(vc, "replace_video_audio", lambda **kw: True)
-    monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
-    monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
-    monkeypatch.setattr(vc, "_probe_duration", lambda path: 30.0)
-
     assert proc._revoice_video(pm, source, tmp_path / "out.mp4") is True
 
     # What the render actually asked the provider to say, and how fast.
@@ -357,6 +373,74 @@ def test_the_plans_speeds_are_the_speeds_the_render_really_synthesises_at(client
         "be auditioning clips the re-voice will not reuse"
     )
     assert [c["voice_id"] for c in rendered.calls] == [s["voice"] for s in spoken]
+
+
+def test_the_plans_speeds_are_the_render_s_under_an_edit_too(client, tmp_path, monkeypatch):
+    """The ``keep`` case of the pin above (the edit timeline, phase E1), and
+    the reason the projection is ONE function in ``services.edit`` rather than
+    a copy on each side.
+
+    Same transcript, same edit stored through the API, a real plan beside the
+    real ``services.revoice.revoice_project`` - the projection, the picture
+    step (stubbed to a file) and a real ``_revoice_video`` - and the provider
+    must be asked for exactly the plan's sentences at exactly the plan's
+    speeds. The cut moves the fourth sentence closer to the second, so the
+    second's window shrinks; the third starts inside the hole and is in
+    neither the plan nor the render; and the transcript on disk never moves.
+    """
+    from pathlib import Path
+
+    from services import revoice
+
+    segments = [
+        {"start": 0.0, "end": 2.0, "text": FAST[0]["text"]},
+        {"start": 5.0, "end": 7.0, "text": "A short one."},
+        {"start": 6.5, "end": 7.4, "text": "Cut away with the picture it was spoken over."},
+        {"start": 8.0, "end": 9.0, "text": FAST[1]["text"], "speed": 1.45},
+        {"start": 12.0, "end": 14.0, "text": "Muted, so the one before it inherits its room.", "muted": True},
+        {"start": 20.0, "end": 24.0, "text": "The last sentence, which runs to the end of the video."},
+    ]
+    pid = _video(segments, audio_seconds=30.0)
+    keep = [[0.0, 6.0], [7.5, 30.0]]
+    assert client.put(f"/api/projects/{pid}/edit", json={"keep": keep}).status_code == 200
+    plan = _plan(client, pid, speed=1.1).json()
+    assert plan["duration"] == pytest.approx(28.5) and plan["edit"]["keep"] == keep
+    assert [s["index"] for s in plan["sentences"]] == [0, 1, 3, 4, 5]
+    assert [s["speed"] for s in plan["sentences"]] == [1.2, 1.1, 1.45, 1.1, 1.1], (
+        "82 characters in 5 s asks for 1.2; the second sentence has only 1.5 s "
+        "now but needs less, so the floor; the explicit 1.45; the job's speed"
+    )
+
+    # --- the render: the whole service, only the media engine stubbed out ----
+    rendered = _stub_media_engine(monkeypatch, tmp_path, video_seconds=28.5)
+    import core.video_creator as vc
+
+    cut: dict = {}
+
+    def _cut_picture(source, keep_ranges, dst, video_bitrate="", cancel_check=None):
+        cut["keep"] = keep_ranges
+        Path(dst).write_bytes(b"PICTURE")
+        return True
+
+    monkeypatch.setattr(vc, "cut_picture", _cut_picture)
+
+    result = revoice.revoice_project(pid, STUDIO_EDGE_VOICE, speed=1.1, provider="edge_tts")
+    assert result["failed_sentences"] == 0
+    assert cut["keep"] == keep, "the render cut the very edit the plan was made from"
+
+    spoken = [s for s in plan["sentences"] if not s["muted"]]
+    assert [c["text"] for c in rendered.calls] == [s["text"] for s in spoken]
+    assert [c["speed"] for c in rendered.calls] == [s["speed"] for s in spoken], (
+        "the plan advertised a speed the render did not use under the edit"
+    )
+    assert [c["voice_id"] for c in rendered.calls] == [s["voice"] for s in spoken]
+    assert not any("Cut away" in c["text"] for c in rendered.calls)
+
+    on_disk = store.get_project(pid)["transcript"]
+    assert [(s["start"], s["end"]) for s in on_disk] == [(s["start"], s["end"]) for s in segments], (
+        "the transcript never moves"
+    )
+    assert store.get_project(pid)["edit_rendered_at"] == store.get_project(pid)["revoiced_at"]
 
 
 def test_the_section_is_built_once_for_the_render_and_the_plan():
