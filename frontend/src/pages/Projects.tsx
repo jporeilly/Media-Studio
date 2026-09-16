@@ -76,6 +76,8 @@ export default function ProjectsPage() {
 
   const pick = () => fileRef.current?.click();
   const list = projects.data?.projects ?? [];
+  // The empty state owns the Import button while it is showing (see the header).
+  const emptyShowing = projects.isSuccess && list.length === 0;
   const muted = { color: "var(--muted)" } as const;
 
   return (
@@ -84,9 +86,19 @@ export default function ProjectsPage() {
         title="Projects"
         subtitle="Import a slide deck, PDF, or video to narrate and translate."
         actions={
-          <Button variant="primary" icon={<Upload size={16} />} onClick={pick} disabled={importMut.isPending}>
-            {importMut.isPending ? "Importing…" : "Import"}
-          </Button>
+          // Hidden only while the empty state is on screen, which carries its
+          // own Import and is the better first thing to reach for: centred,
+          // and it says which files are accepted. Two primary buttons doing
+          // one job a couple of hundred pixels apart is what this avoids -
+          // there is exactly one Import on the page at any moment.
+          // Gated on isSuccess, not on list.length alone: during the first
+          // load the list is also empty, and the button must not flicker out
+          // and back before the projects arrive.
+          emptyShowing ? null : (
+            <Button variant="primary" icon={<Upload size={16} />} onClick={pick} disabled={importMut.isPending}>
+              {importMut.isPending ? "Importing…" : "Import"}
+            </Button>
+          )
         }
       />
       <input
@@ -121,17 +133,20 @@ export default function ProjectsPage() {
         <ErrorBox message={errorMessage(projects.error)} />
       ) : list.length === 0 ? (
         <Card>
-          {/* No action button here on purpose. The header's Import does the
-              same thing and is on screen already, so an empty page was showing
-              two primary buttons, worded differently, a couple of hundred
-              pixels apart. The sub still says which files are accepted, which
-              is the part the header cannot tell you. Elsewhere an EmptyState
-              action earns its place by going somewhere the page cannot
-              otherwise reach (Dashboard's Open); AuditCard and Docs have none. */}
+          {/* This is the Import that shows on a page with nothing on it: it is
+              centred, in the tile the eye already goes to, and it sits under a
+              line naming the file types. The header's copy is suppressed while
+              this is up, so the page never carries two primary buttons doing
+              one job. */}
           <EmptyState
             icon={<FolderOpen size={30} />}
             title="No projects yet"
             sub="Import a .pptx, .pdf, or video file to get started."
+            action={
+              <Button variant="primary" icon={<Upload size={16} />} onClick={pick} disabled={importMut.isPending}>
+                {importMut.isPending ? "Importing…" : "Import a file"}
+              </Button>
+            }
           />
         </Card>
       ) : (
