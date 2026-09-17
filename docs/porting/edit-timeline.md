@@ -743,13 +743,14 @@ channel, so for example select video and edit just that track. That way I can ad
 timings"* — and chosen over E4 as the next phase because it changes the edit's model and the
 music lane should be built on the final shape. Designed in **§11**; not built. In one line:
 the edit becomes one kept list **per track** (video, narration), Camtasia's lock icons decide
-which tracks a Cut applies to, and the narration's sentences can be dragged along their lane
-(the narration spec's phase 3b, delivered here).
+which tracks a Cut applies to, `S` splits the selected track at the playhead into pieces that
+can be clicked and cut (asked for the same afternoon: *"add a split, which splits the selected
+channel at playhead"*), and the narration's sentences can be dragged along their lane (the
+narration spec's phase 3b, delivered here).
 
-**E5 — the rest of Camtasia's editing set, in this order:** trim handles on a kept range's
-edges; split at the playhead as a first-class gesture (E2 stores the shape — `removeRange` with a
-zero-length interval is a bare split — but its gesture never makes one); markers; keyboard
-`J`/`K`/`L`; snapping of cuts to sentence pins (E3 brings snapping to the *drag*).
+**E5 — the rest of Camtasia's editing set, in this order:** trim handles on a piece's edges
+(E3's split makes the pieces); markers; keyboard `J`/`K`/`L`; snapping of cuts to sentence
+pins (E3 brings snapping to the *drag*).
 
 **E4 — the music lane.** Asked for by the owner on 2026-09-16 — *"I should be able to add
 music tracks over the top — another channel like Camtasia"* — and moved here out of §9's
@@ -991,6 +992,18 @@ laid out from 0 on the output axis, so the interval means the same instant on ea
 join markers become per lane: the video's joins on the Video and Audio lanes, the
 narration's on the Narration lane. The shared fixture gains the per-track cases.
 
+**Split at the playhead.** A split is a **boundary** in a track's list — `[s, e]` becomes
+`[s, x], [x, e]` at `x = toSource(playhead, track.keep)` — which E1's `validate_keep`
+already accepts (touching ranges), `whole_source` already reads as removing nothing (so the
+render of a project that is only split is byte-identical to one with no edit, and the card
+keeps saying "Re-voice", not "Render"), and E2's marker already draws as "Split — nothing
+removed". `splitAt(keep, t)` is the client helper (E2's `removeRange(keep, t, t)` is the same
+list; the name says what the gesture means), a no-op on an existing boundary or at either end
+of a range, and the split is committed like a cut — one `PUT` of the track's list. Its value is
+what it creates: **pieces**, the stretches of a lane between boundaries and joins, which are the
+things a Camtasia user clicks. Split twice, click the piece, Cut — the third way to cut,
+beside the handles and Ctrl+drag, and the one that needs no dragging at all.
+
 ### 11.3 Dragging the narration — the narration spec's phase 3b, delivered here
 
 A sentence block dragged along the Narration lane sets its **`offset`** — nothing else, and
@@ -1037,16 +1050,28 @@ becomes the readout of the drag; the number stays the contract, as the narration
   `TranscriptCard` (as `adjust`'s `onSuccess` folds a saved sentence back in) so the boxes
   read the new values without a refetch that would drop half-typed words.
 
-### 11.4 Locks — the UI of "select a channel"
+### 11.4 Locks, the selected channel, and pieces — the UI of "select a channel"
 
 Camtasia's lock icon on each track header. A locked lane is drawn dimmed with a hatch, the
-selection band skips it, and a Cut applies to the unlocked tracks only (both unlocked is
-today's cut; both locked disables Cut with the toolbar saying why). Audio · original shows
-"follows Video" in place of a lock. Lock state is **the client's, per visit and per project**
-(remembered in `localStorage` so it survives a reload, never on the record — it is a
-gesture modifier, and the durable thing is the edit it produces). The header column gets
-the Camtasia look the owner's screenshot shows: the lock, and a muted eye that is not a
-control in this phase.
+selection band skips it, and a Cut or a split applies to the unlocked tracks only (both
+unlocked is today's cut; both locked disables Cut and the toolbar says why). Audio · original
+shows "follows Video" in place of a lock. **Clicking a track's name selects that channel**,
+which is the owner's phrase made literal: it locks the *other* track and highlights this one,
+so "select video, and edit just that track" is one click; clicking the selected name again
+unlocks both; the lock icons still toggle one track at a time. Lock state is **the client's,
+per visit and per project** (remembered in `localStorage` so it survives a reload, never on
+the record — it is a gesture modifier, and the durable thing is the edit it produces). The
+header column gets the Camtasia look the owner's screenshot shows: the lock, and a muted
+eye that is not a control in this phase.
+
+**Pieces.** Each lane draws its stretches between boundaries (splits and joins) as Camtasia
+draws clips — a faint edge at every boundary, a hover highlight over the piece under the
+pointer — and **clicking a piece selects it**: the in and out handles jump to its ends, the
+band spans it (on the unlocked lanes), and Cut removes it. A click on the Narration lane
+that lands on a sentence block still selects the sentence (the block is above the piece);
+a click beside the blocks selects the piece. Keys, TechSmith's own: **`S`** splits the
+selected / unlocked tracks at the playhead, **`Ctrl+Shift+S`** splits every track regardless
+of locks. Selecting a piece and pressing Cut is Camtasia's "select the clip, ripple delete".
 
 ### 11.5 Undo, in the presence of two kinds of change
 
@@ -1076,6 +1101,10 @@ still being read) covers offset commits too, since they invalidate the plan as w
     concerns.
 22. **Version 1 is read, not refused.** The only foreign version is one this code has never
     seen.
+23. **A split changes no output.** `whole_source` is true for a list that only splits, so the
+    picture step is skipped, the render is byte-identical, the card says "Re-voice" and the
+    audition is unchanged. The marker and the pieces are the only evidence, and that is
+    correct: Camtasia's split changes nothing either until a piece is moved or removed.
 
 ### 11.7 Decisions for the owner before the build
 
@@ -1089,6 +1118,11 @@ still being read) covers offset commits too, since they invalidate the plan as w
 5. **Nudge keys `[` `]` (0.05 s) and `Shift+[` `Shift+]` (0.25 s).**
 6. **Release**: E3 and E4 together as **0.8.0**, or E3 alone first — the owner's call when
    E3 is built.
+7. **"Select a channel" = click its name: the other track locks.** One concept underneath
+   (locks), one click on top. The alternative — a separate "active track" state beside the
+   locks — was not proposed: two ways to say which track an edit touches would disagree.
+8. **Split (`S`) applies to the selected / unlocked tracks; `Ctrl+Shift+S` to all**, and a
+   piece is selected by clicking it. Trim handles on a piece's edges stay E5.
 
 Build order inside the phase: the model and routes (version 2 read/write, `apply` per track,
 the offsets route — verifiable by `curl`, the E1 way), then the timeline (locks, per-lane
