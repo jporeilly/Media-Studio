@@ -1,17 +1,20 @@
 # Version
 
-**Current version:** 0.6.0
+**Current version:** 0.7.0
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
 assistant, generation options, transcription, re-voice, per-sentence narration adjustments
 on a transcript — phases 1 to 3a of the narration timeline, so an offset, a mute, a voice, a
 speed, a per-sentence preview and a timeline view with a filmstrip, a waveform and live
-audition of the whole narration against the picture, but no drag yet —, an edit on a video
-project — the kept ranges of its source, rendered by the re-voice with the picture cut
-first — through the API only, with no timeline gesture yet, studio settings,
+audition of the whole narration against the picture, but no drag yet —, an edit timeline in
+Camtasia's shape on a video project — the kept ranges of its source, selected on the strip
+with the playhead's green and red handles, Cut, undone, and rendered by Render as the
+re-voice with the picture cut first; E1 the model and the render, E2 the gesture, both in
+0.7.0 (released 2026-09-17) —, studio settings,
 accounts, project ownership and the audit log, self-update, the Windows desktop installer;
 see CHANGELOG.md). Still to come: the music library, the rest of the narration timeline
-(dragging a sentence on the strip), the edit timeline's gesture (cutting on the strip), and
-the rest of the administration work — notifications,
+(dragging a sentence on the strip), the rest of the edit timeline (trim handles, split at
+the playhead, markers, snapping, and E4's music lane over the top), and the rest of the
+administration work — notifications,
 a branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
 Enterprise remains the shipping product until parity.
 

@@ -4,4 +4,4 @@ Single source of truth for the package version; the API and launchers read it
 from here (see ``api/__init__.py``).
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

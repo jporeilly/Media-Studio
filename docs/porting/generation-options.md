@@ -5,7 +5,9 @@
 > defects that had to be fixed for any of it to work — see the `#generation-options` entry
 > in CHANGELOG.md). **2b is NOT started**: the music and transition-sound library, section
 > 4 below, is the only part of this spec still outstanding. Everything above it describes
-> what shipped, so read it as a map of the code rather than as work to do.
+> what shipped, so read it as a map of the code rather than as work to do. The edit
+> timeline's music lane — E4 in `docs/porting/edit-timeline.md` §7 — depends on that same
+> library, so 2b is built once, for the generate path and the lane both.
 
 Engine-supported generation options that the React UI did not expose. Produced by
 a read-only survey of the carried-over engine on 2026-09-14; every claim cites the code.

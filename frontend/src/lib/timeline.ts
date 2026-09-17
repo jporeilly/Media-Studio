@@ -14,7 +14,12 @@
  * before it turned out to be — and only the browser, holding the decoded audio,
  * knows that. Unit-tested in timeline.test.ts; the page itself is verified in
  * the browser by the owner.
+ *
+ * The edit's own arithmetic — the source↔timeline projection, the ripple
+ * delete, the ruler and the zoom scale — is in lib/edit.ts.
  */
+
+import type { Keep } from "./edit";
 
 /** One sentence of `GET /api/projects/{pid}/narration/plan`. */
 export interface PlanSentence {
@@ -48,12 +53,33 @@ export interface PlanSentence {
   preview_url: string;
 }
 
+/**
+ * The edit as the routes and the plan report it (`services/edit.py::payload`):
+ * the kept ranges of the source in SOURCE seconds, `null` meaning everything;
+ * the source's length from the WAV header, `null` before transcription; and
+ * the output's.
+ */
+export interface EditPayload {
+  version: number;
+  keep: Keep | null;
+  source_duration: number | null;
+  output_duration: number | null;
+}
+
 export interface NarrationPlan {
+  /** The OUTPUT's length: the source's less whatever the edit removed. */
   duration: number;
   baseline_rate: number;
   /** The render's own tempo-squeeze constants — see `schedule`. */
   squeeze_tolerance: number;
   squeeze_max_factor: number;
+  /**
+   * The very edit the sentences were projected through, carried in the same
+   * answer so the strip is always drawn from one fetch — never a plan from
+   * one moment and an edit from another.
+   */
+  edit: EditPayload;
+  /** Already in TIMELINE seconds, holes closed; each still carries its `index` in the STORED transcript. */
   sentences: PlanSentence[];
 }
 

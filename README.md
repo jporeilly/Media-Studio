@@ -1,6 +1,6 @@
 <h1 align="center">Media Studio Enterprise</h1>
 
-<p align="center"><b>Version 0.6.0</b> — React + FastAPI. Turn slide decks and videos into narrated MP4s.</p>
+<p align="center"><b>Version 0.7.0</b> — React + FastAPI. Turn slide decks and videos into narrated MP4s.</p>
 
 Media Studio Enterprise is the React + FastAPI successor to **Slide Studio Enterprise**
 (NiceGUI). It reuses the same Python media engine — PowerPoint/PDF export, Edge TTS &
@@ -17,18 +17,21 @@ the whole app suite looks and feels the same.
 > transcript whose sentences can each be nudged, muted, given their own voice and speed and
 > played back one at a time, and a timeline view of those sentences over a filmstrip and the
 > original audio's waveform that plays the whole new narration against the picture without
-> running a re-voice (phases 1 to 3a of the narration timeline — no drag yet), an **edit** on
-> a video project — the ranges of its source that are kept, one list that a split, a trim
-> and a ripple delete all change, rendered by the re-voice with the picture cut first —
-> **through the API only** (`PUT /api/projects/{pid}/edit`; there is no timeline gesture
-> yet, so the strip still draws the whole source), re-voicing in
+> running a re-voice (phases 1 to 3a of the narration timeline — no drag yet), an **edit
+> timeline** in Camtasia's shape on a video project — the ranges of its source that are kept,
+> one list that a split, a trim and a ripple delete all change, made on the strip itself
+> (select a range with the playhead's green and red handles or Ctrl+drag, **Cut**, undo) and
+> rendered by **Render**, the re-voice with the picture cut first (E1 the model and the
+> render, E2 the gesture; trim handles, split at the playhead, markers and a music lane are
+> not built), re-voicing in
 > a new voice or a translated language that keeps step with
 > the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
 > configurable password policy, projects that belong to whoever imported them with an audit
 > log of every change for admins, self-update from Git, and a Windows desktop installer are
 > in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound
-> library, the rest of the narration timeline (dragging a sentence on the strip), the edit
-> timeline's gesture (cutting on the strip, the join marker, undo, a Render button), and the rest of the
+> library, the rest of the narration timeline (dragging a sentence on the strip), the rest of
+> the edit timeline (trim handles, split at the playhead, markers, snapping, and a music lane
+> over the top), and the rest of the
 > administration work (notifications, a branding lock, an admin page of its own, per-kind job
 > limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
 > `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).

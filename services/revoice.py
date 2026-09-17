@@ -171,7 +171,7 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
             count = len(applied.keep)
             _report(0.08, f"Cutting the picture ({count} range{'' if count == 1 else 's'} kept)…")
             # The bitrate is the output preset's ("" = the codec default); in
-            # E1 that is the default preset, and choosing one is E2's Render.
+            # E1 and E2 that is the default preset; choosing one is a later phase.
             cut = video_creator.cut_picture(
                 source_video, applied.keep, render_source,
                 video_bitrate=get_preset(DEFAULT_PRESET_ID)["video_bitrate"],

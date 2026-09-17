@@ -23,6 +23,7 @@ Three things these tests hold in place:
 import json
 import threading
 import wave
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -45,6 +46,9 @@ SEGMENTS = [
     {"start": 10.0, "end": 12.0, "text": "Fifth sentence."},
 ]
 KEEP = [[0.0, 6.0], [7.5, 12.0]]  # output: 10.5 s
+
+# The cases above, in one file the client's copy of the projection reads too.
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "edit_projection.json"
 
 FAST = "A very great many words indeed packed into a slot that is much too short for them."
 
@@ -243,6 +247,36 @@ def test_to_source_is_the_inverse_and_clamps_at_the_ends():
     assert edit.to_source(99.0, KEEP) == 12.0
     assert edit.to_source(-1.0, KEEP) == 0.0
     assert edit.to_source(-1.0, [[3.0, 5.0]]) == 3.0
+
+
+def test_the_shared_fixture_holds_for_this_copy_of_the_projection():
+    """``frontend/src/lib/edit.ts`` is the client's copy of ``to_timeline``,
+    ``to_source``, ``output_duration`` and ``whole_source`` - the one
+    duplication the spec accepts, because the timeline seeks and draws on
+    every pointer movement - and its vitest suite (``edit.test.ts``) reads
+    this same file. The cases are the inline ones above, in one place, so a
+    change to either copy that the other does not make fails here or there."""
+    cases = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    keep = cases["keep"]
+    assert keep == KEEP and cases["source_duration"] == 12.0, "the fixture is the inline scenario"
+    assert len(cases["to_timeline"]) >= 10 and len(cases["to_source"]) >= 8, "an emptied file must not pass"
+    # The one rule E1 reversed - the LATER range wins at a join - must not be
+    # the row a truncation happens to drop.
+    assert [6.0, 7.5] in cases["to_source"] and [7.5, 6.0] in cases["to_timeline"]
+
+    assert edit.output_duration(keep) == cases["output_duration"]
+    for t_source, t_timeline in cases["to_timeline"]:
+        assert edit.to_timeline(t_source, keep) == t_timeline, (t_source, t_timeline)
+    for t_timeline, t_source in cases["to_source"]:
+        assert edit.to_source(t_timeline, keep) == t_source, (t_timeline, t_source)
+    for t in cases["round_trip"]:
+        assert edit.to_timeline(edit.to_source(t, keep), keep) == t, t
+    for held, t_timeline, t_source in cases["clamps"]:
+        assert edit.to_source(t_timeline, held) == t_source, (held, t_timeline)
+    for held, source_duration, expected in cases["whole_source"]:
+        assert edit.whole_source(held, source_duration) is expected, (held, source_duration)
+    for held, expected in cases["output_durations"]:
+        assert edit.output_duration(held) == expected, held
 
 
 def test_whole_source_is_true_only_when_nothing_is_removed():

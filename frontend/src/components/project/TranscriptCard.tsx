@@ -327,6 +327,7 @@ export function TranscriptCard({
           active={view === "timeline"}
           selected={selected}
           onSelect={setSelected}
+          jobActive={jobActive}
         />
       </div>
 

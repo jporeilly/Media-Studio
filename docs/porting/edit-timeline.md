@@ -1,13 +1,14 @@
 # Design spec — the edit timeline (vertical 6)
 
 Read-only survey, 2026-09-16, plus measurements taken that day on the real 5m41s 1080p
-source (`data/projects/6d808448772c/finished.mp4`). **E1 — the model and the render — is
-built (2026-09-16, §7); E2 onward is not.** This is the answer to "build something like
+source (`data/projects/6d808448772c/finished.mp4`). **E1 — the model and the render — and E2
+— the gesture — are built (2026-09-16 and 2026-09-17, released together as 0.7.0; §7);
+E3 onward is not.** This is the answer to "build something like
 Camtasia": a multi-track timeline on which the picture, the original audio and the
 narration can be cut together. The survey is written against the code as it stands at
-`4f39ae1`, and every line number below is from that tree; E1's own notes in §7 cite symbols
-rather than lines, and where E1 proved a section wrong the section is corrected in place
-and says so.
+`4f39ae1`, and every line number below is from that tree; E1's and E2's own notes in §7 cite
+symbols rather than lines, and where a build proved a section wrong the section is corrected
+in place and says so.
 
 The one-line version: **a project gains an ordered list of the ranges of its one source
 that are kept; the transcript never moves; everything else is projection.**
@@ -284,11 +285,15 @@ it is the plan's `duration` that is the output's length (E1's ninth note, §7). 
 recording and does what it always does. The anti-drift test's job — "the plan's speeds are
 the speeds the render really synthesises at" — gains a `keep` parameter and keeps holding.
 
-The client gets the same four functions in `frontend/src/lib/edit.ts` (E2 — not built),
+The client gets the projection in `frontend/src/lib/edit.ts` (E2 — built; *as built* it is
+three of the four, `outputDuration`, `toTimeline` and `toSource`, plus `wholeSource`, name for
+name and rule for rule — `project_transcript` is **not** copied, because which sentences are
+spoken and where they land is the plan's answer and is never re-derived in the browser),
 tested against the same fixtures. This is the one deliberate duplication, and it is the same kind phase 3a
 accepted for `schedule()`: the client needs `to_source`/`to_timeline` to draw and to seek,
-and a round trip per pointer movement is not an option. The tests share fixtures so the
-two cannot drift silently.
+and a round trip per pointer movement is not an option. The tests share one fixture,
+`tests/fixtures/edit_projection.json`, read by `tests/test_edit.py` and by `edit.test.ts`, so
+the two cannot drift silently.
 
 ---
 
@@ -322,7 +327,10 @@ byte, and `tests/test_revoice_sync.py` never notices.
    wreck a screen recording; not forcing a rate satisfies that by construction. The bitrate
    comes from the output preset (`services/output_presets.py`), `""` meaning codec default,
    exactly as `write_videofile` takes it (`core/video_creator.py:1169`); in E1 that is the
-   default preset (`youtube_1080p`), and choosing one is E2's Render button. *The next two
+   default preset (`youtube_1080p`). *Corrected by E2:* this went on "and choosing one is
+   E2's Render button" — E2 built no chooser; Render is the Re-voice card's button renamed
+   when the edit removes anything, its `POST` is unchanged, and the cut picture still takes
+   the default preset (§7, E2's list). *The next two
    rules were wrong as first written and are corrected here (E1's second and eighth notes,
    §7):* the step polls `cancel_requested_here()` every half second **while ffmpeg runs**
    and kills it on a cancel — there is no "between ranges", the cut is one run — and its
@@ -381,26 +389,64 @@ The waveform stays in source seconds — it is one WAV file — and the client p
 Phase 3a's `NarrationTimeline` is extended, not replaced. `TranscriptCard` keeps its
 List / Timeline switch. What changes:
 
+- *Added by the build:* **the panel is laid out as the owner's Camtasia screenshot** — the
+  canvas above, the transport beneath it (jump to start, step back, Play, step forward, jump
+  to end, the clock), then the timeline: a toolbar (Undo, Redo | Cut | zoom out, the slider,
+  zoom in, Fit), a timecode ruler, track headers (Video / Audio · original, reference only /
+  Narration) beside the three lanes — dark in both app themes (`--tl-*` tokens in
+  `theme.css`), as Camtasia's is whatever the app around it looks like. No Stop button
+  (jump-to-start is the same thing) and no Export on the timeline: Render stays on the
+  Re-voice card.
 - **The strip is drawn in timeline seconds**, holes closed — the Camtasia feel, and the
   thing the owner asked for. The waveform is `poolPeaks` over the peaks array **sliced and
   concatenated by `keep`** (a bucket is 125 ms of one file, so keeping ranges is an array
   operation); the filmstrip seeks the hidden `<video>` to `to_source(frameTime)`; blocks
   come from the plan already projected. `pictureWidth` becomes `output_duration × pps`.
-- **Range selection**: drag on the ruler, or set in/out at the playhead with `I`/`O`, then
-  **Ripple delete** (`Delete`). Both are one `PUT /edit` with the new list, committed on
-  release — never per frame (`docs/porting/narration-timeline.md:715-717`).
+  *As built (E2):* the peaks are sliced by **cumulative output bucket index**, not one slice
+  per range — rounding each range's span on its own let the error accumulate to 0.43 s
+  after fifteen cuts (the Reviewer measured it; §7); now the projected array is exactly
+  `round(output_duration / bucket)` long and each boundary is off by at most half a bucket.
+  And the `keep` everything is drawn through is the plan's own `edit` block, never a
+  separate `GET /edit`: a strip drawn from a plan of one moment and an edit of another
+  would put the blocks over the wrong frames.
+- **Range selection** — *corrected by E2, which built Camtasia's own gesture rather than
+  the `I`/`O` keys this first named*: drag the playhead's green (in) or red (out) handle
+  away from it, or Ctrl+drag on the ruler or the strip; Shift+Comma / Shift+Period grow
+  the selection a frame, Ctrl+Shift+Home / End take it to the start or the end; double-click
+  the head, Escape or Ctrl+Shift+D clears it. A plain drag on the ruler scrubs. Then
+  **Cut** — the scissors, Ctrl+Delete, Backspace, Ctrl+X, and plain Delete too, because
+  this timeline has no gaps to leave — is the ripple delete (`removeRange`), one `PUT /edit`
+  with the new list, committed on release — never per frame
+  (`docs/porting/narration-timeline.md:715-717`) — or a `DELETE` when the result keeps
+  everything. A selection that would remove the whole video is refused in the browser
+  ("keep at least one range"); a refusal from the server (400, 409) shows its message and
+  leaves the strip on the plan the server still has.
 - A removed range leaves a **thin marker** at the join, so a cut is visible after it has
   closed up, with the removed length in its tooltip — Camtasia shows nothing there, and
-  nothing is how mistakes go unnoticed.
+  nothing is how mistakes go unnoticed. *As built:* "5.0 s removed (0:47.300 – 0:52.300 of
+  the source)"; a bare split — two touching ranges — gets a grey marker saying "Split —
+  nothing removed." (E2's gesture never makes one; E3's split will.)
 - **Undo/redo** is a client-side stack of `keep` snapshots (50 deep), because there is no
   server-side undo anywhere and the list is small enough to snapshot whole. `Ctrl+Z`
   re-`PUT`s the previous list. Lost on reload; the server holds only the current state.
-  Honest about that in the UI.
+  Honest about that in the UI. *As built:* a snapshot is pushed only when the commit
+  succeeds, a snapshot of keep-everything goes back through `DELETE`, and the gesture —
+  Cut, Undo, Redo, keys and buttons alike — is **locked from a successful commit until the
+  plan it produced lands**, because until then the strip is still drawn from the previous
+  plan and a second cut would be computed against it (the Reviewer's one MAJOR; §7).
 - The transport plays the **projected** schedule — `schedule()` needs no change, it is
   given projected sentences — and the muted `<video>` is seeked to `to_source(position)`
-  at every jump. Between ranges the picture skips; that is the edit.
-- **Render** replaces "Re-voice again" on the card when an edit exists, and says what it
-  will do: "Cut 2 ranges (12.4 s) and re-voice — about 20 s."
+  at every jump. Between ranges the picture skips; that is the edit. *As built:* the
+  picture is re-seeked as the playhead crosses each join while playing, and paused once the
+  narration outruns the cut picture rather than run into a removed tail; Play inside a
+  selection stops at its end; a seek while playing resumes at the seek target.
+- **Render** replaces "Re-voice" / "Re-voice again" on the card — *as built,* when the edit
+  **removes** something; a bare split keeps the plain button and the untouched path — and
+  says what it will do: "Cuts 1 range (5.0 s removed) and re-voices — about 25 s, plus any
+  sentences the audition has not fetched yet." The estimate is `5 + reach × 0.05` s rounded
+  up to five, from the **decode reach** (§7, second note), never the output length, and it
+  leaves narration synthesis out because the audition caches it. The `POST` is unchanged and
+  no output preset is chosen (§4).
 - **A continuous zoom slider**, as Camtasia has, in place of the stepped buttons. Zoom
   exists today as four fixed steps — `ZOOMS = [1, 2, 4, 8]` (`NarrationTimeline.tsx:43`)
   behind + and − (`:652-666`) — and on a first open it appeared to do nothing, because the
@@ -415,7 +461,11 @@ List / Timeline switch. What changes:
   a hunt. `Ctrl`+wheel over the strip zooms about the pointer instead. The filmstrip
   regenerates only past `needsNewFrames`'s 120 px tolerance (`timeline.ts:207`), as now,
   so dragging the slider does not seek the video continuously. The peaks are pooled per
-  zoom from the same cached array; nothing is fetched.
+  zoom from the same cached array; nothing is fetched. *As built:* `MAX_PPS = 200`; the
+  slider is `max^v` over 0–1; − and + step by a quarter (Ctrl+Shift+− / =); Fit is
+  Ctrl+Shift+7, zoom to the selection Ctrl+Shift+8, the maximum Ctrl+Shift+9; Ctrl+wheel is
+  scaled by the wheel's delta so a trackpad does not race to the ceiling; and the ruler
+  draws only the visible window.
 
 What stays typed rather than dragged: nothing new. Per-sentence offsets remain in the
 List view as phase 3a left them; the edit gesture is a separate concern on a separate
@@ -549,12 +599,148 @@ Storing or clearing an edit also drops the memoised speaking rate (`forget_basel
 because the rate is measured over the sentences the render will speak and the edit decides
 which those are.
 
-**E2 — the gesture.** Timeline-second drawing, range selection, ripple delete, the join
-marker, the undo stack, the Render button. This is the phase the owner drives.
+**E2 — the gesture.** **DONE**, 2026-09-17, released as **0.7.0** together with E1 and
+3a; see CHANGELOG `#edit-timeline-gesture`. The Timeline tab is a panel in Camtasia's
+shape, dark in both app themes: the canvas; a transport (jump to start, step back, Play,
+step forward, jump to end, the clock); a toolbar (Undo, Redo | Cut | zoom out, the slider,
+zoom in, Fit); a timecode ruler (`m:ss` labels at whole-second steps, milliseconds below
+that; only the visible window drawn); track headers (Video / Audio · original, reference
+only / Narration) beside the three lanes — **everything drawn in timeline seconds**: the
+filmstrip seeks the hidden `<video>` to `toSource(t)`, the waveform's peaks are sliced by
+`keep` before pooling, the blocks arrive projected from the plan, and the plan's own `edit`
+block is the `keep` it is all drawn through (never a separate `GET /edit`). The playhead's
+head sits in the ruler with the green in / red out handles: drag one to select, double-click
+to clear, Ctrl+drag on the ruler or the strip to select, drag the head to scrub; a band
+spans every lane with its in/out times; a marker at every join says what was removed
+("5.0 s removed (0:47.300 – 0:52.300 of the source)"; a bare split, "Split — nothing
+removed."). **Cut** is the ripple delete (`removeRange`), committed as one `PUT /edit` on
+release (`DELETE` when the result keeps everything); Undo/Redo a 50-deep client stack pushed
+only on success ("Undo is for this visit"); the gesture **locked from a successful commit
+until the plan it produced lands**; per-sentence clip survival across an edit, the playhead
+remapped by `positionAfterEdit` rather than reset to 0; the transport re-seeks the picture at
+each join and pauses it when the narration outruns the cut picture; Play inside a selection
+plays to its end; continuous zoom (`MAX_PPS = 200`, a log slider, fit = 1, anchored on the
+playhead; Ctrl+wheel anchored on the pointer and scaled by the delta); TechSmith's bindings —
+Space; Comma / Period (a 1/30 s "frame"); Shift+Comma / Period; Ctrl+Home / End;
+Ctrl+Shift+Home / End; Ctrl+Delete / Backspace / Delete / Ctrl+X (all ripple); Ctrl+Z;
+Ctrl+Y / Ctrl+Shift+Z; Ctrl+Shift+D / Escape; Ctrl+Shift+= / −; Ctrl+Shift+7 fit / 8
+selection / 9 max — held keys firing once. On the card (`ProjectDetail.tsx`): a
+`["edit", id]` query, and the Re-voice button becomes **Render** when the edit removes
+anything, with "Cuts N ranges (X s removed) and re-voices — about T s, plus any sentences the
+audition has not fetched yet" (`renderEstimate` = 5 + reach × 0.05, rounded up to 5 s — the
+reach rule of the second note above) and the edit query's error shown rather than swallowed.
+Files: `frontend/src/lib/edit.ts` — the client copy of the projection (`outputDuration`,
+`toTimeline`, `toSource`, `wholeSource`, `wholeKeep`) plus `joins`, `removeRange`,
+`positionAfterEdit`, `projectPeaks`, `ticks` / `tickStep` / `rulerLabel`, the zoom maths,
+`stepFrame`, `renderEstimate` / `renderSummary`; `edit.test.ts` (45);
+`tests/fixtures/edit_projection.json`, read by `edit.test.ts` and by a new case in
+`tests/test_edit.py`, both guarded so a truncation cannot drop the join case `[6.0, 7.5]`;
+`NarrationTimeline.tsx` (816 → 1673 lines, around 3a's transport); `ProjectDetail.tsx`;
+`TranscriptCard.tsx` (`jobActive` handed down); `EditPayload` and `edit` on `NarrationPlan`
+in `lib/timeline.ts`; `theme.css` (`--tl-*` tokens, the `.os-tl-*` block). **Proven by the
+Reviewer**, harnesses against `services/edit.py`: the client projection over 335,938
+`to_timeline` and 338,702 `to_source` comparisons on 3000 random edits — identical but for
+inputs at an exact decimal half-millisecond, 1 ms apart, never at a join, an end or a
+pointer-like value; 184,452 ripple deletes against a 1 ms grid, every result accepted
+unchanged by the server's `validate_keep`; and the waveform slicing fix — per-range rounding
+drifted a burst up to 0.43 s over fifteen cuts, now exactly `round(output / bucket)` long
+with no accumulation. **Verified live** by the supervisor (Vite against the dev backend, the
+341 s corpus project): Ctrl+drag 47.3–52.3 → Cut → `PUT` 200 → 61 blocks, sentence 12
+re-pinned 54.13 → 49.13 s (E1's measured value), the join marker "5.0 s removed", Render
+and its summary; Ctrl+Z → `DELETE` → 62 blocks; during "Re-reading the plan…" a second
+selection + Backspace / Ctrl+Z produced no request; zoom anchored within 0.4 px; the light
+theme keeps the panel dark; playback runs. The packaged app is not in that record. Tests:
+vitest **150** (was 105), `tests/test_edit.py` **81** (+1; 103 with the dist fingerprint and
+version tests), the full backend suite **706** — run by the Developer and again by the
+Reviewer; `tsc` and `eslint` clean; **no backend product code changed**. Deliberately left:
+**E3** below; **E4** below; per-range input seeking (the second note above — a head-plus-tail
+keep still decodes the whole file); and a preset on the render (§4).
+
+Eleven things the build changed about the design above, listed as E1's were, because E3's
+reader will otherwise copy a line the build contradicted:
+
+- **The layout is the owner's Camtasia screenshot, not §6's list.** Canvas above, the
+  transport beneath it, then the timeline (toolbar, ruler, headers, lanes). No Stop button —
+  Camtasia has none; jump-to-start is the same thing — and no Export on the timeline: Render
+  stays on the Re-voice card, where the voice, speed and language it renders with are chosen.
+- **§6's `I`/`O` keys were not built.** The selection is Camtasia's own gesture — the
+  playhead's green and red handles, Ctrl+drag on the ruler or the strip, Shift+Comma /
+  Period, Ctrl+Shift+Home / End — and every binding is from TechSmith's published table,
+  nothing invented. §6 is corrected in place.
+- **Delete ripples.** Camtasia's plain Delete leaves a gap; this model has none — the edit is
+  ranges of one source — so Delete, Backspace, Ctrl+Delete and Ctrl+X all remove-and-close,
+  and the view says so once.
+- **Play with a selection** resumes from the playhead when it is inside the selection, else
+  from the selection's start, and halts at its end; **a seek while playing resumes at the
+  seek target**, never at the selection's start — a seek is the user naming a position (the
+  Reviewer's MINOR 1).
+- **`removeRange` with a zero-length interval strictly inside a range is a bare split** —
+  two touching ranges, the shape E3's split-at-the-playhead will store; E2's gesture never
+  produces one, and a zero-length interval at a join leaves the list alone.
+- **The waveform is sliced by cumulative output bucket, not per range.** §6's "sliced and
+  concatenated by `keep`" read as one slice per range, and that rounded each span on its
+  own: up to 0.43 s of drift after fifteen cuts, a burst visibly beside its sentence at the
+  zoom ceiling (the Reviewer's MINOR 3). Range *k* now fills output buckets `round(at_k/b) …
+  round((at_k + len_k)/b)`, slot *j* taking source bucket `round((start_k − at_k)/b) + j`,
+  clamped to its own range so a hole's bucket is never shown.
+- **The ruler draws only the visible window** — a zoomed two-hour strip has tens of
+  thousands of minor ticks — and the tick table gained a **7200 s** row: below 0.0222 px/s
+  the 3600 s labels fell under the 80 px rule.
+- **A thumbnail every ~120 px** of strip (`THUMB_PX`) rather than 3a's count for the width:
+  the lane is taller, and wider thumbs crop less.
+- **The commit lock.** §6's undo paragraph did not foresee the window between a successful
+  commit and the plan it produces. `awaiting` is stamped from the plan's `dataUpdatedAt` /
+  `errorUpdatedAt` at the commit — not from `isFetching`, which is scheduler-timed and can
+  read false before the refetch has begun — and cleared when either moves; `editLocked =
+  jobActive || commit.isPending || applying` gates Cut, Undo, Redo, buttons and keys alike.
+  Leaving the tab does not clear it: the plan is refetched on return, and that landing is
+  what unlocks.
+- **Undo goes back through `DELETE`** when the snapshot is keep-everything (§6 said
+  "re-`PUT`s the previous list"), so the record reads as one that never had an edit; a
+  whole-source *split* is still a `PUT`, because its marker is the point.
+- **Render only when the edit removes something**, with a different line from §6's — "Cuts
+  1 range (5.0 s removed) and re-voices — about 25 s, plus any sentences the audition has not
+  fetched yet." — and a bare split keeps "Re-voice again" and the untouched path. **No
+  output preset is chosen on Render**: §4 said choosing one was E2's Render button; the
+  `POST` is unchanged and the cut picture still takes the default preset. §4 and §6 are
+  corrected in place.
+
+**The Reviewer's one MAJOR, and what closed it.** Between a successful commit and the plan
+it produced, the strip is still drawn from the previous plan (`keepPreviousData` — the
+playback-halt fix at `43d5ba3`), and because `set_edit` drops the memoised speaking rate the
+refetch re-runs the calibration first: hundreds of milliseconds warm, seconds cold. The
+gesture was unlocked in that window and computed against the stale keep. A second Cut
+silently overwrote the first on the server (the history read `[K0, K0]`); a Ctrl+Z — one key
+auto-repeat away, since `commit.isPending` is false between commits — snapshotted the plan's
+keep as "before" and left the cut unredoable. Closed three ways: the lock above;
+`committedKeepRef`, initialised from the plan and advanced by every successful commit, is
+what the history snapshots — right even if the lock were ever bypassed; and `event.repeat`
+is ignored for Space, Backspace / Delete, Ctrl+X and Ctrl+Z / Y (frame stepping and the
+selection keys still repeat — holding them is how they are used). The supervisor reproduced
+the original and confirmed the fix live.
+
+**The clip-survival caveat, so the docs do not over-promise.** "The audition survives a cut"
+holds for every sentence whose text and `preview_url` did not change. `set_edit` calls
+`forget_baseline`, and `calibrate_tts_baseline` samples positions 0, n/3 and 2n/3 of the
+long unmuted sentences; a cut that removes one of those before the last sample shifts the
+sample set, the measured rate changes, every sentence not sitting on the job-speed floor gets
+a new effective speed and so a new URL, and the signature effect drops all of them —
+correctly, since the render would speak them at the new rate. Expect most clips re-fetched
+after a cut early in the video and few after one near the end. **Clips whose speed did not
+change survive**; keying the baseline memo on the sample texts would remove the effect, and
+that is server work in `services/narration.py`, not E2's.
+
+Honest limits, each said in the UI where it bites: a "frame" is 1/30 s (no ffprobe, so the
+source's rate is unknown); the render estimate excludes narration synthesis; undo is per
+visit; a selection is bounded to the picture (nothing past its end can be cut); Space with a
+focused button is handled for Chromium (the handled keydown is default-prevented, so the
+button never arms) and for Firefox (a `keyup` guard on buttons and links), and the owner's
+real keyboard is the final check; a head-plus-tail keep still decodes the whole file.
 
 **E3 — the rest of Camtasia's editing set, in this order:** trim handles on a kept range's
-edges; split at the playhead as a first-class gesture (today it is "select a zero-length
-range"); markers; keyboard `J`/`K`/`L`; snapping to the playhead and to sentence pins.
+edges; split at the playhead as a first-class gesture (E2 stores the shape — `removeRange` with a
+zero-length interval is a bare split — but its gesture never makes one); markers; keyboard
+`J`/`K`/`L`; snapping to the playhead and to sentence pins.
 
 **E4 — the music lane.** Asked for by the owner on 2026-09-16 — *"I should be able to add
 music tracks over the top — another channel like Camtasia"* — and moved here out of §9's
@@ -689,7 +875,8 @@ nobody looked.
    survives — was considered and not chosen; it is a one-line change in
    `project_transcript` if it is ever wanted, and it must stay one line.
 2. **The join marker is in.** Small, with the removed length in its tooltip (E2).
-3. **E1 is committed unversioned**, like phase 3a was. E2 is what gets a number.
+3. **E1 is committed unversioned**, like phase 3a was. E2 is what gets a number. *(It did:
+   0.7.0, 2026-09-17, carrying E1, E2 and 3a together.)*
 
 The owner's standing instruction for E2 and E3 is **"copy Camtasia"** — the gestures, the
 look and the feel of its timeline, within the scope §9 draws.
@@ -705,6 +892,10 @@ look and the feel of its timeline, within the scope §9 draws.
 | `api/routers/edit.py` (new) | the three routes |
 | `api/audit.py` | `PROJECT_EDIT` |
 | `api/deps.py`, `api/schemas.py` | `readable_project` / `writable_project`; `EditIn` (E1) |
-| `frontend/src/lib/edit.ts` (new, E2) | the client copy of the projection, shared fixtures |
-| `frontend/src/components/project/NarrationTimeline.tsx` (E2) | timeline-second drawing, selection, ripple delete, undo |
-| `tests/test_edit.py` (new), `tests/test_revoice.py`, `tests/test_generation_options.py`, `tests/test_narration_plan.py`, `tests/test_project_ownership.py`, `tests/test_audit.py` | the guards |
+| `frontend/src/lib/edit.ts` (new, E2) | the client copy of the projection (`outputDuration`, `toTimeline`, `toSource`, `wholeSource`, `wholeKeep`), `joins`, `removeRange`, `positionAfterEdit`, `projectPeaks`, the ruler (`ticks`, `tickStep`, `rulerLabel`), the zoom maths, `stepFrame`, `renderEstimate` / `renderSummary` |
+| `frontend/src/lib/edit.test.ts` (new, E2), `tests/fixtures/edit_projection.json` (new, E2) | 45 vitest cases; the projection's pinned cases, read by `edit.test.ts` and by `tests/test_edit.py` so the two copies cannot drift |
+| `frontend/src/components/project/NarrationTimeline.tsx` (E2) | the Camtasia-shaped panel: timeline-second drawing, the ruler, the handles and the selection, Cut, undo/redo and the commit lock, clip survival, the transport across joins, zoom, the keys |
+| `frontend/src/pages/ProjectDetail.tsx` (E2) | the `["edit", id]` query, the Render button and its line, the edit query's error |
+| `frontend/src/lib/timeline.ts`, `frontend/src/components/project/TranscriptCard.tsx` (E2) | `EditPayload` and `edit` on `NarrationPlan`; `jobActive` handed to the timeline |
+| `frontend/src/styles/theme.css` (E2) | the `--tl-*` tokens and the `.os-tl-*` block |
+| `tests/test_edit.py` (new; E2 adds the fixture case), `tests/test_revoice.py`, `tests/test_generation_options.py`, `tests/test_narration_plan.py`, `tests/test_project_ownership.py`, `tests/test_audit.py` | the guards |

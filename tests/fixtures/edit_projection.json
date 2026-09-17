@@ -1,0 +1,39 @@
+{
+  "_comment": "The projection's pinned cases, shared by services/edit.py (tests/test_edit.py) and frontend/src/lib/edit.ts (edit.test.ts) so the two copies cannot drift silently. Five sentences over a 12 s recording with 6.0-7.5 removed; the corpus keep in output_durations is the 5 s cut measured on the real 341 s source.",
+  "source_duration": 12.0,
+  "keep": [[0.0, 6.0], [7.5, 12.0]],
+  "output_duration": 10.5,
+  "to_timeline": [
+    [0.0, 0.0], [1.25, 1.25], [5.999, 5.999],
+    [6.0, 6.0],
+    [7.5, 6.0],
+    [8.0, 6.5], [10.0, 8.5], [12.0, 10.5],
+    [6.001, null], [6.5, null], [7.0, null], [7.499, null],
+    [-0.1, null], [12.001, null]
+  ],
+  "to_source": [
+    [0.0, 0.0], [1.25, 1.25], [5.999, 5.999],
+    [6.0, 7.5],
+    [6.001, 7.501],
+    [8.25, 9.75], [10.5, 12.0],
+    [10.5000001, 12.0], [99.0, 12.0], [-1.0, 0.0]
+  ],
+  "round_trip": [0.0, 1.25, 5.999, 6.0, 6.001, 8.25, 10.5],
+  "clamps": [
+    [[[3.0, 5.0]], -1.0, 3.0],
+    [[[3.0, 5.0]], 99.0, 5.0]
+  ],
+  "whole_source": [
+    [[[0.0, 12.0]], 12.0, true],
+    [[[0.0, 6.0], [6.0, 12.0]], 12.0, true],
+    [[[0.0, 12.0]], 12.0004, true],
+    [[[0.0, 11.999]], 12.0, false],
+    [[[0.0, 6.0], [7.5, 12.0]], 12.0, false],
+    [[[0.5, 12.0]], 12.0, false]
+  ],
+  "output_durations": [
+    [[[0.0, 47.3], [52.3, 341.008]], 336.008],
+    [[[0.0, 12.0]], 12.0],
+    [[[0.0, 6.0], [7.5, 12.0]], 10.5]
+  ]
+}

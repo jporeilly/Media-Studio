@@ -774,10 +774,12 @@ each that is a job with a progress bar, not a request.
   post-synthesis squeeze entirely. This is settled; it is not a design question to reopen.
 - **Picture editing** — cutting, trimming or reordering the video. `_revoice_video` muxes
   with `-c:v copy` (`core/video_creator.py:289`), which is why a re-voice takes seconds
-  rather than a full encode. Any picture edit forfeits that and is a different product.
+  rather than a full encode. A picture edit forfeits that; it is now its own vertical (`docs/porting/edit-timeline.md`), which measured the re-encode cheap enough to do on every render.
 - **Multi-track compositing.** `replace_video_audio` (`core/video_creator.py:300-371`) takes
   one background music path, loops it to length and overlays it at a flat volume
-  (`:327-342`) — no ducking, no envelopes. A mixer with tracks is its own vertical.
+  (`:327-342`) — no ducking, no envelopes. A mixer with tracks is its own vertical. That
+  vertical is now **E4 — the music lane** of the edit timeline (`docs/porting/edit-timeline.md`
+  §7), sequenced after E2; mixing or ducking the *original* audio stays out.
 - **A predicted waveform of the new narration.** The synthesised length of a sentence is
   unknown until it is synthesised, and estimating it is rate-fitting wearing a hat. The
   blocks show the **original** speech windows; the only truthful narration waveform is one

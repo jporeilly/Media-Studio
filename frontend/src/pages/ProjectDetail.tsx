@@ -7,10 +7,11 @@ import { JobProgress, type Job } from "../components/project/JobProgress";
 import { SlidesCard } from "../components/project/SlidesCard";
 import { TranscriptCard } from "../components/project/TranscriptCard";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner } from "../components/ui";
+import { renderSummary } from "../lib/edit";
 import { duration, relativeTime } from "../lib/format";
 import { type Segment } from "../lib/narration";
 import { slidesQueryKey } from "../lib/slides";
-import { narrationPlanKey } from "../lib/timeline";
+import { narrationPlanKey, type EditPayload } from "../lib/timeline";
 import {
   CARD_DURATION,
   PREVIEW_SECONDS,
@@ -145,6 +146,15 @@ export default function ProjectDetailPage() {
     enabled: isVideo,
     staleTime: Infinity,
   });
+  // The project's edit - which ranges of the video are kept. A read, so it is
+  // allowed during a job; the timeline invalidates it with every cut it
+  // commits, and the button below turns into "Render" while it removes
+  // anything. The query is the truth here, not a copy on the project record.
+  const edit = useQuery({
+    queryKey: ["edit", id],
+    queryFn: () => api.get<EditPayload>(`/api/projects/${id}/edit`),
+    enabled: isVideo,
+  });
 
   // Preselect the studio's default voice for the provider once its list arrives
   // (else the first en-US voice, else the first). An empty list leaves the voice
@@ -204,6 +214,8 @@ export default function ProjectDetailPage() {
       // go on showing the old recording's waveform and the old sentences.
       qc.invalidateQueries({ queryKey: narrationPlanKey(id) });
       qc.invalidateQueries({ queryKey: ["waveform", id] });
+      // A transcribe re-measures the source the edit's ranges are checked against.
+      qc.invalidateQueries({ queryKey: ["edit", id] });
     }
     if (status === "done") setJobId(null);
   }, [job.data?.status, id, qc]);
@@ -289,6 +301,13 @@ export default function ProjectDetailPage() {
   const dropped = p.revoice_failed_sentences ?? 0;
   const transcribeError = transcribe.isError ? errorMessage(transcribe.error) : activeKind === "transcribe" ? jobErrText : null;
   const revoiceError = revoice.isError ? errorMessage(revoice.error) : activeKind === "revoice" ? jobErrText : null;
+  // The re-voice IS the render of the edit (one job kind, one code path -
+  // E1): when the edit removes anything the button says so, with what it will
+  // do and about how long the picture step takes. With no edit, or one that
+  // keeps everything, the button and the job are exactly as before.
+  const cut = edit.data?.keep && edit.data.source_duration !== null
+    ? renderSummary(edit.data.keep, edit.data.source_duration)
+    : null;
 
   return (
     <>
@@ -586,10 +605,15 @@ export default function ProjectDetailPage() {
                   disabled={!provider || revoice.isPending || jobActive}
                   onClick={() => revoice.mutate()}
                 >
-                  {p.revoiced_video ? "Re-voice again" : "Re-voice"}
+                  {cut ? "Render" : p.revoiced_video ? "Re-voice again" : "Re-voice"}
                 </Button>
               </div>
 
+              {cut && <div style={{ color: "var(--muted)", fontSize: 13 }}>{cut}</div>}
+              {/* An edit this version cannot read (a 400 on the GET) must be
+                  shown, not swallowed behind a plain "Re-voice": the render
+                  would refuse it too, and the message says what to do. */}
+              {edit.isError && <ErrorBox message={errorMessage(edit.error)} />}
               {otherJobNotice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{otherJobNotice}</div>}
               {voices.data?.notice && <div style={{ color: "var(--muted)", fontSize: 13 }}>{voices.data.notice}</div>}
 
