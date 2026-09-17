@@ -666,10 +666,14 @@ several contradict a line that still reads as written:
   auditioned by the browser and refused 400 by the preview route — a per-sentence failure with
   no cause anybody could see.
 
-**Phase 3b — drag.** Not built. §6's drag bullet, the ±0.05 / ±0.25 s nudges and the keyboard
+**Phase 3b — drag.** Not built here: it is delivered by the edit timeline's phase E3
+(`docs/porting/edit-timeline.md` §11.3, designed 2026-09-17), where the drag lives on the
+Narration lane beside the per-track cuts, commits **one** batch write of offsets on release
+(`PATCH …/narration/offsets`, under the store's lock) rather than one `PATCH …/transcript/{index}`
+per sentence, snaps to the playhead, the picture's cuts and the spoken moment, and keeps the
+±0.05 / ±0.25 s nudges on `[` / `]`. §6's drag bullet, the nudges and the keyboard
 equivalents all still read as written and are all still outstanding, as is trap 3's surviving
-half: **commit on drag end, not per frame** (one `PATCH …/transcript/{index}` per committed
-change). Everything it needs is in place — `lib/timeline.ts` already owns seconds↔pixels and
+half: **commit on drag end, not per frame**. Everything it needs is in place — `lib/timeline.ts` already owns seconds↔pixels and
 the zoom, the blocks are already positioned from `pinned_start`, and the audition already
 re-plays from the plan whenever an adjustment invalidates it — so 3b is the gesture, its
 keyboard equivalent, the hit-testing and the write, not a new data path.

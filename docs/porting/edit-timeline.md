@@ -3,7 +3,7 @@
 Read-only survey, 2026-09-16, plus measurements taken that day on the real 5m41s 1080p
 source (`data/projects/6d808448772c/finished.mp4`). **E1 — the model and the render — and E2
 — the gesture — are built (2026-09-16 and 2026-09-17, released together as 0.7.0; §7);
-E3 onward is not.** This is the answer to "build something like
+E3 — tracks — is designed (§11) and not built; E4 and E5 are not.** This is the answer to "build something like
 Camtasia": a multi-track timeline on which the picture, the original audio and the
 narration can be cut together. The survey is written against the code as it stands at
 `4f39ae1`, and every line number below is from that tree; E1's and E2's own notes in §7 cite
@@ -737,10 +737,19 @@ focused button is handled for Chromium (the handled keydown is default-prevented
 button never arms) and for Firefox (a `keyup` guard on buttons and links), and the owner's
 real keyboard is the final check; a head-plus-tail keep still decodes the whole file.
 
-**E3 — the rest of Camtasia's editing set, in this order:** trim handles on a kept range's
+**E3 — tracks: lock a track, cut the others, drag the narration.** Asked for by the owner
+on 2026-09-17, the day E2 shipped — *"I want to be able to select a channel and edit that
+channel, so for example select video and edit just that track. That way I can adjust
+timings"* — and chosen over E4 as the next phase because it changes the edit's model and the
+music lane should be built on the final shape. Designed in **§11**; not built. In one line:
+the edit becomes one kept list **per track** (video, narration), Camtasia's lock icons decide
+which tracks a Cut applies to, and the narration's sentences can be dragged along their lane
+(the narration spec's phase 3b, delivered here).
+
+**E5 — the rest of Camtasia's editing set, in this order:** trim handles on a kept range's
 edges; split at the playhead as a first-class gesture (E2 stores the shape — `removeRange` with a
 zero-length interval is a bare split — but its gesture never makes one); markers; keyboard
-`J`/`K`/`L`; snapping to the playhead and to sentence pins.
+`J`/`K`/`L`; snapping of cuts to sentence pins (E3 brings snapping to the *drag*).
 
 **E4 — the music lane.** Asked for by the owner on 2026-09-16 — *"I should be able to add
 music tracks over the top — another channel like Camtasia"* — and moved here out of §9's
@@ -776,8 +785,11 @@ than designed: a second lane on the same timeline, which must fit the one-list s
   fade in and out while the voice never does** (the narration starts and stops clean, as
   `assemble_master` leaves it).
 
-Sequenced **after E2**, because the lane needs E2's timeline-second drawing and transport
-to be placed and heard at all; it does not depend on E3.
+Sequenced **after E3**, at the owner's word on 2026-09-17 (per-track editing first, because
+it changes the edit's model — §11 bumps `version` to 2 — and the lane should be built on the
+final shape: `music` joins version 2 *additively*, a missing key meaning no music, so E4 needs
+no bump of its own). It needs E2's timeline-second drawing and transport to be placed and heard
+at all.
 
 Budget E1 as phase-3a-sized and E2 as larger than E1: the drawing change touches every
 lane and the transport, and it is where the first-open-at-zero-scale class of bug lives.
@@ -899,3 +911,186 @@ look and the feel of its timeline, within the scope §9 draws.
 | `frontend/src/lib/timeline.ts`, `frontend/src/components/project/TranscriptCard.tsx` (E2) | `EditPayload` and `edit` on `NarrationPlan`; `jobActive` handed to the timeline |
 | `frontend/src/styles/theme.css` (E2) | the `--tl-*` tokens and the `.os-tl-*` block |
 | `tests/test_edit.py` (new; E2 adds the fixture case), `tests/test_revoice.py`, `tests/test_generation_options.py`, `tests/test_narration_plan.py`, `tests/test_project_ownership.py`, `tests/test_audit.py` | the guards |
+
+---
+
+## 11. E3 — tracks: lock, cut per track, drag the narration (designed 2026-09-17, not built)
+
+Written against the tree at `cab28bc` (0.7.0). The owner's words, on the day E2 shipped:
+*"I want to be able to select a channel and edit that channel, so for example select video and
+edit just that track. That way I can adjust timings."* Two things are asked for at once, and
+they are Camtasia's two ways of re-timing narration against picture: **cut one track while
+the others stay put** (its lock icons), and **slide the narration along its track** (drag a
+clip). E2 cuts every track together — Camtasia with everything unlocked — so both are
+missing today, and both can be added without touching the rule that made E1 and E2 safe: the
+transcript never moves, and the edit is a projection.
+
+### 11.1 The model — one kept list per track
+
+```json
+"edit": { "version": 2,
+          "video":     { "keep": [[0.0, 47.3], [52.3, 341.008]] },
+          "narration": { "keep": [[0.0, 341.008]] } }
+```
+
+- **Two lists, same shape as E1's one**, both in SOURCE seconds, both validated by
+  `validate_keep` against the WAV header's length (they are ranges of the one source; nothing
+  else changes about what a range is). A track key **absent** means that track keeps
+  everything; both absent means no edit and the record reads as one that never had one.
+  Nothing else is stored — no lock state, no positions.
+- **A version-1 record is read as "cut together"**: `{"version": 1, "keep": K}` means
+  `video = narration = K`. `stored_keep`'s rule that a foreign version is refused stays for
+  versions this code does not know; version 1 it *knows*, and E1's own §2 said whoever bumps
+  the version must read the older shape rather than refuse it. Written back as version 2 on
+  the next write. No migration.
+- **The output's length is the picture's**: `output_duration(video.keep)`. The narration
+  track has its own length, `output_duration(narration.keep)`, and a sentence pinned at or
+  past the picture's end is `past_end` — the machinery E1 kept load-bearing (trap 11) — and
+  is dropped by `-shortest` exactly as today.
+- **E4's `music` joins this version additively** (a missing key is no music), so E4 bumps
+  nothing.
+
+### 11.2 The projection, per track — what changes in `services/edit.py`
+
+`apply(record, transcript, source_duration)` returns both lists and applies **the narration
+list** to the transcript: `sentences = project_transcript(transcript, narration.keep)` when
+that list removes anything, else the transcript itself, untouched — the byte-identical path
+for a project whose narration is whole, which is every project made before this and every
+video-only edit. `cut` (whether the picture step runs) is the **video** list's
+`whole_source`. Everything downstream keeps its one call:
+
+- `services/revoice.py` cuts the picture with `applied.video` and hands the engine
+  `applied.sentences` — no other line changes, and `_revoice_video` is still untouched.
+- `services/narration.py::plan` reports `sentences` in the **output's** seconds (the
+  narration list's timeline starts at the same zero as the picture's), `duration` = the
+  picture's output length, and `edit` in the version-2 shape.
+- `to_source` / `to_timeline` for the playhead, the filmstrip and the waveform use the
+  **video** list: the picture and its original audio are one file.
+
+What this means on the timeline, in one sentence each — and these are the semantics the
+owner is choosing (decision 1 of §11.7):
+
+- **Cut with both tracks unlocked** (today's behaviour, unchanged): the output interval
+  `[a, b]` is removed from both lists; sentences whose spoken moment was in it go with the
+  picture, later ones close up with it.
+- **Cut with Narration locked**: only `video.keep` changes. The picture closes up; the
+  narration's pins do not move — so a sentence that was spoken over the removed picture now
+  plays over the picture that follows, and every later sentence is *earlier against the
+  picture* by the length removed. That is the timing adjustment the owner asked for, and it
+  is exactly what Camtasia does to a locked track.
+- **Cut with Video locked**: only `narration.keep` changes. Sentences whose start lies in
+  the removed narration interval are dropped (E1's rule, applied to this track's list), later
+  ones close up; the picture is untouched. This is "take those sentences out and bring the
+  rest forward" without touching a single offset.
+- **Audio · original follows Video** — it is the picture's own audio, reference only, never
+  rendered; it has no lock and the video lock is its lock.
+
+The one-list arithmetic of `lib/edit.ts` and `services/edit.py` is reused as it is: a cut
+on a track is `removeRange(thatTrack.keep, a, b)` with the same `[a, b]` — both tracks are
+laid out from 0 on the output axis, so the interval means the same instant on each. The
+join markers become per lane: the video's joins on the Video and Audio lanes, the
+narration's on the Narration lane. The shared fixture gains the per-track cases.
+
+### 11.3 Dragging the narration — the narration spec's phase 3b, delivered here
+
+A sentence block dragged along the Narration lane sets its **`offset`** — nothing else, and
+never `start`/`end` (trap 1): `offset = round3(new pinned position − toTimeline(start,
+narration.keep))`, clamped to ±`MAX_OFFSET_SECONDS` (300 s) and to the audition's length,
+`0` stored as `null` (the List's own rule, `numberChange`). The List view's Offset box
+becomes the readout of the drag; the number stays the contract, as the narration spec said.
+
+- **Selecting blocks**: click selects one (as now, and seeks); **Ctrl+click** adds or
+  removes one; **Shift+click** extends to a range of sentences; a **marquee** dragged on
+  empty Narration-lane space selects the blocks it crosses (Camtasia's rubber band). A drag
+  that begins on a selected block moves **every selected block by the same amount**; on an
+  unselected one, that block alone. Ctrl+drag stays the timeline range selection (E2), on
+  every lane, block or not.
+- **Snapping** (Camtasia snaps to clip edges, the playhead and markers; Ctrl held while
+  dragging disables it): the dragged block's pin snaps, within 8 px at the current zoom, to
+  the playhead, to the video's joins, to the other sentences' pins and landed ends, and to
+  the block's **own spoken moment** (the ghost) — so "back to where it was said" is a snap,
+  not a hunt. Nudge keys for precision: `[` / `]` move the selected blocks ∓/± 0.05 s,
+  `Shift+[` / `Shift+]` 0.25 s (the narration spec's nudges; Camtasia has no timeline nudge
+  key and `Ctrl+[`/`]` are its marker keys, untouched).
+- **What the drag shows**: the block follows the pointer with its new time in a label beside
+  it (as the in/out handles show theirs), the ghost stays at the spoken moment, and after
+  the commit the plan says where the sentence **lands** — a pin is a floor, so a block
+  dragged into the previous sentence's clip is drawn pushed, with the overrun marker, exactly
+  as a typed offset is today. Blocks are never re-sorted (the narration spec's rule).
+- **Commit on release, one request** for however many blocks moved: a new
+  `PATCH /api/projects/{pid}/narration/offsets` with
+  `{"offsets": [{"index": 3, "offset": 0.4}, {"index": 4, "offset": null}, …]}` —
+  `extra="forbid"`, indices in range, offsets validated by the existing rule in
+  `services/narration.py` — applied under `store.project_lock` in **one** read-modify-write
+  (a drag of twelve sentences must not be twelve interleaving writes), refused with a 409
+  while a job holds the project, audited **once** as `PROJECT_TRANSCRIPT_TIMING` with the
+  indices and the field name only ("segments 3, 4, 5: offset"), returning the updated
+  sentences. The single-sentence `PATCH …/transcript/{index}` stays as it is. The baseline
+  memo is **not** dropped: an offset changes where a sentence is pinned, not the texts the
+  rate is measured over.
+- **Reset timing**: a toolbar button (and the block's context) sends `offset: null` for the
+  selected sentences through the same route.
+- **The audition after a drag**: pins and windows change, texts do not, so the clips whose
+  effective speed changed are re-fetched and the rest survive — the E2 rule, already in
+  place; the playhead stays where it is.
+- **The List view stays in step**: the timeline hands the committed offsets to
+  `TranscriptCard` (as `adjust`'s `onSuccess` folds a saved sentence back in) so the boxes
+  read the new values without a refetch that would drop half-typed words.
+
+### 11.4 Locks — the UI of "select a channel"
+
+Camtasia's lock icon on each track header. A locked lane is drawn dimmed with a hatch, the
+selection band skips it, and a Cut applies to the unlocked tracks only (both unlocked is
+today's cut; both locked disables Cut with the toolbar saying why). Audio · original shows
+"follows Video" in place of a lock. Lock state is **the client's, per visit and per project**
+(remembered in `localStorage` so it survives a reload, never on the record — it is a
+gesture modifier, and the durable thing is the edit it produces). The header column gets
+the Camtasia look the owner's screenshot shows: the lock, and a muted eye that is not a
+control in this phase.
+
+### 11.5 Undo, in the presence of two kinds of change
+
+The client stack becomes a list of **operations**, each with what to send to undo it and to
+redo it: a cut stores the whole edit (both lists) before and after; a drag or a Reset stores
+the moved sentences' offsets before and after. Undo re-sends the "before"; redo the "after";
+fifty deep; pushed only on success; lost on reload — exactly E2's rules, generalised. The
+commit lock E2's Reviewer forced (nothing edits while the plan the last commit produced is
+still being read) covers offset commits too, since they invalidate the plan as well.
+
+### 11.6 Traps this phase adds
+
+18. **Two timelines, one axis.** The narration list and the video list each close their
+    own holes from the same zero; a sentence's output position is
+    `toTimeline(start, narration.keep) + offset`, its picture is `toSource(t, video.keep)`.
+    Anything that projects the narration through the *video* list has re-created E2's
+    "cut together" — fine when the lists are equal, wrong the moment they are not, and the
+    per-track fixture cases exist to catch it.
+19. **A locked track is untouched, not re-derived.** Cutting the picture with Narration
+    locked drops no sentence and moves no pin, even sentences spoken over the removed
+    picture — the render plays them over what follows. That is the point, and the audition
+    shows it before any render.
+20. **The drag commits `offset`; nothing commits `start`/`end`.** Trap 1, restated for the
+    one gesture that looks like it moves a sentence.
+21. **One write per gesture.** A marquee of twelve blocks dragged together is one PATCH under
+    the lock, never twelve; the whole-list Save and the single-sentence PATCH keep their own
+    concerns.
+22. **Version 1 is read, not refused.** The only foreign version is one this code has never
+    seen.
+
+### 11.7 Decisions for the owner before the build
+
+1. **Locked-track semantics as §11.2 states them** — a video-only cut leaves every pin where
+   it is (Camtasia's rule). The alternative — still dropping the sentences whose spoken moment
+   was cut — was considered and not proposed: "locked" would then not mean untouched.
+2. **Lock state is per visit, not stored** (like undo). The alternative — on the record — is
+   a one-key change if a stored lock is ever wanted.
+3. **The drag commits `offset` only**; the List's box becomes its readout.
+4. **Snapping on by default; Ctrl held while dragging disables it** (Camtasia's rule).
+5. **Nudge keys `[` `]` (0.05 s) and `Shift+[` `Shift+]` (0.25 s).**
+6. **Release**: E3 and E4 together as **0.8.0**, or E3 alone first — the owner's call when
+   E3 is built.
+
+Build order inside the phase: the model and routes (version 2 read/write, `apply` per track,
+the offsets route — verifiable by `curl`, the E1 way), then the timeline (locks, per-lane
+joins, marquee, drag with snapping, the operation stack), each through Developer → Reviewer →
+Documentation, rendered in the packaged app before it is believed.
