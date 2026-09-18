@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- [fix] **The Timeline's clock can no longer read `0:60.000`.** `lib/format.ts::timecode` rounded the seconds remainder on its own (`toFixed(3)` of `total - m * 60`), so a position a fraction under a minute rounded up to sixty seconds instead of into the next minute: 59.9996 s read `0:60.000` and 119.9997 s `1:60.000`, on the narration Timeline's playhead clock, in/out labels, ruler and piece and sentence titles, and on the List view's row labels. It now rounds to whole milliseconds first and splits minutes, seconds and millis from that integer, as the Python twin `services/narration.py::timecode` already did, so the carry rides into the minute: `1:00.000` and `2:00.000`. — #timecode-minute-carry
+
 - [fix] **A subtitle clock can no longer read `,1000`.** The generate job's `.srt` and `.vtt` sidecars rounded the fractional second on its own, and a fraction that rounds up gave a thousand milliseconds: 1.9996 s printed as `00:00:01,1000` and 59.9997 s as `00:00:59.1000`, timestamps neither format accepts, and both reached the files served by `GET /api/projects/{pid}/outputs/{kind}`. Both clocks now round to whole milliseconds first and split from there, so the carry rides up into the seconds, minutes and hours by itself: `00:00:02,000` and `00:01:00.000`. It is the one clock the narration transcript download already kept (`services.narration.srt_time` is now the engine's own `core.subtitle_generator.format_srt_time`), so the two SRTs the app writes cannot disagree on a timestamp. — #subtitle-clock-rounding
 
 ## [0.8.0] - 2026-09-18

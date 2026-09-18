@@ -47,10 +47,18 @@ export function duration(seconds: number | null | undefined): string {
  * this video". A transcript sentence is nudged in tenths and hundredths of a
  * second, so a label rounded to the second would say nothing about the change
  * that was just made.
+ *
+ * Rounded to whole milliseconds FIRST and split from there, as the Python
+ * twin (services/narration.py::timecode) is. Rounding the seconds remainder
+ * on its own (toFixed(3) of `total - m * 60`) printed a position a fraction
+ * under a minute as "0:60.000": 59.9996 s is "1:00.000" and 119.9997 s is
+ * "2:00.000", the carry riding into the minute. Negative is clamped at zero,
+ * as a pin is.
  */
 export function timecode(seconds: number | null | undefined): string {
-  const total = Math.max(0, Number(seconds || 0));
-  const m = Math.floor(total / 60);
-  const s = total - m * 60;
-  return `${m}:${s.toFixed(3).padStart(6, "0")}`;
+  const ms = Math.round(Math.max(0, Number(seconds || 0)) * 1000);
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const millis = ms % 1000;
+  return `${m}:${String(s).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
 }

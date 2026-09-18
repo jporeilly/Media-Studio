@@ -37,4 +37,14 @@ describe("timecode", () => {
     expect(duration(90.6)).toBe("1:31");
     expect(timecode(90.6)).toBe("1:30.600");
   });
+  it("rounds to whole milliseconds first, so a carry rides into the minute", () => {
+    // The remainder used to be rounded on its own: 59.9996 read "0:60.000" and
+    // 119.9997 "1:60.000". Whole milliseconds first, then split, as the Python
+    // twin (services/narration.py::timecode) does.
+    expect(timecode(59.9996)).toBe("1:00.000");
+    expect(timecode(119.9997)).toBe("2:00.000");
+    expect(timecode(65.25)).toBe("1:05.250");
+    expect(timecode(0)).toBe("0:00.000");
+    expect(timecode(-1.5)).toBe("0:00.000");
+  });
 });
