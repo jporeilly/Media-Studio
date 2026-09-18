@@ -83,6 +83,28 @@ export function previewUrl(projectId: string, index: number, job: JobNarration):
   return `/api/projects/${projectId}/transcript/${index}/preview${qs({ ...job })}`;
 }
 
+/** The files the Transcript card offers (services/narration.py's EXPORT_FORMATS). */
+export const DOWNLOAD_FORMATS = ["srt", "txt", "json"] as const;
+export type DownloadFormat = (typeof DOWNLOAD_FORMATS)[number];
+
+/**
+ * Which timings a downloaded transcript carries: `timeline` is the narration as
+ * the re-voice will speak it — projected through the edit, muted and dropped
+ * sentences left out, each sentence at the moment it is AIMED at — and `source`
+ * is every sentence at the moment it was spoken in the original recording,
+ * muted ones marked. The placement is the server's (the audition plan's own
+ * numbers); the client only names the view.
+ */
+export type DownloadView = "timeline" | "source";
+
+/**
+ * Where to download the transcript from. Both parameters are always sent, so
+ * the link says what it fetches without leaning on the server's defaults.
+ */
+export function transcriptDownloadUrl(projectId: string, format: DownloadFormat, view: DownloadView): string {
+  return `/api/projects/${projectId}/transcript/download${qs({ format, view })}`;
+}
+
 /** The two per-sentence number boxes. They read an empty box differently. */
 export type NumberField = "offset" | "speed";
 

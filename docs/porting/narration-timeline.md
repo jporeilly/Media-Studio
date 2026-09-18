@@ -426,9 +426,11 @@ growing `projects.py`):
 | `PATCH /{pid}/transcript/{index}` | `require_project` + `jobs.require_idle`; audits a **new** constant `PROJECT_TRANSCRIPT_TIMING = "project.transcript_timing"` added to `api/audit.py:82-91` `ACTIONS`; detail = field names only, never the text (`api/audit.py:128-134`) |
 | `GET /{pid}/waveform` | §4 |
 | `GET /{pid}/transcript/{index}/preview` | §5 |
+| `GET /{pid}/transcript/download` | *Added in 0.8.0 (T1; CHANGELOG `#transcript-download`).* The transcript as a file — `format=` `srt` / `txt` / `json`; `view=` `timeline` (as the re-voice will speak it: the plan's own pins, through `project_narration`, the half of `plan` pulled out to be shared) or `source` (as spoken in the recording, muted sentences marked). A read beside the waveform and the plan: `readable_project`, allowed while a job holds the project, never audited; `Cache-Control: no-cache`; §7 |
 
 Three new `{pid}` routes for `tests/test_project_ownership.py:32-63`; one new mutating route
-for `tests/test_audit.py`.
+for `tests/test_audit.py`. *(The download, 0.8.0, is a fourth — a GET, so the audit guard
+need not name it.)*
 
 ---
 
@@ -672,7 +674,7 @@ several contradict a line that still reads as written:
 **Phase 3b — drag.** **DONE**, 2026-09-18, delivered by the edit timeline's phase E3
 (`docs/porting/edit-timeline.md` §11.3 for the design and its *As built* notes, §7's E3 block
 for what shipped, the Reviewer's findings and the proofs; CHANGELOG `#edit-timeline-tracks`,
-unversioned on top of 0.7.0 pending the owner's release call). The drag lives on the
+released as 0.8.0 on 2026-09-18). The drag lives on the
 Narration lane beside the per-track cuts: a block — or every selected block, by the same
 delta — follows the pointer with its new time beside it, snaps within 8 px to the playhead,
 the picture's joins, the other sentences' pins and landed ends and its own spoken moment
@@ -691,6 +693,12 @@ path: `lib/timeline.ts`'s seconds↔pixels and zoom, the blocks positioned from
 `pinned_start`, and the audition re-playing from the plan were what it needed. Not built
 with it: auto-scroll while dragging, and a two-dimensional marquee (the block marquee selects
 by the stretch of time it crosses).
+
+**Shipped beside 3b in 0.8.0 — the transcript download** (T1; CHANGELOG `#transcript-download`):
+`GET /{pid}/transcript/download` hands the transcript over as SRT, TXT or JSON, timed as the
+re-voice will speak it — the plan's own pins, through `project_narration`, the half of `plan`
+pulled out so the two share one projection and one pin — or as it was spoken in the source;
+§6's table has the row.
 
 **Phase 4 (optional) — per-segment translation.** `core/translator.py:96-123`
 `translate_notes` already returns a list the same length as its input with failures passing

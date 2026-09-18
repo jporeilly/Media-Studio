@@ -1,6 +1,6 @@
 <h1 align="center">Media Studio Enterprise</h1>
 
-<p align="center"><b>Version 0.7.0</b> — React + FastAPI. Turn slide decks and videos into narrated MP4s.</p>
+<p align="center"><b>Version 0.8.0</b> — React + FastAPI. Turn slide decks and videos into narrated MP4s.</p>
 
 Media Studio Enterprise is the React + FastAPI successor to **Slide Studio Enterprise**
 (NiceGUI). It reuses the same Python media engine — PowerPoint/PDF export, Edge TTS &
@@ -18,7 +18,8 @@ the whole app suite looks and feels the same.
 > played back one at a time, and a timeline view of those sentences over a filmstrip and the
 > original audio's waveform that plays the whole new narration against the picture without
 > running a re-voice (phases 1 to 3b of the narration timeline — the drag lives on the edit
-> timeline's Narration lane), an **edit
+> timeline's Narration lane), that transcript downloadable as SRT, TXT or JSON — timed as the
+> re-voice will speak it or as it was spoken in the source —, an **edit
 > timeline** in Camtasia's shape on a video project — the ranges of its source that are kept,
 > one list **per track** (video, narration) that a split, a trim and a ripple delete all
 > change, made on the strip itself (select a range with the playhead's green and red handles
@@ -26,9 +27,8 @@ the whole app suite looks and feels the same.
 > stays locked; `S` splits at the playhead into pieces that can be clicked and cut; drag a
 > sentence block along the Narration lane, with snapping, to re-time it) and rendered by
 > **Render**, the re-voice with the picture cut first (E1 the model and the render and E2 the
-> gesture in 0.7.0; E3 the tracks, built on top of it on 2026-09-18 and unversioned until the
-> owner's release call — 0.8.0 with or without E4's music lane; trim handles, markers and the
-> music lane are not built), re-voicing in
+> gesture in 0.7.0; E3 the tracks in 0.8.0, released 2026-09-18 together with the transcript
+> download; trim handles, markers and the music lane are not built), re-voicing in
 > a new voice or a translated language that keeps step with
 > the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
 > configurable password policy, projects that belong to whoever imported them with an audit

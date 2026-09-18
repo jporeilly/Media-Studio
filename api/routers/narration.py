@@ -1,6 +1,6 @@
 """The narration editor: per-sentence adjustments to a transcribed video.
 
-Five routes:
+Six routes:
 
 - ``PATCH /api/projects/{pid}/transcript/{index}`` nudges when a single
   sentence is spoken, mutes it, or gives it its own voice or speed;
@@ -12,6 +12,9 @@ Five routes:
 - ``GET /api/projects/{pid}/narration/plan`` says what every sentence will be
   spoken as, how fast and in whose voice, so the timeline can audition the
   whole narration without rendering anything;
+- ``GET /api/projects/{pid}/transcript/download`` hands the transcript over as
+  a file - SRT, TXT or JSON - timed as the re-voice will speak it or as it was
+  spoken in the source;
 - ``GET /api/projects/{pid}/waveform`` returns the peaks of the extracted
   audio, which the timeline strip is drawn from.
 
@@ -21,8 +24,9 @@ caller's and that it is a video, and map the service's errors to HTTP answers.
 The two PATCHes additionally refuse a write while a job is attached to the
 project (``services.jobs.require_idle``, a 409 - every slide write takes it and
 these must too, since a re-voice job reads the transcript it is adjusting). The
-three GETs do NOT: they write nothing to the project, and refusing to let
-someone listen to or look at it while a job runs would be a 409 on a read.
+four GETs do NOT: they write nothing to the project, and refusing to let
+someone listen to, look at or download it while a job runs would be a 409 on a
+read.
 
 ``SegmentNotFound`` is answered differently by the two on purpose, and both are
 right: the PATCH is a write whose index argument is out of range (400, as it has
@@ -38,13 +42,19 @@ The WHOLE-LIST ``PATCH /{pid}/transcript`` stays where it is
 (``api.routers.projects``) and stays a text editor. One writer per concern.
 """
 
+import unicodedata
+from typing import Literal
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from api.audit import PROJECT_TRANSCRIPT_TIMING, audit
 from api.deps import current_user, readable_project, writable_project
+from api.routers.projects import MUTABLE_MEDIA_HEADERS
 from api.schemas import OffsetsIn, SegmentOverride
 from services import narration, waveform
+from utils.helpers import sanitize_filename
 
 router = APIRouter(prefix="/projects", tags=["narration"])
 
@@ -215,6 +225,91 @@ def get_narration_plan(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _printable(text: str) -> str:
+    """``text`` with the control characters dropped (U+0000-U+001F, U+007F).
+
+    A header cannot carry them - h11 refuses the response outright and
+    uvicorn drops the connection - and ``sanitize_filename`` does not strip
+    them, so a project name with a newline in it (a hand-edited record; an
+    upload cannot make one on Windows) would turn a download into a closed
+    socket. Applied to both forms of the name below.
+    """
+    return "".join(ch for ch in text if ord(ch) >= 0x20 and ord(ch) != 0x7F)
+
+
+def _attachment(filename: str) -> str:
+    """The ``Content-Disposition`` of a download built from bytes - what
+    ``FileResponse(filename=...)`` writes for a file on disk, which the other
+    download routes lean on and this one cannot.
+
+    A plain quoted name while it is ASCII; otherwise RFC 5987's ``filename*``
+    beside an ASCII fallback, because a header is Latin-1 and a project called
+    "Présentation" would otherwise be a 500. The fallback is the NFKD fold of
+    the name (é -> e) put through ``utils.helpers.sanitize_filename`` AGAIN
+    afterwards: the fold turns fullwidth punctuation into the ASCII quote,
+    backslash and slash that the first sanitising never saw, and an unescaped
+    quote inside a quoted-string is not a header at all. A stem that folds
+    away to nothing (a wholly non-Latin name) is called ``transcript`` rather
+    than leaving a legacy client to save ``-narration.srt``. The ASCII form
+    therefore carries no quote or backslash, so the quoted form needs no
+    escaping.
+    """
+    filename = _printable(filename)
+    if filename.isascii():
+        return f'attachment; filename="{filename}"'
+    folded = unicodedata.normalize("NFKD", filename).encode("ascii", "ignore").decode("ascii")
+    fallback = sanitize_filename(_printable(folded))
+    if fallback.startswith(f"{narration.EXPORT_SUFFIX}."):
+        fallback = "transcript" + fallback
+    return f"attachment; filename=\"{fallback}\"; filename*=utf-8''{quote(filename)}"
+
+
+@router.get("/{pid}/transcript/download")
+def download_transcript(
+    pid: str,
+    # The literals mirror ``narration.EXPORT_FORMATS`` / ``EXPORT_VIEWS``; an
+    # unknown value is a 422 from the schema, before the endpoint runs.
+    fmt: Literal["srt", "txt", "json"] = Query("srt", alias="format", description="srt | txt | json"),
+    view: Literal["timeline", "source"] = Query(
+        "timeline",
+        description="timeline: as the re-voice will speak it; source: as spoken in the source video",
+    ),
+    user: dict = Depends(current_user),
+):
+    """Download the transcript as a file.
+
+    Two timing views, because the two questions are different: ``timeline``
+    is the narration as the re-voice will speak it - projected through the
+    edit, muted and dropped sentences left out, each sentence at the moment
+    it is AIMED at - and ``source`` is the script as it was spoken in the
+    original recording, every sentence at Whisper's own time, muted ones
+    marked. The timeline's numbers are the audition plan's own
+    (``services.narration.project_narration``), never a second projection.
+
+    A read: it writes nothing, so like the preview and the plan it does NOT
+    take ``jobs.require_idle`` (a download while a re-voice runs is fine) and
+    is not audited (``tests/test_audit.py`` counts every non-GET as mutating).
+    ``Cache-Control: no-cache`` because the transcript is rewritten in place -
+    the same header the re-voiced video and the tracks carry, for the same
+    reason (``MUTABLE_MEDIA_HEADERS``).
+
+    Answers: 200 the file, named ``<project name>-narration.<ext>``, 400 a
+    deck/PDF or an edit that cannot be read or measured, 404 no such project
+    or no transcript yet, 422 an unknown format or view.
+    """
+    readable(pid, user)
+    try:
+        filename, media_type, body = narration.export_transcript(pid, fmt, view)
+    except (narration.ProjectNotFound, narration.SegmentNotFound) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return Response(
+        content=body, media_type=media_type,
+        headers={**MUTABLE_MEDIA_HEADERS, "Content-Disposition": _attachment(filename)},
+    )
 
 
 @router.get("/{pid}/waveform")

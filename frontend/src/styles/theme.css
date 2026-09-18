@@ -97,7 +97,7 @@ p { margin: 0 0 8px; }
 .os-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .os-card-title { font-size: 15px; font-weight: 600; font-family: var(--font-display); letter-spacing: -0.01em; }
 .os-card-subtitle { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.os-card-actions { display: flex; gap: 8px; align-items: center; }
+.os-card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .os-grid { display: grid; gap: 18px; }
 .os-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .os-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }

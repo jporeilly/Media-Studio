@@ -3,11 +3,11 @@
 Read-only survey, 2026-09-16, plus measurements taken that day on the real 5m41s 1080p
 source (`data/projects/6d808448772c/finished.mp4`). **E1 — the model and the render —, E2
 — the gesture — and E3 — tracks — are built (2026-09-16, 2026-09-17 and 2026-09-18; E1 and E2
-released together as 0.7.0, E3 built on top of it and unversioned pending the owner's release
-call; §7, §11); E4 and E5 are not.** This is the answer to "build something like
-Camtasia": a multi-track timeline on which the picture, the original audio and the
-narration can be cut together — or, since E3, one track at a time. The survey is written
-against the code as it stands at
+released together as 0.7.0, E3 released as 0.8.0 on 2026-09-18, alone and ahead of E4, beside
+the narration transcript download; §7, §11); E4 and E5 are not.** This is the answer to
+"build something like Camtasia": a multi-track timeline on which the picture, the original
+audio and the narration can be cut together — or, since E3, one track at a time. The survey
+is written against the code as it stands at
 `4f39ae1`, and every line number below is from that tree; E1's, E2's and E3's own notes in §7
 cite symbols rather than lines, and where a build proved a section wrong the section is
 corrected in place and says so.
@@ -745,9 +745,10 @@ button never arms) and for Firefox (a `keyup` guard on buttons and links), and t
 real keyboard is the final check; a head-plus-tail keep still decodes the whole file.
 
 **E3 — tracks: lock a track, cut the others, split at the playhead, drag the narration.**
-**DONE**, 2026-09-18, built over `f637c1d` on top of 0.7.0 and **unversioned** — the release
-number (0.8.0 with E4, or E3 alone first) is the owner's call, §11.7's sixth decision; see
-CHANGELOG `#edit-timeline-tracks` under Unreleased. Asked for by the owner on 2026-09-17, the
+**DONE**, 2026-09-18, built over `f637c1d` on top of 0.7.0 and released as **0.8.0** the same
+day — E3 alone, ahead of E4, the owner's call on §11.7's sixth decision — together with the
+narration transcript download (T1); see CHANGELOG `#edit-timeline-tracks` and
+`#transcript-download` under 0.8.0. Asked for by the owner on 2026-09-17, the
 day E2 shipped — *"I want to be able to select a channel and edit that channel, so for example
 select video and edit just that track. That way I can adjust timings"* — and the same
 afternoon, *"add a split, which splits the selected channel at playhead"*; chosen over E4
@@ -1112,8 +1113,9 @@ look and the feel of its timeline, within the scope §9 draws.
 
 ## 11. E3 — tracks: lock, cut per track, drag the narration (designed 2026-09-17, built 2026-09-18)
 
-Written against the tree at `cab28bc` (0.7.0); **built** over `f637c1d` on 2026-09-18 — §7's E3
-block records what shipped, the Reviewer's findings and the proofs — and where the build
+Written against the tree at `cab28bc` (0.7.0); **built** over `f637c1d` on 2026-09-18 and
+released as **0.8.0** the same day — §7's E3 block records what shipped, the Reviewer's
+findings and the proofs — and where the build
 differed from the design below, the section says so in place under *As built*. The owner's
 words, on the day E2 shipped:
 *"I want to be able to select a channel and edit that channel, so for example select video and
@@ -1382,8 +1384,8 @@ edit saying the picture is not cut.
 4. **Snapping on by default; Ctrl held while dragging disables it** (Camtasia's rule).
 5. **Nudge keys `[` `]` (0.05 s) and `Shift+[` `Shift+]` (0.25 s).**
 6. **Release**: E3 and E4 together as **0.8.0**, or E3 alone first — the owner's call when
-   E3 is built. *(E3 is built, 2026-09-18, uncommitted over `f637c1d` at 0.7.0; the call is
-   open.)*
+   E3 is built. *(Taken 2026-09-18, the day E3 was built — "cut a build and release 0.8.0":
+   **E3 alone, as 0.8.0**, ahead of E4, together with the narration transcript download, T1.)*
 7. **"Select a channel" = click its name: the other track locks.** One concept underneath
    (locks), one click on top. The alternative — a separate "active track" state beside the
    locks — was not proposed: two ways to say which track an edit touches would disagree.

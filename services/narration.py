@@ -40,23 +40,36 @@ out what it sounds like. That is a read: it writes nothing to the project, it is
 deliberately not a job, and the audio it leaves in the shared TTS cache is the
 very entry the render will reuse.
 
+And it writes the transcript out as a file (``export_transcript``: SRT, TXT or
+JSON) in two timing views - as the re-voice will speak it, projected through the
+edit and placed by the very calls the audition plan is placed by, or as it was
+spoken in the source. Another read: nothing on the project changes.
+
 What deliberately is NOT here: anything that fits a speed automatically. See
 ``docs/porting/narration-timeline.md`` §9.
 """
 
+import json
 import math
 import shutil
 import tempfile
 import threading
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from services import projects as store
 from services import studio_settings
 from services.voices import KOKORO_MODEL_PENDING
-from utils.helpers import get_cache_path
+from utils.helpers import get_cache_path, sanitize_filename
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    # ``services.edit`` imports this module, so at runtime it is imported
+    # lazily inside the functions that need it; this is for the annotations only.
+    from services import edit
 
 logger = get_logger("NARRATION")
 
@@ -545,6 +558,143 @@ def transcript_section(transcript) -> dict:
     }
 
 
+def _source_length(record: dict, source_duration, section: dict) -> float:
+    """How long the source is when the WAV cannot say (``source_duration``
+    None): the record's own duration (measured on the video at transcription),
+    else the transcript's last word. One fallback chain for the audition plan
+    and the transcript download, so a project restored without its
+    ``audio.wav`` is the same length to both."""
+    if source_duration is not None:
+        return source_duration
+    return float(record.get("duration") or 0.0) or section["end"]
+
+
+@dataclass(frozen=True)
+class Projection:
+    """The narration as the render will speak it: the transcript projected
+    through the edit, every spoken sentence at its pin, and the ones the
+    render will drop named. The half of :func:`plan` that
+    :func:`export_transcript` shares with it, pulled out so the transcript a
+    user downloads is placed by the very calls the audition is placed by,
+    never by a copy of them.
+
+    ``listed`` pairs every projected sentence with its index in the STORED
+    transcript; ``spoken`` is the subset the render will synthesise (words,
+    not muted), in order; ``pins`` is where each spoken sentence is pinned;
+    ``windows`` the room each one has - absent for a ``past_end`` one, which
+    the mux drops; ``duration`` is the length everything is bounded by, the
+    picture's when it is cut, else ``source_length``, the source's."""
+
+    applied: "edit.Applied"
+    source_duration: float | None
+    source_length: float
+    duration: float
+    section: dict
+    listed: list[tuple[int, object]]
+    spoken: list[tuple[int, dict]]
+    pins: dict[int, float]
+    windows: dict[int, float]
+    past_end: frozenset[int]
+
+
+def project_narration(record: dict, transcript: list) -> Projection:
+    """The transcript through the edit, every spoken sentence at its pin, and
+    the ones the render will drop - by the render's own calls
+    (``services.edit.apply``, :func:`transcript_section`,
+    ``services.processing.sentence_window`` and, inside it, ``_pin``), so the
+    audition plan and the transcript download cannot disagree with the render,
+    or with each other, about which sentences are spoken and where each is
+    aimed. Raises ``ValueError`` for an edit that cannot be read or measured.
+    """
+    from services import edit, processing, waveform
+
+    pid = record["id"]
+
+    # The scale everything is drawn against: the WAV header's, never ffprobe's
+    # and never the record's if the audio can speak for itself.
+    #
+    # **Where this diverges from the render, exactly.** ``_revoice_video`` bounds
+    # its LAST spoken sentence by ``_probe_duration(video)`` and drops any
+    # sentence pinned at or past that. Two differences follow, and both are
+    # accepted rather than hidden:
+    #
+    # - when ffprobe IS available the two numbers are the same recording
+    #   measured two ways (the extracted audio is that video's own audio), so
+    #   they agree to within a frame;
+    # - when ffprobe is ABSENT - which the packaged app must assume, since the
+    #   imageio fallback ships ffmpeg only - the render gets ``video_end = 0.0``
+    #   and falls back to bounding the last sentence by the SECTION's end, while
+    #   this still uses the WAV duration. Those genuinely differ whenever the
+    #   recording runs on after the last word.
+    #
+    # Blast radius: the last spoken sentence only, and only when the bound would
+    # make it short enough to be sped up - a longer window can only lower a
+    # speed to the floor it is already at. Using ffprobe here instead is refused
+    # by the porting spec's traps 5 and 6; using the record's duration would not
+    # be the scale of the file being drawn.
+    source_duration = waveform.duration_for(pid)
+
+    # The edit, applied by the very function the render applies it with, so
+    # the two cannot disagree about whether it changes anything or where a
+    # sentence lands once it has. With no edit, or one whose narration list
+    # keeps everything (a video-only edit included), ``sentences`` is the
+    # transcript itself and nothing below changes. ``listed`` pairs each
+    # sentence with its index in the STORED transcript - what the narration
+    # routes address a sentence by; the projection drops sentences, so a
+    # position in its list is not it. Keyed on ``projected``, never on
+    # ``cut``: a video-only edit projects nothing and a narration-only edit
+    # projects everything.
+    applied = edit.apply(record, transcript, source_duration)
+    listed = (
+        [(seg["index"], seg) for seg in applied.sentences] if applied.projected
+        else list(enumerate(transcript))
+    )
+
+    # ONE section spanning the whole transcript - the very thing
+    # ``services.revoice`` reconstructs for the engine, so the window the last
+    # sentence is measured against is the one the render will measure it
+    # against. Over the projected sentences when there is a cut, as the
+    # render's is.
+    section = transcript_section(applied.sentences)
+    source_length = _source_length(record, source_duration, section)
+    # The PICTURE's length when it is cut: the mux is ``-shortest``, so that
+    # is what bounds the last sentence and drops one pinned past it.
+    duration = applied.output_duration if applied.cut else source_length
+
+    # The sentences the render will actually speak, in order - empty and muted
+    # ones filtered out BEFORE any window maths, exactly as ``_revoice_video``
+    # filters them, which is what gives the sentence before a muted one its room.
+    spoken_pairs = [
+        (index, seg) for index, seg in listed
+        if isinstance(seg, dict) and (seg.get("text") or "").strip() and not seg.get("muted")
+    ]
+    spoken = [(seg, section) for _, seg in spoken_pairs]
+
+    # Where each spoken sentence is pinned and the window it has, and -
+    # separately - the ones the render will throw away because their pin is at
+    # or past the end of the video. ``replace_video_audio`` muxes with
+    # ``-shortest``, so such a sentence is not in the render at all and is
+    # counted a failure; the timeline must mark it and must not audition it,
+    # and the download must not list it, or they would be promising audio the
+    # render will never produce. The pin is recorded for a dropped sentence
+    # too, so a caller can say where it was aimed.
+    pins: dict[int, float] = {}
+    windows: dict[int, float] = {}
+    past_end: set[int] = set()
+    for position, (index, _) in enumerate(spoken_pairs):
+        pin, next_start = processing.sentence_window(spoken, position, duration)
+        pins[index] = pin
+        if duration > 0 and pin >= duration:
+            past_end.add(index)
+            continue
+        windows[index] = max(0.0, next_start - pin)
+
+    return Projection(
+        applied, source_duration, source_length, duration, section,
+        listed, spoken_pairs, pins, windows, frozenset(past_end),
+    )
+
+
 def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
     """What every sentence says, how fast, and in whose voice - for auditioning
     the narration in the browser without rendering anything.
@@ -607,7 +757,7 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
     measured).
     """
     from core.tts_provider import effective_voice
-    from services import edit, processing, waveform
+    from services import edit, processing
 
     record = _record(pid)
     transcript = _transcript(record)
@@ -616,91 +766,25 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
 
     provider_id, job_voice, job_speed = _job_narration(provider, voice, speed)
 
-    # The scale everything is drawn against: the WAV header's, never ffprobe's
-    # and never the record's if the audio can speak for itself.
-    #
-    # **Where this diverges from the render, exactly.** ``_revoice_video`` bounds
-    # its LAST spoken sentence by ``_probe_duration(video)`` and drops any
-    # sentence pinned at or past that. Two differences follow, and both are
-    # accepted rather than hidden:
-    #
-    # - when ffprobe IS available the two numbers are the same recording
-    #   measured two ways (the extracted audio is that video's own audio), so
-    #   they agree to within a frame;
-    # - when ffprobe is ABSENT - which the packaged app must assume, since the
-    #   imageio fallback ships ffmpeg only - the render gets ``video_end = 0.0``
-    #   and falls back to bounding the last sentence by the SECTION's end, while
-    #   this still uses the WAV duration. Those genuinely differ whenever the
-    #   recording runs on after the last word.
-    #
-    # Blast radius: the last spoken sentence only, and only when the bound would
-    # make it short enough to be sped up - a longer window can only lower a
-    # speed to the floor it is already at. Using ffprobe here instead is refused
-    # by the porting spec's traps 5 and 6; using the record's duration would not
-    # be the scale of the file being drawn.
-    source_duration = waveform.duration_for(pid)
+    # The transcript through the edit, every spoken sentence at its pin and
+    # the room it has, by the render's own calls. A helper of its own because
+    # the transcript download (``export_transcript``) places its sentences by
+    # exactly the same calls; see ``project_narration`` for where each number
+    # comes from, and for where the plan knowingly diverges from the render.
+    projected = project_narration(record, transcript)
+    applied, section, duration = projected.applied, projected.section, projected.duration
+    windows, past_end = projected.windows, projected.past_end
 
-    # The edit, applied by the very function the render applies it with, so
-    # the two cannot disagree about whether it changes anything or where a
-    # sentence lands once it has. With no edit, or one whose narration list
-    # keeps everything (a video-only edit included), ``sentences`` is the
-    # transcript itself and nothing below changes. ``listed`` pairs each
-    # sentence with its index in the STORED transcript - what the narration
-    # routes address a sentence by; the projection drops sentences, so a
-    # position in its list is not it. Keyed on ``projected``, never on
-    # ``cut``: a video-only edit projects nothing and a narration-only edit
-    # projects everything.
-    applied = edit.apply(record, transcript, source_duration)
-    listed = (
-        [(seg["index"], seg) for seg in applied.sentences] if applied.projected
-        else list(enumerate(transcript))
-    )
-
-    # ONE section spanning the whole transcript - the very thing
-    # ``services.revoice`` reconstructs for the engine, so the window the last
-    # sentence is measured against is the one the render will measure it
-    # against. Over the projected sentences when there is a cut, as the
-    # render's is.
-    section = transcript_section(applied.sentences)
-    duration = source_duration
-    if duration is None:
-        duration = float(record.get("duration") or 0.0) or section["end"]
-    # The PICTURE's length when it is cut: the mux is ``-shortest``, so that
-    # is what bounds the last sentence and drops one pinned past it.
-    if applied.cut:
-        duration = applied.output_duration
-
-    # The sentences the render will actually speak, in order - empty and muted
-    # ones filtered out BEFORE any window maths, exactly as ``_revoice_video``
-    # filters them, which is what gives the sentence before a muted one its room.
-    spoken_pairs = [
-        (index, seg) for index, seg in listed
-        if isinstance(seg, dict) and (seg.get("text") or "").strip() and not seg.get("muted")
-    ]
-    spoken_at = [index for index, _ in spoken_pairs]
-    spoken = [(seg, section) for _, seg in spoken_pairs]
     # Measured over the sentences the render will measure it over: the
     # projected ones when there is a cut (``_revoice_video`` calibrates on the
     # segments it is handed, and it is handed the projection).
-    rate = baseline_rate(pid, applied.sentences, provider_id, job_voice) if spoken else processing.DEFAULT_BASELINE_RATE
-
-    # The window each spoken sentence has, and - separately - the ones the
-    # render will throw away because their pin is at or past the end of the
-    # video. ``replace_video_audio`` muxes with ``-shortest``, so such a
-    # sentence is not in the render at all and is counted a failure; the
-    # timeline must mark it and must not audition it, or it would be playing
-    # audio the render will never produce.
-    windows: dict[int, float] = {}
-    past_end: set[int] = set()
-    for position, index in enumerate(spoken_at):
-        pin, next_start = processing.sentence_window(spoken, position, duration)
-        if duration > 0 and pin >= duration:
-            past_end.add(index)
-            continue
-        windows[index] = max(0.0, next_start - pin)
+    rate = (
+        baseline_rate(pid, applied.sentences, provider_id, job_voice)
+        if projected.spoken else processing.DEFAULT_BASELINE_RATE
+    )
 
     sentences = []
-    for index, seg in listed:
+    for index, seg in projected.listed:
         if not isinstance(seg, dict):
             # A hand-edited project.json can hold anything. The window pass above
             # skips a non-dict segment; this one must not then answer 500 on it.
@@ -758,7 +842,7 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
         # length and the output's - so the client draws the very edit the plan
         # was made from rather than fetching it separately and risking a
         # newer one.
-        "edit": edit.payload(applied.video, applied.narration, source_duration),
+        "edit": edit.payload(applied.video, applied.narration, projected.source_duration),
         "sentences": sentences,
     }
 
@@ -776,6 +860,246 @@ def preview_url(pid: str, index: int, provider_id: str, voice_id: str, speed: fl
     """
     query = urlencode({"provider": provider_id, "voice": voice_id, "speed": f"{speed:g}"})
     return f"/api/projects/{pid}/transcript/{index}/preview?{query}"
+
+
+# -- downloading the transcript ----------------------------------------------
+
+# The files a transcript can be downloaded as: format -> (media type, extension).
+EXPORT_FORMATS: dict[str, tuple[str, str]] = {
+    "srt": ("application/x-subrip", "srt"),
+    "txt": ("text/plain; charset=utf-8", "txt"),
+    "json": ("application/json", "json"),
+}
+
+# What follows the project's name in the file's name: ``<name>-narration.<ext>``.
+# The route reads it too, to tell an ASCII fallback whose stem folded away to
+# nothing from one that did not.
+EXPORT_SUFFIX = "-narration"
+
+# The two timing views, each with what its timings ARE - said inside the file
+# (the txt header, the json ``note``), because a number on its own reads as a
+# promise. The timeline view's timings are where each sentence is AIMED: a pin
+# is a floor, never a position (see ``_offset``), so a sentence whose clip runs
+# long lands later than the file says. The SRT cannot carry the note - players
+# ignore comments, and a cue that said it would be a subtitle.
+EXPORT_VIEWS: dict[str, str] = {
+    "timeline": (
+        "timings are where each sentence is aimed; a sentence whose clip runs long "
+        "is placed later by the render"
+    ),
+    "source": (
+        "timings are where each sentence was spoken in the source video; a muted "
+        "sentence is one the re-voice leaves out"
+    ),
+}
+
+# The shortest cue the SRT writes. A zero-length or reversed span (a
+# hand-edited record, or a sentence Whisper timed to one instant) is one a
+# player never shows; half a second is the least it takes to be seen.
+MIN_CUE_SECONDS = 0.5
+
+
+def srt_time(seconds: float) -> str:
+    """``HH:MM:SS,mmm``, SRT's own clock.
+
+    Rounded to whole milliseconds FIRST and split from there, so 1.9996 s is
+    ``00:00:02,000``; rounding the fraction on its own, as the engine's
+    ``core.subtitle_generator._format_srt_time`` does, prints it as
+    ``00:00:01,1000``. Negative is clamped at zero, as a pin is.
+    """
+    ms = int(round(max(0.0, seconds) * 1000))
+    hours, ms = divmod(ms, 3_600_000)
+    minutes, ms = divmod(ms, 60_000)
+    secs, ms = divmod(ms, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+
+def timecode(seconds: float) -> str:
+    """``m:ss.mmm`` - the List view's own label (``lib/format.ts::timecode``),
+    so a line of the text file reads as the row it came from. Whole
+    milliseconds first, for the same reason as :func:`srt_time`."""
+    ms = int(round(max(0.0, seconds) * 1000))
+    minutes, ms = divmod(ms, 60_000)
+    return f"{minutes}:{ms / 1000:06.3f}"
+
+
+def _one_line(text) -> str:
+    """A sentence on one line: newlines, and any run of whitespace, collapsed
+    to a single space. The transcript editor is a textarea, so a saved
+    sentence can carry a newline, and the SRT and the text file are both one
+    line per sentence."""
+    return " ".join((text or "").split())
+
+
+def _cue(index: int, start: float, end: float, seg: dict) -> dict:
+    """One sentence as the writers see it: its index in the STORED transcript,
+    where it starts and ends in the view's seconds, and its words, mute and
+    offset as saved."""
+    return {
+        "index": index, "start": start, "end": end,
+        "text": seg.get("text") or "", "muted": bool(seg.get("muted")), "offset": seg.get("offset"),
+    }
+
+
+def _timeline_cues(record: dict, transcript: list) -> tuple[float, list[dict]]:
+    """The ``timeline`` view: the narration as the re-voice will speak it.
+
+    The sentences ``edit.apply`` returns, projected through the NARRATION
+    list; muted and wordless ones left out, exactly as ``_revoice_video``
+    leaves them out; a sentence pinned at or past the picture's end left out,
+    as the mux drops it; each remaining one at its PIN, running for its spoken
+    length (``end - start``) and clamped to the picture's output length. All
+    of it read off :func:`project_narration` - the audition plan's own
+    numbers, never a second projection or a second pin.
+    """
+    from services import processing
+
+    projected = project_narration(record, transcript)
+    cues = []
+    for index, seg in projected.spoken:
+        if index in projected.past_end:
+            continue
+        pin = projected.pins[index]
+        spoken_for = max(
+            0.0,
+            processing._seconds(seg.get("end"), 0.0) - processing._seconds(seg.get("start"), 0.0),
+        )
+        end = pin + spoken_for
+        if projected.duration > 0:
+            end = min(end, projected.duration)
+        cues.append(_cue(index, pin, end, seg))
+    return projected.duration, cues
+
+
+def _source_cues(record: dict, transcript: list) -> tuple[float, list[dict]]:
+    """The ``source`` view: the transcript as stored - every sentence, at
+    Whisper's own ``start`` / ``end``, muted ones included and marked. No edit
+    is applied and none is needed, so a project whose edit can no longer be
+    measured (its audio removed by hand) still has this view."""
+    from services import processing, waveform
+
+    section = transcript_section(transcript)
+    length = _source_length(record, waveform.duration_for(record["id"]), section)
+    cues = [
+        _cue(index, processing._seconds(seg.get("start"), 0.0), processing._seconds(seg.get("end"), 0.0), seg)
+        for index, seg in enumerate(transcript) if isinstance(seg, dict)
+    ]
+    return length, cues
+
+
+def _marked(cue: dict) -> str:
+    """The cue's words on one line, ``[muted]`` in front when the sentence is
+    (only the source view ever has one; the timeline view has none)."""
+    text = _one_line(cue["text"])
+    return f"[muted] {text}".rstrip() if cue["muted"] else text
+
+
+def _write_srt(name: str, view: str, duration: float, cues: list[dict]) -> bytes:
+    """``1 / 00:00:25,150 --> 00:00:26,270 / Text / blank``, numbered from 1
+    in order, UTF-8 with no BOM. No header: an SRT has nowhere to put one.
+
+    A WORDLESS sentence is left out, and the numbering stays contiguous over
+    the cues written: a cue with no text is one most players skip or choke
+    on. The text and JSON files keep the sentence - its timing is still a
+    fact of the transcript, and there it costs nothing to record."""
+    lines: list[str] = []
+    number = 0
+    for cue in cues:
+        if not _one_line(cue["text"]):
+            continue
+        number += 1
+        # Clamped at zero FIRST - as ``srt_time`` clamps each clock - and only
+        # then floored. Floored on the raw seconds, a span before or across
+        # zero satisfied the floor and was then shrunk by the two clamps to
+        # nothing, or to less than the floor: the very cue the floor is for.
+        # (Reachable through the whole-list Save, which does not bound a time
+        # at zero; Whisper itself never writes a negative one.)
+        start = max(0.0, cue["start"])
+        end = max(start, cue["end"])
+        if end - start < MIN_CUE_SECONDS:
+            end = start + MIN_CUE_SECONDS
+        lines += [str(number), f"{srt_time(start)} --> {srt_time(end)}", _marked(cue), ""]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _write_txt(name: str, view: str, duration: float, cues: list[dict]) -> bytes:
+    """A two-line header - the project and the view, then what the timings
+    are - and ``[m:ss.mmm]  Text`` per sentence."""
+    lines = [f"# {name} — narration ({view})", f"# {EXPORT_VIEWS[view]}", ""]
+    lines += [f"[{timecode(cue['start'])}]  {_marked(cue)}".rstrip() for cue in cues]
+    lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
+def _write_json(name: str, view: str, duration: float, cues: list[dict]) -> bytes:
+    """The project, the view, the length, the note and every sentence: its
+    index in the stored transcript, its span to the transcript's own three
+    decimals, its words as saved (newlines and all - JSON can carry them),
+    its stored offset (null for none) and, in the source view, whether it is
+    muted. The timeline view has no muted sentence, so it has no such key."""
+    sentences = []
+    for cue in cues:
+        entry = {
+            "index": cue["index"],
+            "start": round(cue["start"], 3),
+            "end": round(cue["end"], 3),
+            "text": cue["text"],
+        }
+        if view == "source":
+            entry["muted"] = cue["muted"]
+        entry["offset"] = cue["offset"]
+        sentences.append(entry)
+    payload = {
+        "project": name,
+        "view": view,
+        "duration": round(duration, 3),
+        "note": EXPORT_VIEWS[view],
+        "sentences": sentences,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+_WRITERS = {"srt": _write_srt, "txt": _write_txt, "json": _write_json}
+
+
+def export_transcript(pid: str, fmt: str, view: str) -> tuple[str, str, bytes]:
+    """The transcript as a downloadable file: ``(filename, media type, bytes)``.
+
+    ``fmt`` is a key of :data:`EXPORT_FORMATS`, ``view`` one of
+    :data:`EXPORT_VIEWS`:
+
+    - **timeline** - the narration AS THE RE-VOICE WILL SPEAK IT: projected
+      through the edit, muted, wordless and past-the-end sentences left out,
+      each placed at its pin (``_timeline_cues``). Its timings are where each
+      sentence is AIMED, and the file says so where it can.
+    - **source** - the script as it was spoken in the source video: every
+      sentence at Whisper's own times, muted ones marked (``_source_cues``);
+      the SRT alone leaves a wordless sentence out (``_write_srt``).
+
+    The file is ``<project name>-narration.<ext>`` (:data:`EXPORT_SUFFIX`),
+    the name made safe the way the engine names its own outputs
+    (``utils.helpers.sanitize_filename``).
+
+    A read, like the preview and the plan: nothing on the project changes, no
+    ffmpeg or ffprobe runs, and it is not a job. Raises ``ProjectNotFound``
+    (404), ``SegmentNotFound`` (404, no transcript yet) or ``ValueError`` (400:
+    a deck/PDF, an unknown format or view, an edit that cannot be read or
+    measured).
+    """
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(f"Unknown transcript format {fmt!r}; choose one of {', '.join(EXPORT_FORMATS)}.")
+    if view not in EXPORT_VIEWS:
+        raise ValueError(f"Unknown transcript view {view!r}; choose one of {', '.join(EXPORT_VIEWS)}.")
+    record = _record(pid)
+    transcript = _transcript(record)
+    if not transcript:
+        raise SegmentNotFound("This video has no transcript yet - transcribe it first.")
+
+    name = str(record.get("name") or "")
+    duration, cues = (_timeline_cues if view == "timeline" else _source_cues)(record, transcript)
+    media_type, extension = EXPORT_FORMATS[fmt]
+    body = _WRITERS[fmt](name, view, duration, cues)
+    return f"{sanitize_filename(name) or 'transcript'}{EXPORT_SUFFIX}.{extension}", media_type, body
 
 
 # -- hearing one sentence ----------------------------------------------------

@@ -1,5 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { numberChange, previewUrl, voiceChange } from "./narration";
+import { DOWNLOAD_FORMATS, numberChange, previewUrl, transcriptDownloadUrl, voiceChange } from "./narration";
+
+describe("transcriptDownloadUrl", () => {
+  it("names the format and the view, so the link says what it fetches", () => {
+    expect(transcriptDownloadUrl("abc123", "srt", "timeline"))
+      .toBe("/api/projects/abc123/transcript/download?format=srt&view=timeline");
+    expect(transcriptDownloadUrl("abc123", "json", "source"))
+      .toBe("/api/projects/abc123/transcript/download?format=json&view=source");
+  });
+
+  it("offers the three files the server writes", () => {
+    expect([...DOWNLOAD_FORMATS]).toEqual(["srt", "txt", "json"]);
+  });
+});
 
 describe("previewUrl", () => {
   it("sends the job's narration, and nothing about the sentence", () => {

@@ -384,7 +384,11 @@ def test_the_projection_the_plan_and_the_render_use_is_the_same_function():
     from services import revoice
 
     assert "edit.apply(" in inspect.getsource(revoice.revoice_project)
-    assert "edit.apply(" in inspect.getsource(narration.plan)
+    # The plan's one call lives in ``project_narration`` since the transcript
+    # download shares it (T1): the plan goes through that, never around it.
+    assert "edit.apply(" in inspect.getsource(narration.project_narration)
+    assert "project_narration(" in inspect.getsource(narration.plan)
+    assert "edit.apply(" not in inspect.getsource(narration.plan)
     for module in (revoice, narration):
         assert "def project_transcript" not in inspect.getsource(module)
 

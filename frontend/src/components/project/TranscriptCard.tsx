@@ -1,23 +1,26 @@
 import { type Dispatch, Fragment, type ReactNode, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ListOrdered, Pause, Play, Save, Wand2, Waves } from "lucide-react";
+import { Download, ListOrdered, Pause, Play, Save, Wand2, Waves } from "lucide-react";
 import { api, errorMessage } from "../../api/client";
 import { timecode } from "../../lib/format";
 import {
+  DOWNLOAD_FORMATS,
   MAX_OFFSET_SECONDS,
   MAX_SPEED,
   MIN_SPEED,
   draftKey,
   numberChange,
   previewUrl,
+  transcriptDownloadUrl,
   voiceChange,
   words,
+  type DownloadView,
   type NumberField,
   type Segment,
   type SegmentOverride,
 } from "../../lib/narration";
 import { narrationPlanKey } from "../../lib/timeline";
-import { Button, Card, ErrorBox, Input, Tabs, Textarea } from "../ui";
+import { Button, Card, ErrorBox, Input, Select, Tabs, Textarea } from "../ui";
 import { JobProgress, type Job } from "./JobProgress";
 import { NarrationTimeline, type SavedSentence } from "./NarrationTimeline";
 
@@ -286,9 +289,55 @@ export function TranscriptCard({
   const saveError = save.isError ? errorMessage(save.error) : null;
   const adjustmentsDropped = save.data?.timing_adjustments_dropped ?? 0;
 
+  // The transcript as a file, from the card's header so it is there on both
+  // tabs. Three formats and ONE choice - which timings the file carries -
+  // because two different questions get asked of a transcript: "what will
+  // the re-voice say, and when" (the timeline view: the narration projected
+  // through the edit, muted and dropped sentences left out, each sentence at
+  // the moment it is aimed at) and "what was said in the recording" (the
+  // source view: every sentence at the moment it was spoken, muted ones
+  // marked). Plain links, as the page's other downloads are: the server
+  // names the file (Content-Disposition), so `download` needs no value, and
+  // the session cookie rides along. Disabled while a transcribe runs - the
+  // transcript on disk is about to be replaced - but NOT while any other job
+  // holds the project: a download is a read, like Play.
+  const [downloadView, setDownloadView] = useState<DownloadView>("timeline");
+  const hasTranscript = !!segments && segments.length > 0;
+  const downloadActions = (disabled: boolean) => (
+    <>
+      <span className="os-muted os-small" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <Download size={14} /> Download
+      </span>
+      {DOWNLOAD_FORMATS.map((format) => (
+        <a
+          key={format}
+          className="os-btn os-btn-secondary os-btn-sm"
+          href={disabled ? undefined : transcriptDownloadUrl(projectId, format, downloadView)}
+          download
+          aria-disabled={disabled || undefined}
+          style={disabled ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
+          title={disabled ? "Available once the transcription finishes." : `Save the narration as ${format.toUpperCase()}.`}
+        >
+          {format.toUpperCase()}
+        </a>
+      ))}
+      <Select
+        aria-label="Which timings the downloaded transcript carries"
+        title="As the re-voice will play it: cuts applied, muted sentences left out, each sentence where it is aimed. As spoken in the source: every sentence where it was spoken in the original recording, muted ones marked."
+        value={downloadView}
+        disabled={disabled}
+        onChange={(e) => setDownloadView(e.target.value as DownloadView)}
+        style={{ padding: "4px 26px 4px 8px", fontSize: 12.5, borderRadius: 6 }}
+      >
+        <option value="timeline">as the re-voice will play it</option>
+        <option value="source">as spoken in the source</option>
+      </Select>
+    </>
+  );
+
   if (transcribing) {
     return (
-      <Card title="Transcript" style={{ marginTop: 16 }}>
+      <Card title="Transcript" actions={hasTranscript ? downloadActions(true) : undefined} style={{ marginTop: 16 }}>
         {transcribeError && <ErrorBox message={transcribeError} />}
         <JobProgress job={job} />
       </Card>
@@ -311,7 +360,7 @@ export function TranscriptCard({
   }
 
   return (
-    <Card title="Transcript" style={{ marginTop: 16 }}>
+    <Card title="Transcript" actions={downloadActions(false)} style={{ marginTop: 16 }}>
       {transcribeError && <ErrorBox message={transcribeError} />}
 
       {/* Two views over the SAME sentences. The list is where they are edited;
@@ -380,6 +429,15 @@ export function TranscriptCard({
           re-voice will: the first press waits on the voice service — a second or two, and
           longer for the first one after the server starts — while every press after that is
           instant, because the re-voice reuses the very same audio.
+        </div>
+        {/* What the two download views are. Said plainly because the
+            timeline view's timings are where sentences are AIMED, not a
+            promise of where they land: a pin is a floor. */}
+        <div className="os-muted os-small">
+          <strong>Download</strong> (top right) saves this narration as SRT, TXT or JSON. "As the
+          re-voice will play it" is each spoken sentence at the moment it is aimed at, cuts applied
+          and muted sentences left out; "as spoken in the source" is every sentence at the moment it
+          was spoken in the original recording, muted ones marked.
         </div>
         {/* ONE voice list for every row (see VOICE_LIST_ID). */}
         <datalist id={VOICE_LIST_ID}>

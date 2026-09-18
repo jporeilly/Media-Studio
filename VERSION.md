@@ -1,18 +1,19 @@
 # Version
 
-**Current version:** 0.7.0
+**Current version:** 0.8.0
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
 assistant, generation options, transcription, re-voice, per-sentence narration adjustments
 on a transcript — phases 1 to 3b of the narration timeline, so an offset, a mute, a voice, a
 speed, a per-sentence preview, a timeline view with a filmstrip, a waveform and live
-audition of the whole narration against the picture, and the drag of a sentence along its
-lane —, an edit timeline in
+audition of the whole narration against the picture, the drag of a sentence along its
+lane, and the transcript downloadable as SRT, TXT or JSON in either timing view —, an edit
+timeline in
 Camtasia's shape on a video project — the kept ranges of its source, one list per track,
 selected on the strip with the playhead's green and red handles, Cut, undone, and rendered by
 Render as the re-voice with the picture cut first; E1 the model and the render and E2 the
 gesture in 0.7.0 (released 2026-09-17); E3 the tracks — lock a track and cut the others,
-split at the playhead into pieces, drag the narration — built on top of 0.7.0 on 2026-09-18
-and unversioned until the owner's release call, 0.8.0 with or without E4 —, studio settings,
+split at the playhead into pieces, drag the narration — and the transcript download in 0.8.0
+(released 2026-09-18) —, studio settings,
 accounts, project ownership and the audit log, self-update, the Windows desktop installer;
 see CHANGELOG.md). Still to come: the music library, the rest of the edit timeline (E4's
 music lane over the top; E5's trim handles, markers, J/K/L and snapping of cuts), and the
