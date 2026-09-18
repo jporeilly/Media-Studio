@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- [fix] **A subtitle clock can no longer read `,1000`.** The generate job's `.srt` and `.vtt` sidecars rounded the fractional second on its own, and a fraction that rounds up gave a thousand milliseconds: 1.9996 s printed as `00:00:01,1000` and 59.9997 s as `00:00:59.1000`, timestamps neither format accepts, and both reached the files served by `GET /api/projects/{pid}/outputs/{kind}`. Both clocks now round to whole milliseconds first and split from there, so the carry rides up into the seconds, minutes and hours by itself: `00:00:02,000` and `00:01:00.000`. It is the one clock the narration transcript download already kept (`services.narration.srt_time` is now the engine's own `core.subtitle_generator.format_srt_time`), so the two SRTs the app writes cannot disagree on a timestamp. — #subtitle-clock-rounding
+
 ## [0.8.0] - 2026-09-18
 
 The edit is per track. Click a track's name on the Timeline and only that channel is cut —

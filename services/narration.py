@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
+from core.subtitle_generator import format_srt_time
 from services import projects as store
 from services import studio_settings
 from services.voices import KOKORO_MODEL_PENDING
@@ -899,19 +900,11 @@ EXPORT_VIEWS: dict[str, str] = {
 MIN_CUE_SECONDS = 0.5
 
 
-def srt_time(seconds: float) -> str:
-    """``HH:MM:SS,mmm``, SRT's own clock.
-
-    Rounded to whole milliseconds FIRST and split from there, so 1.9996 s is
-    ``00:00:02,000``; rounding the fraction on its own, as the engine's
-    ``core.subtitle_generator._format_srt_time`` does, prints it as
-    ``00:00:01,1000``. Negative is clamped at zero, as a pin is.
-    """
-    ms = int(round(max(0.0, seconds) * 1000))
-    hours, ms = divmod(ms, 3_600_000)
-    minutes, ms = divmod(ms, 60_000)
-    secs, ms = divmod(ms, 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+# ``HH:MM:SS,mmm``, SRT's own clock - the engine's, so the transcript download
+# and the generate job's .srt sidecar can never disagree on a timestamp. Rounded
+# to whole milliseconds FIRST and split from there (1.9996 s is ``00:00:02,000``,
+# never ``00:00:01,1000``); negative is clamped at zero, as a pin is.
+srt_time = format_srt_time
 
 
 def timecode(seconds: float) -> str:

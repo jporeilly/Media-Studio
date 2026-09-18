@@ -602,6 +602,37 @@ def test_generate_subtitles_removes_the_extracted_audio(tmp_path, monkeypatch):
     assert not scratch.exists(), "gone after a failed pass too"
 
 
+# -- the subtitle clocks round to whole milliseconds first -----------------------------
+
+def test_the_subtitle_clocks_round_to_whole_milliseconds_first():
+    """Rounding the fraction on its own gave 1000 when it rounded up, and
+    ``00:00:01,1000`` is not a timestamp in either format. Whole milliseconds
+    first, the carry rides up into the seconds, minutes and hours."""
+    srt, vtt = subtitle_generator.format_srt_time, subtitle_generator.format_vtt_time
+    assert srt(1.9996) == "00:00:02,000", "not 00:00:01,1000"
+    assert vtt(1.9996) == "00:00:02.000", "not 00:00:01.1000"
+    assert srt(59.9997) == "00:01:00,000" and vtt(59.9997) == "00:01:00.000", "the carry reaches the minute"
+    assert srt(3599.9994) == "00:59:59,999" and vtt(3599.9994) == "00:59:59.999", "no round-up, no carry"
+    # 3599.9995 s is exactly 3,599,999.5 ms - a tie, and round() carries it into
+    # the hour. (The old clock printed it as 00:59:59,999 only because subtracting
+    # the integer part left a fraction just under 999.5.)
+    assert srt(3599.9995) == "01:00:00,000" and srt(3599.9996) == "01:00:00,000"
+    assert srt(-1.5) == "00:00:00,000" and vtt(-0.001) == "00:00:00.000", "negative is clamped at zero"
+    assert srt(0) == "00:00:00,000" and srt(3725.15) == "01:02:05,150"
+
+
+def test_the_srt_and_vtt_sidecars_carry_valid_clocks_when_a_fraction_rounds_up(tmp_path):
+    """The generate job's sidecars are written from the same clocks: a segment
+    whose start and end both round up must reach the files whole."""
+    segments = [{"start": 1.9996, "end": 59.9997, "text": "hello"}]
+    subtitle_generator._write_srt(segments, tmp_path / "deck.srt")
+    subtitle_generator._write_vtt(segments, tmp_path / "deck.vtt")
+    srt = (tmp_path / "deck.srt").read_text(encoding="utf-8")
+    vtt = (tmp_path / "deck.vtt").read_text(encoding="utf-8")
+    assert "00:00:02,000 --> 00:01:00,000" in srt and ",1000" not in srt
+    assert vtt.startswith("WEBVTT") and "00:00:02.000 --> 00:01:00.000" in vtt and ".1000" not in vtt
+
+
 # -- burn_subtitles calls the resolved ffmpeg ----------------------------------------
 
 def test_burn_subtitles_uses_the_resolved_ffmpeg(tmp_path, monkeypatch):

@@ -28,6 +28,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api import store as auth_store
+from core import subtitle_generator
 from services import jobs, narration, processing
 from services import projects as store
 from utils import helpers
@@ -152,6 +153,9 @@ def test_the_srt_is_numbered_from_one_with_srt_clocks_and_a_blank_line_between_c
 
 
 def test_srt_clocks_carry_hours_and_both_clocks_round_to_whole_milliseconds_first():
+    # One clock, the engine's: the generate job's .srt sidecar and this download
+    # cannot disagree on a timestamp.
+    assert narration.srt_time is subtitle_generator.format_srt_time
     assert narration.srt_time(3725.15) == "01:02:05,150"
     assert narration.srt_time(0) == "00:00:00,000"
     assert narration.srt_time(1.9996) == "00:00:02,000", "not 00:00:01,1000"

@@ -26,26 +26,33 @@ logger = get_logger("SUBS")
 MAX_WORDS_PER_SEGMENT = 10
 
 
-def _format_srt_time(seconds: float) -> str:
-    """Format seconds as HH:MM:SS,mmm for SRT."""
-    if seconds < 0:
-        seconds = 0.0
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int(round((seconds - int(seconds)) * 1000))
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+def _format_clock(seconds: float, separator: str) -> str:
+    """``HH:MM:SS<separator>mmm`` - the one subtitle clock, SRT's and WebVTT's.
+
+    Rounded to whole milliseconds FIRST and split from there. Rounding the
+    fraction on its own (``round((seconds - int(seconds)) * 1000)``) gave 1000
+    when the fraction rounded up, and ``00:00:01,1000`` is not a timestamp in
+    either format: 1.9996 s is ``00:00:02,000`` and 59.9997 s ``00:01:00,000``,
+    the carry riding up into the seconds, minutes and hours by itself.
+    Negative is clamped at zero, as a pin is.
+    """
+    ms = int(round(max(0.0, seconds) * 1000))
+    hours, ms = divmod(ms, 3_600_000)
+    minutes, ms = divmod(ms, 60_000)
+    secs, ms = divmod(ms, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{ms:03d}"
 
 
-def _format_vtt_time(seconds: float) -> str:
-    """Format seconds as HH:MM:SS.mmm for WebVTT."""
-    if seconds < 0:
-        seconds = 0.0
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int(round((seconds - int(seconds)) * 1000))
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+def format_srt_time(seconds: float) -> str:
+    """``HH:MM:SS,mmm``, SRT's clock. The narration transcript download writes
+    its SRT with this same function (``services.narration.srt_time``), so the
+    two SRTs the app writes cannot disagree on a timestamp."""
+    return _format_clock(seconds, ",")
+
+
+def format_vtt_time(seconds: float) -> str:
+    """``HH:MM:SS.mmm``, WebVTT's clock."""
+    return _format_clock(seconds, ".")
 
 
 def _split_words_into_segments(words: List[dict], max_words: int = MAX_WORDS_PER_SEGMENT) -> List[dict]:
@@ -88,7 +95,7 @@ def _write_srt(segments: List[dict], output_path: Path) -> None:
     lines = []
     for i, seg in enumerate(segments, start=1):
         lines.append(str(i))
-        lines.append(f"{_format_srt_time(seg['start'])} --> {_format_srt_time(seg['end'])}")
+        lines.append(f"{format_srt_time(seg['start'])} --> {format_srt_time(seg['end'])}")
         lines.append(seg["text"])
         lines.append("")  # blank line between entries
 
@@ -101,7 +108,7 @@ def _write_vtt(segments: List[dict], output_path: Path) -> None:
     lines = ["WEBVTT", ""]
     for i, seg in enumerate(segments, start=1):
         lines.append(str(i))
-        lines.append(f"{_format_vtt_time(seg['start'])} --> {_format_vtt_time(seg['end'])}")
+        lines.append(f"{format_vtt_time(seg['start'])} --> {format_vtt_time(seg['end'])}")
         lines.append(seg["text"])
         lines.append("")  # blank line between entries
 
