@@ -15,7 +15,14 @@
  * decides — which sentences are spoken and where they land — is the plan's
  * answer (`GET /api/projects/{pid}/narration/plan`), never re-derived here.
  *
- * Nothing here moves the transcript: the client only ever sends `keep`.
+ * Since E3 the edit is one list PER TRACK (spec §11): the video list is the
+ * picture's axis and the narration list the sentences', both laid out from
+ * the same zero, so the one-list arithmetic here is applied to each in turn
+ * and never to the wrong one (trap 18). The split, the pieces, the snap and
+ * the drag's arithmetic live here too.
+ *
+ * Nothing here moves the transcript: the client only ever sends the lists,
+ * and a drag sends `offset` (trap 20).
  */
 
 import { timecode } from "./format";
@@ -211,6 +218,226 @@ export function removeRange(keep: Keep, a: number, b: number): Keep | null {
     at += length;
   }
   return out.length > 0 ? out : null;
+}
+
+/**
+ * Split at the playhead (Camtasia's `S`): a boundary in the list at
+ * `toSource(tTimeline)` — `[s, e]` becomes `[s, x], [x, e]` — which the
+ * server accepts as touching ranges and `wholeSource` reads as removing
+ * nothing, so a split changes no output (trap 23); its value is the PIECES
+ * it makes. The same list as `removeRange(keep, t, t)`; the name says what
+ * the gesture means. A no-op on an existing boundary and at either end of a
+ * range, so the caller can tell "nothing to commit" by comparing lists.
+ */
+export function splitAt(keep: Keep, tTimeline: number): Keep {
+  return removeRange(keep, tTimeline, tTimeline) ?? keep;
+}
+
+/** A stretch of a lane between two boundaries, in both coordinate spaces. */
+export interface Piece {
+  /** Timeline seconds. */
+  start: number;
+  end: number;
+  /** The same stretch of the source. */
+  sourceStart: number;
+  sourceEnd: number;
+}
+
+/**
+ * The pieces of a lane — what a Camtasia user clicks: one per kept range,
+ * laid end to end on the timeline. A split makes two where there was one; a
+ * join sits between two as well. With no list at all the whole source is
+ * one piece, which is what "no edit" means to the drawing.
+ */
+export function pieces(keep: Keep, sourceDuration: number): Piece[] {
+  const source = keep.length > 0 ? keep : wholeKeep(sourceDuration);
+  const out: Piece[] = [];
+  let at = 0;
+  for (const [start, end] of source) {
+    const next = round3(at + (end - start));
+    out.push({ start: round3(at), end: next, sourceStart: start, sourceEnd: end });
+    at = next;
+  }
+  return out;
+}
+
+/** The piece under a timeline moment, the later one at a shared boundary (as `toSource` chooses); null outside. */
+export function pieceAt(list: Piece[], tTimeline: number): Piece | null {
+  let found: Piece | null = null;
+  for (const piece of list) if (piece.start <= tTimeline && tTimeline <= piece.end) found = piece;
+  return found;
+}
+
+/**
+ * Snap a moment to the nearest of `candidates` within `thresholdSeconds`
+ * (8 px at the current zoom, as Camtasia's), or leave it alone. `snapped` is
+ * the candidate it landed on, for the label. The nearest wins; a tie goes to
+ * the first given.
+ */
+export function snap(t: number, candidates: number[], thresholdSeconds: number): { t: number; snapped: number | null } {
+  let best: number | null = null;
+  let gap = thresholdSeconds;
+  for (const candidate of candidates) {
+    const distance = Math.abs(candidate - t);
+    if (distance < gap || (distance === gap && best === null)) {
+      best = candidate;
+      gap = distance;
+    }
+  }
+  return best === null ? { t, snapped: null } : { t: best, snapped: best };
+}
+
+/** The bound `services/narration.py::MAX_OFFSET_SECONDS` puts on an offset. */
+export const MAX_OFFSET = 300;
+
+/**
+ * The offsets a drag commits: every moved block's pin, moved by the same
+ * `deltaSeconds`, as an OFFSET — nothing else (trap 20). The caller passes
+ * what is DRAWN — `offset` is the plan's `pinned_start − start`, never the
+ * page's stored number, which can be a plan-refetch behind — so the pin is
+ * `max(0, start + offset)` = `pinned_start` and a block lands exactly where
+ * the pointer let go of it; a stored offset that pinned the sentence before
+ * zero is floored the same way, so that case lands where it was dropped too.
+ * Rounded to the stored precision, clamped to the server's ±300 s, and 0
+ * becomes `null` — the List view's own rule for its Offset box
+ * (`numberChange`), so a block dragged back to where it was spoken leaves no
+ * key behind.
+ */
+export function dragOffsets(
+  blocks: { index: number; start: number; offset: number | null }[], deltaSeconds: number,
+): { index: number; offset: number | null }[] {
+  return blocks.map(({ index, start, offset }) => {
+    const pin = Math.max(0, start + (offset ?? 0));
+    const next = round3(Math.min(MAX_OFFSET, Math.max(-MAX_OFFSET, pin + deltaSeconds - start)));
+    return { index, offset: next === 0 ? null : next };
+  });
+}
+
+// ── the edit per track ──────────────────────────────────────────────────────
+
+/** The two tracks an edit has (E3): each a list, or `null` for a track that keeps everything. */
+export interface TrackEdit {
+  video: Keep | null;
+  narration: Keep | null;
+}
+export type Track = keyof TrackEdit;
+/** Camtasia's locks: a locked track's list is left exactly as it is by a cut or a split. */
+export type TrackLocks = Record<Track, boolean>;
+export const TRACKS: readonly Track[] = ["video", "narration"];
+
+/**
+ * A track's WORKING list — what a gesture starts from: the stored list, else
+ * the whole source. Every path derives it the same way; a track with no
+ * stored ranges is whole, never empty (a cut computed from `[]` would refuse
+ * itself as "nothing left").
+ */
+export function trackList(keep: Keep | null, sourceDuration: number): Keep {
+  return keep && keep.length > 0 ? keep : wholeKeep(sourceDuration);
+}
+
+/**
+ * A track's list as the PUT body wants it: `null` for a whole track — none
+ * stored, or one range covering the source — so the record carries no
+ * trivial list. A whole-source SPLIT (two touching ranges) is kept: its
+ * boundary is the point.
+ */
+export function trackBody(keep: Keep | null, sourceDuration: number): Keep | null {
+  if (keep === null || keep.length === 0) return null;
+  return keep.length === 1 && wholeSource(keep, sourceDuration) ? null : keep;
+}
+
+/** Whether two edits are the same once each track is in the body's terms. */
+export function sameEdit(a: TrackEdit, b: TrackEdit, sourceDuration: number): boolean {
+  return TRACKS.every((track) => JSON.stringify(trackBody(a[track], sourceDuration)) === JSON.stringify(trackBody(b[track], sourceDuration)));
+}
+
+export type CutOutcome = { next: TrackEdit; refused: null } | { next: null; refused: Track };
+
+/**
+ * Camtasia's ripple delete on the unlocked tracks: the timeline interval
+ * `[a, b]` removed from each list that is not locked; a locked list is left
+ * exactly as it is (trap 19), so cutting the picture with Narration locked
+ * moves no pin. The interval means the same instant on both lists — each is
+ * laid out from 0 on the output axis (trap 18). Refused, naming the track,
+ * when it would leave a track with nothing.
+ */
+export function nextEditForCut(
+  edit: TrackEdit, locks: TrackLocks, a: number, b: number, sourceDuration: number,
+): CutOutcome {
+  const next: TrackEdit = { video: edit.video, narration: edit.narration };
+  for (const track of TRACKS) {
+    if (locks[track]) continue;
+    const cut = removeRange(trackList(edit[track], sourceDuration), a, b);
+    if (cut === null) return { next: null, refused: track };
+    next[track] = trackBody(cut, sourceDuration);
+  }
+  return { next, refused: null };
+}
+
+/**
+ * Split at the playhead (`S`) on the unlocked tracks, or on every track
+ * regardless of locks (`Ctrl+Shift+S`, `all`). A boundary already there, or
+ * a moment at either end, changes nothing on that track — compare with
+ * `sameEdit` to know whether there is anything to commit.
+ */
+export function nextEditForSplit(
+  edit: TrackEdit, locks: TrackLocks, tTimeline: number, sourceDuration: number, all = false,
+): TrackEdit {
+  const next: TrackEdit = { video: edit.video, narration: edit.narration };
+  for (const track of TRACKS) {
+    if (!all && locks[track]) continue;
+    next[track] = trackBody(splitAt(trackList(edit[track], sourceDuration), tTimeline), sourceDuration);
+  }
+  return next;
+}
+
+/**
+ * Whether a plain click on a lane selects the piece under it: only once the
+ * lane has more than one piece — a split or a cut made them. With a single
+ * piece the lane is the whole picture, and a click there seeks, as it always
+ * has; selecting the entire picture with one click would only ever arm a
+ * Cut that must refuse.
+ */
+export function clickSelectsPiece(list: Piece[]): boolean {
+  return list.length > 1;
+}
+
+// ── the pointer gestures ────────────────────────────────────────────────────
+
+/** Every drag the strip knows: a scrub (the ruler or the head), a handle, a Ctrl+drag range, a block move, a marquee. */
+export type DragKind = "scrub" | "in" | "out" | "range" | "move" | "marquee";
+/**
+ * What a release that never moved — a click on the thing that was pressed —
+ * means per kind: `seek` (the ruler), `pick` (the piece under a marquee's
+ * start, or a seek where the lane has one piece or is locked), `click` (a
+ * block: left to its own click handler, which chooses, selects and seeks),
+ * `keep-selection` (a handle or a Ctrl+click: the selection as it stands),
+ * `nothing` (the head, or a pointer the browser cancelled).
+ */
+export type UnmovedRelease = "seek" | "pick" | "click" | "keep-selection" | "nothing";
+
+export function unmovedRelease(kind: DragKind, seekOnClick: boolean, cancelled: boolean): UnmovedRelease {
+  if (cancelled) return "nothing";
+  switch (kind) {
+    case "scrub": return seekOnClick ? "seek" : "nothing";
+    case "marquee": return "pick";
+    case "move": return "click";
+    default: return "keep-selection";
+  }
+}
+
+/**
+ * Whether the click the browser fires after a release must be ignored: a
+ * real drag happened, or the release itself was the click's meaning (a scrub
+ * seeks, a marquee picks). A block's or a handle's unmoved release lets the
+ * click through — the block's own handler is where a click is a click.
+ *
+ * The pointer is captured LAZILY, only once a drag has really moved: capture
+ * on pointer-down would retarget that click (and a double-click) to the
+ * capturing element, and no block or head would ever receive its own.
+ */
+export function releaseSuppressesClick(kind: DragKind, moved: boolean): boolean {
+  return moved || kind === "scrub" || kind === "marquee";
 }
 
 /**
@@ -411,11 +638,38 @@ export function renderEstimate(keep: Keep, sourceDuration: number): number {
   return Math.ceil((5 + reach * 0.05) / 5) * 5;
 }
 
-/** The line under the Render button, or `null` when the edit removes nothing. */
-export function renderSummary(keep: Keep, sourceDuration: number): string | null {
-  if (keep.length === 0 || wholeSource(keep, sourceDuration)) return null;
-  const cuts = joins(keep, sourceDuration).filter((join) => join.removed > 0).length;
-  const removed = round3(sourceDuration) - outputDuration(keep);
-  return `Cuts ${cuts} range${cuts === 1 ? "" : "s"} (${removed.toFixed(1)} s removed) and re-voices — about `
-    + `${renderEstimate(keep, sourceDuration)} s, plus any sentences the audition has not fetched yet.`;
+/** Whether a track's list (null = whole) removes anything. */
+function removes(keep: Keep | null, sourceDuration: number): keep is Keep {
+  return keep !== null && keep.length > 0 && !wholeSource(keep, sourceDuration);
+}
+
+/**
+ * The line under the Render button, or `null` when neither track removes
+ * anything. Cut together — the two lists equal — it is E2's line word for
+ * word. Otherwise the picture part ("Cuts 2 ranges of the picture (12.4 s
+ * removed)") and the narration part, which is about the narration's
+ * TIMELINE: that stretch closes up and the sentences spoken in it are left
+ * out — which ones is the plan's answer, so no count is claimed here. The
+ * estimate is the picture step's alone. One sentence.
+ */
+export function renderSummary(video: Keep | null, narration: Keep | null, sourceDuration: number): string | null {
+  const cutsPicture = removes(video, sourceDuration);
+  const cutsNarration = removes(narration, sourceDuration);
+  if (!cutsPicture && !cutsNarration) return null;
+  const together = cutsPicture && cutsNarration && JSON.stringify(video) === JSON.stringify(narration);
+  const parts: string[] = [];
+  if (cutsPicture) {
+    const cuts = joins(video, sourceDuration).filter((join) => join.removed > 0).length;
+    const removed = round3(sourceDuration) - outputDuration(video);
+    parts.push(`Cuts ${cuts} range${cuts === 1 ? "" : "s"}${together ? "" : " of the picture"} (${removed.toFixed(1)} s removed)`);
+  }
+  if (cutsNarration && !together) {
+    const removed = round3(sourceDuration) - outputDuration(narration);
+    parts.push(`${cutsPicture ? "shortens" : "Shortens"} the narration's timeline by ${removed.toFixed(1)} s `
+      + "(sentences spoken in the removed stretch are left out)");
+  }
+  const tail = cutsPicture
+    ? `about ${renderEstimate(video, sourceDuration)} s, plus any sentences the audition has not fetched yet.`
+    : "the picture is not cut, so it takes only as long as the sentences the audition has not fetched yet.";
+  return `${parts.join(" and ")} and re-voices — ${tail}`;
 }

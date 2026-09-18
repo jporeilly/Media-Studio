@@ -1,14 +1,17 @@
-"""The edit timeline, phase E1: the model and the render, no UI.
+"""The edit timeline: E1 the model and the render, E3 one list per track.
 
-A project gains ``record["edit"] = {"version": 1, "keep": [[start, end], ...]}``
-- the ranges of its ONE source that survive the cut, in source seconds - and
-nothing else. **The transcript never moves**: ``set_transcript`` identifies a
-sentence by its window, so shifting sentences after a cut would drop every
-adjustment on every later sentence. The edit is applied as a PROJECTION
+A project gains ``record["edit"] = {"version": 2, "video": {"keep": [[start,
+end], ...]}, "narration": {"keep": [...]}}`` - the ranges of its ONE source
+that survive the cut on each track, in source seconds - and nothing else; a
+version-1 record (one ``keep``) is read as both tracks cut together. **The
+transcript never moves**: ``set_transcript`` identifies a sentence by its
+window, so shifting sentences after a cut would drop every adjustment on every
+later sentence. The edit is applied as a PROJECTION
 (``services.edit.project_transcript``) at plan time and at render time, by the
-same function, so the two cannot disagree.
+same function, so the two cannot disagree - through the NARRATION list, while
+the VIDEO list cuts the picture (two lists, one axis: spec §11, trap 18).
 
-Three things these tests hold in place:
+Four things these tests hold in place:
 
 - the arithmetic (``validate_keep``, ``to_timeline`` / ``to_source``,
   ``project_transcript``, ``whole_source``) is exhaustively pinned, because a
@@ -17,7 +20,10 @@ Three things these tests hold in place:
   counts and never times, and leave the transcript byte-identical;
 - the audition plan returns the projected sentences - in timeline seconds,
   each still addressed by its index in the STORED transcript - and says which
-  edit it projected them through.
+  edit it projected them through;
+- a locked track is untouched (trap 19): a video-only edit hands the engine
+  the very transcript objects an unedited project does, and a narration-only
+  edit leaves the picture whole.
 """
 
 import json
@@ -115,7 +121,23 @@ def _get(client, pid):
 
 
 def _put(client, pid, keep):
+    """The version-1 body: one list, meaning both tracks."""
     return client.put(f"/api/projects/{pid}/edit", json={"keep": keep})
+
+
+def _put_tracks(client, pid, **tracks):
+    """The version-2 body: ``video=`` and / or ``narration=``."""
+    return client.put(f"/api/projects/{pid}/edit", json=tracks)
+
+
+def _payload(video, narration, source=12.0):
+    """The version-2 answer the routes and the plan carry, for a source of
+    ``source`` seconds: a whole track reports the source's length."""
+    def track(keep):
+        return {"keep": keep, "output_duration": edit.output_duration(keep) if keep else source}
+    picture = track(video)
+    return {"version": 2, "video": picture, "narration": track(narration),
+            "source_duration": source, "output_duration": picture["output_duration"]}
 
 
 def _plan(client, pid, **params):
@@ -384,8 +406,13 @@ def test_apply_is_the_one_decision_about_whether_an_edit_changes_anything():
     with pytest.raises(edit.SourceLengthUnknown):
         edit.apply({"edit": {"version": 1, "keep": KEEP}}, transcript, None)
     with pytest.raises(ValueError) as exc:
-        edit.apply({"edit": {"version": 2, "keep": KEEP}}, transcript, 12.0)
+        edit.apply({"edit": {"version": 3, "video": {"keep": KEEP}}}, transcript, 12.0)
     assert "different version" in str(exc.value)
+    # A version-1 list under the version-2 number could mean two things, and
+    # "no edit" is the quiet answer to neither.
+    with pytest.raises(ValueError) as exc:
+        edit.apply({"edit": {"version": 2, "keep": KEEP}}, transcript, 12.0)
+    assert "mixes two shapes" in str(exc.value)
 
 
 # ── the routes ────────────────────────────────────────────────────────────────
@@ -394,26 +421,50 @@ def test_a_project_with_no_edit_keeps_everything(client):
     pid = _video()
     r = _get(client, pid)
     assert r.status_code == 200, r.text
-    assert r.json() == {"version": 1, "keep": None, "source_duration": 12.0, "output_duration": 12.0}
+    assert r.json() == {
+        "version": 2,
+        "video": {"keep": None, "output_duration": 12.0},
+        "narration": {"keep": None, "output_duration": 12.0},
+        "source_duration": 12.0,
+        "output_duration": 12.0,
+    }
 
 
 def test_without_extracted_audio_there_is_no_length_to_report(client):
     """Neither length is known, and neither is claimed: null, not 0.0."""
     pid = _video(audio_seconds=None)
-    assert _get(client, pid).json() == {"version": 1, "keep": None, "source_duration": None, "output_duration": None}
+    assert _get(client, pid).json() == {
+        "version": 2,
+        "video": {"keep": None, "output_duration": None},
+        "narration": {"keep": None, "output_duration": None},
+        "source_duration": None,
+        "output_duration": None,
+    }
 
 
 def test_put_stores_the_ranges_and_get_reads_them_back(client):
+    """The version-1 body - one list - means both tracks, cut together."""
     pid = _video()
     r = _put(client, pid, [[0, 6], [7.5, 12]])
     assert r.status_code == 200, r.text
-    assert r.json() == {"version": 1, "keep": [[0.0, 6.0], [7.5, 12.0]], "source_duration": 12.0, "output_duration": 10.5}
+    assert r.json() == {
+        "version": 2,
+        "video": {"keep": [[0.0, 6.0], [7.5, 12.0]], "output_duration": 10.5},
+        "narration": {"keep": [[0.0, 6.0], [7.5, 12.0]], "output_duration": 10.5},
+        "source_duration": 12.0,
+        "output_duration": 10.5,
+    }
     assert _get(client, pid).json() == r.json()
-    assert store.get_project(pid)["edit"] == {"version": 1, "keep": [[0.0, 6.0], [7.5, 12.0]]}
+    assert store.get_project(pid)["edit"] == {
+        "version": 2,
+        "video": {"keep": [[0.0, 6.0], [7.5, 12.0]]},
+        "narration": {"keep": [[0.0, 6.0], [7.5, 12.0]]},
+    }
 
-    # A second PUT replaces the whole list - it is small, and a partial PATCH buys nothing.
+    # A second PUT replaces the whole edit - it is small, and a partial PATCH buys nothing.
     assert _put(client, pid, [[1.0, 2.0]]).status_code == 200
-    assert store.get_project(pid)["edit"]["keep"] == [[1.0, 2.0]]
+    assert store.get_project(pid)["edit"]["video"]["keep"] == [[1.0, 2.0]]
+    assert store.get_project(pid)["edit"]["narration"]["keep"] == [[1.0, 2.0]]
 
 
 def test_the_transcript_never_moves(client):
@@ -434,7 +485,8 @@ def test_the_transcript_never_moves(client):
 
 def test_the_ranges_are_stored_at_the_transcripts_precision(client):
     pid = _video()
-    assert _put(client, pid, [[0.00049, 5.99951], [7.5004, 12]]).json()["keep"] == [[0.0, 6.0], [7.5, 12.0]]
+    stored = _put(client, pid, [[0.00049, 5.99951], [7.5004, 12]]).json()
+    assert stored["video"]["keep"] == stored["narration"]["keep"] == [[0.0, 6.0], [7.5, 12.0]]
 
 
 @pytest.mark.parametrize("keep, message", [
@@ -458,8 +510,13 @@ def test_the_body_is_strict(client):
     number. NaN and infinity get through pydantic and are the validator's."""
     pid = _video()
     assert client.put(f"/api/projects/{pid}/edit", json={"keep": KEEP, "version": 1}).status_code == 422
-    assert client.put(f"/api/projects/{pid}/edit", json={}).status_code == 422
+    # No track at all is a well-formed body that names nothing to cut: a 400
+    # that says so, not a 422 (every field is optional since E3).
+    r = client.put(f"/api/projects/{pid}/edit", json={})
+    assert r.status_code == 400 and "at least one track" in r.json()["detail"]
     assert _put(client, pid, [[True, 6.0]]).status_code == 422
+    assert _put_tracks(client, pid, video=[[True, 6.0]]).status_code == 422
+    assert _put_tracks(client, pid, narration=[["0", 6.0]]).status_code == 422
     assert _put(client, pid, [["0", 6.0]]).status_code == 422
     r = client.put(f"/api/projects/{pid}/edit", content='{"keep": [[NaN, 6.0]]}',
                    headers={"content-type": "application/json"})
@@ -503,17 +560,18 @@ def test_delete_goes_back_to_keep_everything_and_is_idempotent(client):
     assert _put(client, pid, KEEP).status_code == 200
     r = client.delete(f"/api/projects/{pid}/edit")
     assert r.status_code == 200, r.text
-    assert r.json() == {"version": 1, "keep": None, "source_duration": 12.0, "output_duration": 12.0}
+    assert r.json() == _payload(None, None)
     assert "edit" not in store.get_project(pid), "removed, not written empty: the record reads as one that never had an edit"
-    assert [row["detail"] for row in _edit_rows()] == ["cleared", "2 ranges kept, 1.5 s removed"]
+    together = "video: 2 ranges kept, 1.5 s removed; narration: 2 ranges kept, 1.5 s removed"
+    assert [row["detail"] for row in _edit_rows()] == ["cleared", together]
 
     # Clearing what is already clear is a 200 that changes nothing and records
     # nothing - there was nothing to clear.
     before = (store.PROJECTS_DIR / pid / "project.json").read_bytes()
     r = client.delete(f"/api/projects/{pid}/edit")
-    assert r.status_code == 200 and r.json()["keep"] is None
+    assert r.status_code == 200 and r.json()["video"]["keep"] is None and r.json()["narration"]["keep"] is None
     assert (store.PROJECTS_DIR / pid / "project.json").read_bytes() == before
-    assert [row["detail"] for row in _edit_rows()] == ["cleared", "2 ranges kept, 1.5 s removed"], "no row for a no-op"
+    assert [row["detail"] for row in _edit_rows()] == ["cleared", together], "no row for a no-op"
 
 
 def test_every_write_is_audited_with_counts_and_never_times(client):
@@ -526,7 +584,11 @@ def test_every_write_is_audited_with_counts_and_never_times(client):
     assert _get(client, pid).status_code == 200
 
     rows = _edit_rows()
-    assert [row["detail"] for row in rows] == ["cleared", "1 range kept, 6.0 s removed", "2 ranges kept, 1.5 s removed"]
+    assert [row["detail"] for row in rows] == [
+        "cleared",
+        "video: 1 range kept, 6.0 s removed; narration: 1 range kept, 6.0 s removed",
+        "video: 2 ranges kept, 1.5 s removed; narration: 2 ranges kept, 1.5 s removed",
+    ]
     assert all(row["entity"] == "project" and row["entity_id"] == pid for row in rows)
     assert not any("7.5" in row["detail"] or "sentence" in row["detail"] for row in rows)
 
@@ -570,7 +632,7 @@ def test_a_write_landing_beside_an_adjustment_destroys_neither(client):
         def cut():
             start.wait()
             try:
-                edit.set_edit(pid, KEEP)
+                edit.set_edit(pid, video=KEEP, narration=KEEP)
             except BaseException as exc:  # noqa: BLE001
                 failures.append(exc)
 
@@ -584,7 +646,7 @@ def test_a_write_landing_beside_an_adjustment_destroys_neither(client):
         saved = store.get_project(pid)
         assert saved is not None, f"run {attempt}: project.json was torn"
         assert saved["transcript"][3].get("offset") == -0.4, f"run {attempt}: the adjustment was lost"
-        assert saved.get("edit", {}).get("keep") == KEEP, f"run {attempt}: the edit was lost"
+        assert saved.get("edit", {}).get("video", {}).get("keep") == KEEP, f"run {attempt}: the edit was lost"
 
 
 def test_an_edit_this_version_cannot_read_is_refused_rather_than_ignored(client):
@@ -592,7 +654,7 @@ def test_an_edit_this_version_cannot_read_is_refused_rather_than_ignored(client)
     the one thing that must not happen quietly."""
     pid = _video()
     record = store.get_project(pid)
-    record["edit"] = {"version": 2, "keep": KEEP}
+    record["edit"] = {"version": 3, "video": {"keep": KEEP}}
     store.save_project(record)
 
     r = _get(client, pid)
@@ -636,7 +698,13 @@ def test_an_edit_whose_audio_has_gone_is_read_back_but_not_applied(client):
     assert _put(client, pid, KEEP).status_code == 200
     (store.PROJECTS_DIR / pid / "audio.wav").unlink()
 
-    assert _get(client, pid).json() == {"version": 1, "keep": KEEP, "source_duration": None, "output_duration": 10.5}
+    assert _get(client, pid).json() == {
+        "version": 2,
+        "video": {"keep": KEEP, "output_duration": 10.5},
+        "narration": {"keep": KEEP, "output_duration": 10.5},
+        "source_duration": None,
+        "output_duration": 10.5,
+    }
     r = client.get(f"/api/projects/{pid}/narration/plan")
     assert r.status_code == 400 and "extracted audio is missing" in r.json()["detail"]
 
@@ -652,7 +720,7 @@ def test_the_plan_returns_the_sentences_in_timeline_seconds(client):
     plan = _plan(client, pid)
 
     assert plan["duration"] == 10.5, "the output's length, not the source's"
-    assert plan["edit"] == {"version": 1, "keep": KEEP, "source_duration": 12.0, "output_duration": 10.5}
+    assert plan["edit"] == _payload(KEEP, KEEP)
     sentences = plan["sentences"]
     assert [s["index"] for s in sentences] == [0, 1, 3, 4], "addressed by their index in the STORED transcript"
     assert [(s["start"], s["end"]) for s in sentences] == [(0.0, 2.0), (5.0, 6.0), (6.5, 7.5), (8.5, 10.5)]
@@ -699,13 +767,14 @@ def test_a_sentence_cut_by_the_edit_gives_its_room_to_the_one_before(client):
 def test_an_edit_that_keeps_everything_changes_nothing_but_is_still_reported(client):
     pid = _video()
     untouched = _plan(client, pid)
-    assert untouched["edit"] == {"version": 1, "keep": None, "source_duration": 12.0, "output_duration": 12.0}
+    assert untouched["edit"] == _payload(None, None)
 
     assert _put(client, pid, [[0.0, 6.0], [6.0, 12.0]]).status_code == 200
     split = _plan(client, pid)
     assert split["sentences"] == untouched["sentences"]
     assert split["duration"] == untouched["duration"] == 12.0
-    assert split["edit"]["keep"] == [[0.0, 6.0], [6.0, 12.0]], "so the timeline can draw the boundary"
+    assert split["edit"]["video"]["keep"] == [[0.0, 6.0], [6.0, 12.0]], "so the timeline can draw the boundary"
+    assert split["edit"]["narration"]["keep"] == [[0.0, 6.0], [6.0, 12.0]]
 
 
 def test_the_plan_is_unchanged_for_a_project_that_never_had_an_edit(client):
@@ -724,3 +793,238 @@ def test_the_ownership_sweep_names_all_three_routes():
 
     for method in ("GET", "PUT", "DELETE"):
         assert (method, "/api/projects/{pid}/edit") in PROJECT_SCOPED_ROUTES, method
+
+
+# ── tracks (E3): one list per track ───────────────────────────────────────────
+
+# A narration list that differs from the picture's: it removes 6.4-7.0 - the
+# third sentence again, but the sentences after it move by 0.6 s here and by
+# 1.5 s under KEEP - so a projection through the WRONG list gives the same
+# indices and the wrong starts. That is the trap the per-track cases exist to
+# catch (spec §11.6, trap 18).
+NARRATION = [[0.0, 6.4], [7.0, 12.0]]  # output: 11.4 s
+
+
+def test_a_version_1_record_is_read_as_cut_together_and_written_back_as_version_2(client):
+    """Trap 22: version 1 is a shape this code KNOWS - E1's one list, meaning
+    both tracks - and whoever bumps the version reads the older shape rather
+    than refusing it. Nothing migrates; the next write rewrites it."""
+    pid = _video()
+    record = store.get_project(pid)
+    record["edit"] = {"version": 1, "keep": KEEP}
+    store.save_project(record)
+
+    assert edit.stored_tracks(record, 12.0) == (KEEP, KEEP)
+    assert edit.stored_keep(record, 12.0) == KEEP, "E1's name still answers the picture's list"
+    assert edit.describe(record) == _payload(KEEP, KEEP)
+    assert _get(client, pid).json() == _payload(KEEP, KEEP)
+    plan = _plan(client, pid)
+    assert plan["edit"] == _payload(KEEP, KEEP) and plan["duration"] == 10.5
+    assert [s["index"] for s in plan["sentences"]] == [0, 1, 3, 4], "E1's behaviour, exactly"
+
+    assert store.get_project(pid)["edit"]["version"] == 1, "read, not rewritten: no migration"
+    assert _put_tracks(client, pid, narration=NARRATION).status_code == 200
+    assert store.get_project(pid)["edit"] == {"version": 2, "narration": {"keep": NARRATION}}
+
+
+def test_a_version_2_record_reads_one_list_per_track():
+    assert edit.stored_tracks({}, 12.0) == (None, None)
+    assert edit.stored_tracks({"edit": {"version": 2}}, 12.0) == (None, None), "both absent: no edit at all"
+    assert edit.stored_tracks({"edit": {"version": 2, "video": {"keep": KEEP}}}, 12.0) == (KEEP, None)
+    assert edit.stored_tracks({"edit": {"version": 2, "narration": {"keep": NARRATION}}}, 12.0) == (None, NARRATION)
+    both = {"edit": {"version": 2, "video": {"keep": [(0, 6), [7.5, 12]]}, "narration": {"keep": NARRATION}, "music": []}}
+    assert edit.stored_tracks(both, 12.0) == (KEEP, NARRATION), "validated and rounded; E4's key rides through"
+    assert edit.stored_keep(both, 12.0) == KEEP, "the PICTURE's list, never the narration's"
+
+    # A bad track is refused by name; so is a track that is not a track, and a
+    # version this code has never seen.
+    with pytest.raises(ValueError) as exc:
+        edit.stored_tracks({"edit": {"version": 2, "narration": {"keep": [[5.0, 1.0]]}}}, 12.0)
+    assert str(exc.value).startswith("narration: Range 1 [5.000, 1.000] must end after it starts")
+    with pytest.raises(ValueError) as exc:
+        edit.stored_tracks({"edit": {"version": 2, "video": KEEP}}, 12.0)
+    assert str(exc.value).startswith("video: The edit must be a list")
+    with pytest.raises(ValueError):
+        edit.stored_tracks({"edit": {"version": 2, "video": {"keep": None}}}, 12.0)
+    with pytest.raises(ValueError):
+        edit.stored_tracks({"edit": "nope"}, 12.0)
+    with pytest.raises(ValueError) as exc:
+        edit.stored_tracks({"edit": {"version": 3}}, 12.0)
+    assert "different version" in str(exc.value)
+
+
+def test_apply_projects_through_the_narration_list_and_cuts_with_the_video_list():
+    """Two lists, one axis (trap 18), and a locked track untouched (trap 19):
+    a video-only edit hands back the very transcript objects, a narration-only
+    edit leaves the picture whole, and a list that only splits does neither."""
+    transcript = [dict(s) for s in SEGMENTS]
+
+    video_only = edit.apply({"edit": {"version": 2, "video": {"keep": KEEP}}}, transcript, 12.0)
+    assert (video_only.video, video_only.narration) == (KEEP, None)
+    assert (video_only.cut, video_only.projected) == (True, False)
+    assert video_only.sentences is transcript, "nothing projected: the objects an unedited project hands the engine"
+    assert (video_only.output_duration, video_only.narration_duration) == (10.5, 12.0)
+    assert video_only.keep == KEEP, "E1's name is the picture's list"
+
+    narration_only = edit.apply({"edit": {"version": 2, "narration": {"keep": NARRATION}}}, transcript, 12.0)
+    assert (narration_only.video, narration_only.narration) == (None, NARRATION)
+    assert (narration_only.cut, narration_only.projected) == (False, True)
+    assert [(s["index"], s["start"], s["end"]) for s in narration_only.sentences] == [
+        (0, 0.0, 2.0), (1, 5.0, 6.4), (3, 7.4, 8.4), (4, 9.4, 11.4),
+    ]
+    assert (narration_only.output_duration, narration_only.narration_duration) == (12.0, 11.4), "the picture is whole"
+    assert narration_only.keep is None
+
+    both = edit.apply({"edit": {"version": 2, "video": {"keep": KEEP}, "narration": {"keep": NARRATION}}}, transcript, 12.0)
+    assert (both.cut, both.projected) == (True, True)
+    assert [s["start"] for s in both.sentences] == [0.0, 5.0, 7.4, 9.4], "through the NARRATION list, never the video's"
+    assert (both.output_duration, both.narration_duration) == (10.5, 11.4)
+
+    # A list that only splits removes nothing on either track: nothing is
+    # projected, nothing is cut, and the path is the unedited one (trap 23).
+    for track in ("video", "narration"):
+        split = edit.apply({"edit": {"version": 2, track: {"keep": [[0.0, 6.0], [6.0, 12.0]]}}}, transcript, 12.0)
+        assert (split.cut, split.projected) == (False, False), track
+        assert split.sentences is transcript, track
+        assert (split.output_duration, split.narration_duration) == (12.0, 12.0), track
+
+    assert json.dumps(transcript) == json.dumps(SEGMENTS), "the transcript never moves"
+
+
+def test_the_shared_fixture_pins_the_per_track_projection():
+    """The fixture's ``tracks`` section, read by ``edit.test.ts`` as well: the
+    client draws each lane through its own list, and these cases are what
+    tell a projection through the wrong list from the right one."""
+    cases = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    tracks = cases["tracks"]
+    assert tracks["segments"] == [[s["start"], s["end"]] for s in SEGMENTS], "the fixture is the inline scenario"
+    assert tracks["video"] == KEEP and tracks["narration"] == NARRATION
+    assert set(tracks["cases"]) == {"video_only", "narration_only", "both", "together"}, "an emptied section must not pass"
+    for name, case in tracks["cases"].items():
+        stored = {t: {"keep": case[t]} for t in ("video", "narration") if case[t] is not None}
+        applied = edit.apply({"edit": {"version": 2, **stored}}, SEGMENTS, cases["source_duration"])
+        listed = ([(s["index"], s) for s in applied.sentences] if applied.projected
+                  else list(enumerate(applied.sentences)))
+        assert [[i, s["start"], s["end"]] for i, s in listed] == case["sentences"], name
+        assert (applied.cut, applied.projected) == (case["cut"], case["projected"]), name
+        assert (applied.output_duration, applied.narration_duration) == (case["duration"], case["narration_duration"]), name
+    # The two per-track cases must disagree with cut-together on at least one
+    # start, or they could not catch a projection through the wrong list.
+    assert tracks["cases"]["both"]["sentences"] != tracks["cases"]["together"]["sentences"]
+
+
+def test_put_takes_one_list_per_track_and_the_v1_body_means_both(client):
+    pid = _video()
+    r = _put_tracks(client, pid, video=KEEP)
+    assert r.status_code == 200, r.text
+    assert r.json() == _payload(KEEP, None)
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}}, "a track not given is stored absent"
+
+    r = _put_tracks(client, pid, video=None, narration=NARRATION)
+    assert r.status_code == 200, r.text
+    assert r.json() == _payload(None, NARRATION)
+    assert store.get_project(pid)["edit"] == {"version": 2, "narration": {"keep": NARRATION}}, "an explicit null too"
+
+    r = _put_tracks(client, pid, video=KEEP, narration=NARRATION)
+    assert r.status_code == 200 and r.json() == _payload(KEEP, NARRATION)
+    assert r.json()["output_duration"] == 10.5, "the top-level length is the picture's"
+    assert r.json()["narration"]["output_duration"] == 11.4
+    assert _get(client, pid).json() == r.json()
+
+    # The version-1 body means both tracks, for curl and any older client...
+    assert _put(client, pid, KEEP).json() == _payload(KEEP, KEEP)
+
+    # ... but not beside a per-track list, and not with no track at all.
+    r = client.put(f"/api/projects/{pid}/edit", json={"keep": KEEP, "video": KEEP})
+    assert r.status_code == 400 and "not both" in r.json()["detail"]
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": None, "narration": None})
+    assert r.status_code == 400 and "at least one track" in r.json()["detail"]
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "narration": {"keep": KEEP}}, "refused: nothing written"
+
+
+def test_a_put_merges_into_the_stored_edit_and_keeps_the_keys_it_does_not_own(client):
+    """``stored_tracks`` lets a key this version does not read (E4's
+    ``music``) ride through on read; the write must not drop it. Only the
+    version and the two tracks are ``set_edit``'s to write: a track not
+    given is removed, and a version-1 ``keep`` never survives under 2."""
+    pid = _video()
+    record = store.get_project(pid)
+    record["edit"] = {"version": 2, "video": {"keep": KEEP}, "music": [{"file": "bed.mp3", "at": 1.0}]}
+    store.save_project(record)
+
+    assert _put_tracks(client, pid, narration=NARRATION).status_code == 200
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "narration": {"keep": NARRATION}, "music": [{"file": "bed.mp3", "at": 1.0}],
+    }, "the music survives; the video track, not given, is removed"
+    assert _get(client, pid).json() == _payload(None, NARRATION)
+
+    record = store.get_project(pid)
+    record["edit"] = {"version": 1, "keep": KEEP, "music": []}
+    store.save_project(record)
+    assert _put_tracks(client, pid, video=KEEP).status_code == 200
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "music": []}
+
+
+def test_a_bad_track_is_a_400_that_names_the_track_and_the_range_and_stores_nothing(client):
+    pid = _video()
+    r = _put_tracks(client, pid, video=KEEP, narration=[[0.0, 5.0], [4.0, 8.0]])
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"].startswith("narration: Range 2 [4.000, 8.000] overlaps or precedes range 1")
+    assert "edit" not in store.get_project(pid)
+    r = _put_tracks(client, pid, video=[], narration=NARRATION)
+    assert r.status_code == 400 and r.json()["detail"].startswith("video: Keep at least one range")
+    assert "edit" not in store.get_project(pid)
+    # The rest of E1's answers are unchanged.
+    assert _put_tracks(client, "aabbccddeeff", video=KEEP).status_code == 404
+    assert _put_tracks(client, _video(audio_seconds=None), narration=NARRATION).status_code == 409
+
+
+def test_the_audit_summary_is_per_track_and_never_carries_times(client):
+    pid = _video()
+    assert _put_tracks(client, pid, video=KEEP).status_code == 200
+    assert _put_tracks(client, pid, narration=[[0.5, 12.0]]).status_code == 200
+    assert _put_tracks(client, pid, video=[[0.0, 6.0], [6.0, 12.0]], narration=NARRATION).status_code == 200
+    assert [row["detail"] for row in _edit_rows()] == [
+        "video: 2 ranges kept, 0.0 s removed; narration: 2 ranges kept, 0.6 s removed",
+        "video: whole; narration: 1 range kept, 0.5 s removed",
+        "video: 2 ranges kept, 1.5 s removed; narration: whole",
+    ]
+    assert not any("7.5" in row["detail"] or "6.4" in row["detail"] for row in _edit_rows())
+
+
+def test_the_plan_projects_only_through_the_narration_list(client):
+    """``listed`` follows ``projected``, never ``cut``: a video-only edit
+    projects nothing, a narration-only edit projects everything, and the
+    picture's length is what bounds the narration's timeline either way."""
+    pid = _video()
+    assert client.patch(f"/api/projects/{pid}/transcript/4", json={"offset": 1.0}).status_code == 200
+
+    # Video only: the picture is cut, and every sentence stays where it was
+    # spoken - the third included, spoken over the removed picture (it plays
+    # over what follows: trap 19). The fifth, aimed at 11.0 s, now sits past
+    # the 10.5 s picture, where the mux drops it: `past_end` (trap 11).
+    assert _put_tracks(client, pid, video=KEEP).status_code == 200
+    plan = _plan(client, pid)
+    assert plan["duration"] == 10.5 and plan["edit"] == _payload(KEEP, None)
+    assert [s["index"] for s in plan["sentences"]] == [0, 1, 2, 3, 4], "nothing dropped: the narration is locked"
+    assert [(s["start"], s["end"]) for s in plan["sentences"]] == [(s["start"], s["end"]) for s in SEGMENTS]
+    assert [s["pinned_start"] for s in plan["sentences"]] == [0.0, 5.0, 6.5, 8.0, 11.0]
+    assert plan["sentences"][4]["past_end"] is True and plan["sentences"][4]["speakable"] is False
+
+    # Narration only: the picture is whole and 12 s long; the sentences move.
+    assert _put_tracks(client, pid, narration=NARRATION).status_code == 200
+    plan = _plan(client, pid)
+    assert plan["duration"] == 12.0 and plan["edit"] == _payload(None, NARRATION)
+    assert [s["index"] for s in plan["sentences"]] == [0, 1, 3, 4]
+    assert [(s["start"], s["end"]) for s in plan["sentences"]] == [(0.0, 2.0), (5.0, 6.4), (7.4, 8.4), (9.4, 11.4)]
+    assert plan["sentences"][3]["pinned_start"] == pytest.approx(10.4), "to_timeline(start) + offset, once"
+    assert plan["sentences"][3]["past_end"] is False
+
+    # Both: the narration's timeline, bounded by the picture's length.
+    assert _put_tracks(client, pid, video=KEEP, narration=NARRATION).status_code == 200
+    plan = _plan(client, pid)
+    assert plan["duration"] == 10.5 and plan["edit"] == _payload(KEEP, NARRATION)
+    assert [(s["index"], s["start"]) for s in plan["sentences"]] == [(0, 0.0), (1, 5.0), (3, 7.4), (4, 9.4)]
+    assert plan["sentences"][3]["pinned_start"] == pytest.approx(10.4)
+    assert plan["sentences"][3]["past_end"] is False, "10.4 is inside the 10.5 s picture"
+    assert plan["sentences"][3]["window"] == pytest.approx(1.0), "to its own end, 11.4, which lies past the picture"

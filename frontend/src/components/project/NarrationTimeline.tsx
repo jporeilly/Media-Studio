@@ -12,18 +12,22 @@ import {
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AudioLines,
+  Lock,
   Maximize2,
   Mic,
   Pause,
   Play,
   Redo2,
+  RotateCcw,
   Scissors,
   Search,
   SkipBack,
   SkipForward,
+  SquareSplitHorizontal,
   StepBack,
   StepForward,
   Undo2,
+  Unlock,
   Video,
   X,
   ZoomIn,
@@ -36,24 +40,40 @@ import {
   FRAME_SECONDS,
   UNDO_DEPTH,
   anchoredScrollLeft,
+  clickSelectsPiece,
   describeJoin,
+  dragOffsets,
   joins,
   maxZoom,
+  nextEditForCut,
+  nextEditForSplit,
+  outputDuration,
+  pieceAt,
+  pieces,
   positionAfterEdit,
   projectPeaks,
-  removeRange,
+  releaseSuppressesClick,
+  sameEdit,
   sliderFromZoom,
+  snap,
   stepFrame,
   stepZoom,
   ticks,
   toSource,
+  trackBody,
+  unmovedRelease,
   wholeKeep,
-  wholeSource,
   zoomFromSlider,
   zoomToSelection,
+  type DragKind,
   type Join,
   type Keep,
+  type Piece,
+  type Track,
+  type TrackEdit,
+  type TrackLocks,
 } from "../../lib/edit";
+import type { Segment } from "../../lib/narration";
 import {
   auditionLength,
   clampTime,
@@ -89,23 +109,46 @@ interface Props {
   onSelect: (index: number) => void;
   /** A job holds the project: every write of the edit is a 409, so Cut, Undo and Redo wait for it. */
   jobActive: boolean;
+  /**
+   * The STORED offsets, by index (null = none), from the page's copy of the
+   * transcript: what undo goes back to after a drag. The plan's
+   * `pinned_start − start` cannot serve — it is floored at 0.
+   */
+  offsets: Record<number, number | null>;
+  /** A drag or a nudge saved: the parent folds the sentences into its copy, as the List's adjust does. */
+  onOffsetsSaved: (updated: SavedSentence[]) => void;
 }
+
+/** One sentence as `PATCH /narration/offsets` returns it: the stored segment with its index. */
+export type SavedSentence = Segment & { index: number };
 
 /** A range of the OUTPUT, timeline seconds, `start < end`. */
 interface Selection {
   start: number;
   end: number;
 }
-/** One state of the edit: the kept ranges, or `null` for no edit at all. */
-type Snapshot = Keep | null;
-interface Commit {
-  next: Snapshot;
-  kind: "cut" | "undo" | "redo";
+/** Camtasia's locks per editable track (lib/edit.ts). Audio · original has no list of its own: it follows Video. */
+type Locks = TrackLocks;
+/** One state of the edit: each track's kept ranges, or `null` for a track that keeps everything. */
+type EditState = TrackEdit;
+/**
+ * One operation the client can send: the whole edit (both lists), or a set
+ * of offsets by index. An undo entry holds one of each direction — what to
+ * send to undo it and what to send to redo it (spec §11.5).
+ */
+type Op = ({ kind: "edit" } & EditState) | { kind: "offsets"; values: Record<number, number | null> };
+interface Entry {
+  undo: Op;
+  redo: Op;
 }
-type DragKind = "scrub" | "in" | "out" | "range";
+type Commit =
+  | { kind: "do"; op: Op; before: Op }
+  | { kind: "undo" | "redo"; op: Op; entry: Entry };
+/** What a commit answers with: the stored edit, or the sentences a batch of offsets updated. */
+type Answer = EditPayload | { sentences: SavedSentence[] };
 interface Drag {
   kind: DragKind;
-  /** The end that is NOT being dragged (a handle), or where the drag began (Ctrl+drag). */
+  /** The end that is NOT being dragged (a handle), or where the drag began (Ctrl+drag, a marquee). */
   anchor: number;
   /** Seconds between the pointer and the thing it grabbed, so a handle does not jump to the pointer on the first move. */
   offset: number;
@@ -114,6 +157,12 @@ interface Drag {
   startX: number;
   moved: boolean;
   pointerId: number;
+  /** A move: the block grabbed, every block that moves with it, and the moments its pin snaps to. */
+  index?: number;
+  members?: PlanSentence[];
+  snapTo?: number[];
+  /** A move: the delta the blocks are currently painted at, seconds. */
+  delta: number;
 }
 
 /** Fetched three at a time. Sixty requests at once queue behind each other in
@@ -130,8 +179,25 @@ const THUMB_PX = 120;
 const START_LEAD = 0.08;
 /** A pointer that has travelled less than this is a click, not a drag. */
 const DRAG_SLOP_PX = 3;
+/** A dragged block snaps to a candidate within this many pixels at the current zoom, as Camtasia's do. */
+const SNAP_PX = 8;
+/** `[` / `]` move the selected blocks this much; with Shift, five times as much. */
+const NUDGE_SECONDS = 0.05;
+const NUDGE_LARGE_SECONDS = 0.25;
+/** Where a project's lock state is remembered: the client's, per visit, never on the record (decision 2 of §11.7). */
+const locksKey = (projectId: string) => `ms:tl-locks:${projectId}`;
+const UNLOCKED: Locks = { video: false, narration: false };
+const NO_BLOCKS: ReadonlySet<number> = new Set();
 
 const EMPTY_SCHEDULE: Schedule = { clips: [], overrunning: [], pushed: [], squeezed: [], end: 0 };
+
+function readLocks(projectId: string): Locks {
+  try {
+    const held = JSON.parse(localStorage.getItem(locksKey(projectId)) ?? "null");
+    if (held && typeof held === "object") return { video: held.video === true, narration: held.narration === true };
+  } catch { /* no storage, or not ours: unlocked */ }
+  return UNLOCKED;
+}
 
 /**
  * The ruler's tick marks. Its own component so that scrolling re-renders
@@ -190,12 +256,21 @@ const Ruler = memo(function Ruler({ total, pps, scrollEl }: { total: number; pps
  * **Everything is drawn in TIMELINE seconds** — the output's, with the removed
  * ranges closed up. The plan's sentences arrive projected; the filmstrip
  * seeks the source video to `toSource(t)`; the waveform's peaks are sliced by
- * `keep` before pooling. The edit itself is only ever `keep`, sent whole on
- * release; the transcript on disk never moves (spec §3).
+ * `keep` before pooling. The edit itself is only ever the kept lists, sent
+ * whole on release; the transcript on disk never moves (spec §3).
  *
- * Offsets are still typed in the List view; this view shows what they did.
+ * **Two lists, one axis** (E3, spec §11). The Video lane (and the original
+ * audio, which follows it) is drawn through the VIDEO list; the Narration
+ * lane through the NARRATION list; both start at the same zero. Camtasia's
+ * lock icons say which tracks a Cut or a split applies to — clicking a
+ * track's name selects that channel and locks the other — and a locked
+ * track's list is left exactly as it is (trap 19). A sentence block can be
+ * dragged along its lane, and that commits its OFFSET and nothing else
+ * (trap 20): one request for every block that moved, on release.
  */
-export function NarrationTimeline({ projectId, provider, voiceId, speed, active, selected, onSelect, jobActive }: Props) {
+export function NarrationTimeline({
+  projectId, provider, voiceId, speed, active, selected, onSelect, jobActive, offsets, onOffsetsSaved,
+}: Props) {
   const qc = useQueryClient();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** The scroll container as STATE too, for the ruler to subscribe to. */
@@ -249,30 +324,81 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
   // ── the edit ─────────────────────────────────────────────────────────────
   //
   // From the plan, never from a separate GET: the sentences were projected
-  // through exactly this `keep`, and a strip drawn from a plan of one moment
+  // through exactly these lists, and a strip drawn from a plan of one moment
   // and an edit of another would put the blocks over the wrong frames.
-  const storedKeep: Snapshot = plan.data?.edit?.keep ?? null;
-  // What the server holds, as far as this client knows: the plan's keep,
+  const storedVideo: Keep | null = plan.data?.edit?.video?.keep ?? null;
+  const storedNarration: Keep | null = plan.data?.edit?.narration?.keep ?? null;
+  // What the server holds, as far as this client knows: the plan's lists,
   // advanced by every commit that SUCCEEDS. The undo stack snapshots THIS,
   // never the plan's copy - which is still the previous edit until the
   // refetch lands - so the history is right even if the lock below were
-  // ever bypassed.
-  const committedKeepRef = useRef<Snapshot>(storedKeep);
-  useEffect(() => { committedKeepRef.current = storedKeep; }, [storedKeep]);
+  // ever bypassed. The same for the offsets: the page's stored copy,
+  // advanced by every drag that lands.
+  const committedRef = useRef<EditState>({ video: storedVideo, narration: storedNarration });
+  useEffect(() => { committedRef.current = { video: storedVideo, narration: storedNarration }; }, [storedVideo, storedNarration]);
+  const committedOffsetsRef = useRef(offsets);
+  useEffect(() => { committedOffsetsRef.current = offsets; }, [offsets]);
   const sourceDuration = plan.data?.edit?.source_duration ?? duration;
   const sourceDurationRef = useRef(sourceDuration);
   sourceDurationRef.current = sourceDuration;
-  /** What the drawing projects through: the stored ranges, or the whole source. */
+  /**
+   * The PICTURE's axis - what the filmstrip, the waveform, the transport's
+   * seeks and the playhead's remapping project through: the video list, or
+   * the whole source. Named `keep` since E2, when it was the only list.
+   */
   const keep = useMemo<Keep>(
-    () => (storedKeep && storedKeep.length > 0 ? storedKeep : wholeKeep(sourceDuration)),
-    [storedKeep, sourceDuration],
+    () => (storedVideo && storedVideo.length > 0 ? storedVideo : wholeKeep(sourceDuration)),
+    [storedVideo, sourceDuration],
   );
   const keepSignature = JSON.stringify(keep);
   const keepRef = useRef(keep);
   keepRef.current = keep;
+  /** The NARRATION lane's axis: its own list, or the whole source. Never the picture's (trap 18). */
+  const narrationKeep = useMemo<Keep>(
+    () => (storedNarration && storedNarration.length > 0 ? storedNarration : wholeKeep(sourceDuration)),
+    [storedNarration, sourceDuration],
+  );
+  const narrationKeepRef = useRef(narrationKeep);
+  narrationKeepRef.current = narrationKeep;
+  // The joins per lane: the video's on the Video and Audio lanes (the
+  // transport re-seeks the picture at these), the narration's on its own.
   const joinList = useMemo(() => joins(keep, sourceDuration), [keep, sourceDuration]);
   const joinsRef = useRef<Join[]>(joinList);
   joinsRef.current = joinList;
+  const narrationJoins = useMemo(() => joins(narrationKeep, sourceDuration), [narrationKeep, sourceDuration]);
+  // The pieces per lane - the stretches between boundaries, what a click selects.
+  const videoPieces = useMemo(() => pieces(keep, sourceDuration), [keep, sourceDuration]);
+  const narrationPieces = useMemo(() => pieces(narrationKeep, sourceDuration), [narrationKeep, sourceDuration]);
+  const narrationPiecesRef = useRef(narrationPieces);
+  narrationPiecesRef.current = narrationPieces;
+
+  // ── the locks ────────────────────────────────────────────────────────────
+  //
+  // Camtasia's lock icons: a locked track's list is left exactly as it is by
+  // a Cut or a split (trap 19). Clicking a track's NAME selects that channel
+  // - the owner's phrase made literal: it locks the OTHER track - and
+  // clicking the selected name again unlocks both; the icons still toggle one
+  // at a time. The client's, per project and per visit: remembered in
+  // localStorage so a reload keeps it, never on the record (it is a gesture
+  // modifier, and the durable thing is the edit it produces).
+  const [locks, setLocks] = useState<Locks>(() => readLocks(projectId));
+  useEffect(() => { setLocks(readLocks(projectId)); }, [projectId]);
+  const locksRef = useRef(locks);
+  locksRef.current = locks;
+  const changeLocks = useCallback((next: Locks) => {
+    setLocks(next);
+    try { localStorage.setItem(locksKey(projectId), JSON.stringify(next)); } catch { /* no storage: per visit, then */ }
+  }, [projectId]);
+  const toggleLock = useCallback((track: Track) => {
+    changeLocks({ ...locksRef.current, [track]: !locksRef.current[track] });
+  }, [changeLocks]);
+  /** The channel whose name is selected: the one unlocked track while the other is locked. */
+  const channel: Track | null = locks.video !== locks.narration ? (locks.video ? "narration" : "video") : null;
+  const selectChannel = useCallback((track: Track) => {
+    const other: Track = track === "video" ? "narration" : "video";
+    const held = locksRef.current;
+    changeLocks(!held[track] && held[other] ? UNLOCKED : { [track]: false, [other]: true } as Locks);
+  }, [changeLocks]);
 
   // The render's own tempo-squeeze constants, never literals here: see
   // `renderedLength` in lib/timeline.ts.
@@ -467,6 +593,36 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
   const dragRef = useRef<Drag | null>(null);
   /** Set by a pointer gesture so the click the browser fires after it does not seek a second time. */
   const suppressClick = useRef(false);
+  // The selected BLOCKS - what a drag moves and the nudge keys act on -
+  // beside the one "chosen" sentence the List view shares (`selected`). A
+  // click chooses one and selects it alone; Ctrl+click toggles; Shift+click
+  // extends from the last plain click; a marquee on empty lane space selects
+  // what it crosses. Held as a Set in state, painted as a class per block.
+  const [selectedBlocks, setSelectedBlocks] = useState<ReadonlySet<number>>(NO_BLOCKS);
+  const selectedBlocksRef = useRef(selectedBlocks);
+  selectedBlocksRef.current = selectedBlocks;
+  const blockAnchorRef = useRef<number | null>(null);
+  /** The block elements by index, for the move drag's per-frame transform. */
+  const blockNodes = useRef(new Map<number, HTMLButtonElement>());
+  const attachBlock = useCallback((index: number) => (node: HTMLButtonElement | null) => {
+    if (node) blockNodes.current.set(index, node);
+    else blockNodes.current.delete(index);
+  }, []);
+  const moveLabelRef = useRef<HTMLDivElement | null>(null);
+  const marqueeRef = useRef<HTMLDivElement | null>(null);
+  /** One outline per block at the position it is being dragged FROM, shown only while it moves. */
+  const dragGhosts = useRef(new Map<number, HTMLDivElement>());
+  const attachDragGhost = useCallback((index: number) => (node: HTMLDivElement | null) => {
+    if (node) dragGhosts.current.set(index, node);
+    else dragGhosts.current.delete(index);
+  }, []);
+  // A sentence the narration edit dropped is no longer selectable.
+  useEffect(() => {
+    setSelectedBlocks((held) => {
+      const present = new Set([...held].filter((index) => sentences.some((s) => s.index === index)));
+      return present.size === held.size ? held : present;
+    });
+  }, [sentences]);
 
   const zoomMax = maxZoom(total, width);
   // A resize re-clamps whatever zoom is set: the ceiling is a function of the width.
@@ -707,17 +863,21 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
     setWaitingToPlay(false);
   }, []);
 
-  // A CHANGED EDIT: the same source moment is somewhere else on the timeline
-  // now (or nowhere, if it was just cut), so the playhead is remapped rather
-  // than sent back to zero, and the selection - which was in the old
-  // coordinates - is cleared. Declared before the plan effect below, which
-  // reads the position this one sets. The previous keep is kept in a ref
-  // because the plan and its edit arrive in the same fetch.
+  // A CHANGED PICTURE: the same source moment is somewhere else on the
+  // timeline now (or nowhere, if it was just cut), so the playhead is
+  // remapped rather than sent back to zero, and the selection - which was in
+  // the old coordinates - is cleared. On the VIDEO list: the picture is the
+  // axis the playhead and the selection live on. A list that changed without
+  // removing anything - a split - moved nothing, so playback and the
+  // selection are left alone (trap 23). Declared before the plan effect
+  // below, which reads the position this one sets. The previous keep is kept
+  // in a ref because the plan and its edit arrive in the same fetch.
   const previousKeepRef = useRef<Keep>(keep);
   useEffect(() => {
     const before = previousKeepRef.current;
     previousKeepRef.current = keep;
     if (JSON.stringify(before) === keepSignature) return;
+    if (outputDuration(before) === outputDuration(keep)) return;
     halt(positionAfterEdit(position(), before, keep));
     setSelection(null);
     // `halt` and `position` are stable; `keep` rides with its signature.
@@ -986,19 +1146,28 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
 
   // ── the edit: commit, undo, redo ─────────────────────────────────────────
   //
-  // ONE request per gesture, on release, with the whole list: the record is
-  // rewritten whole and served whole (spec trap 8). Nothing local is drawn
-  // from the new list - the plan is invalidated and the strip is redrawn from
-  // the plan the server answers with, so a refused edit (a 400 naming the
-  // range, a 409 while a job holds the project) leaves the drawing exactly on
-  // the server's state with the message shown.
+  // ONE request per gesture, on release, with the whole thing: the record is
+  // rewritten whole and served whole (spec trap 8), and a drag of twelve
+  // blocks is one PATCH of twelve offsets, never twelve (trap 21). Nothing
+  // local is drawn from the new state - the plan is invalidated and the
+  // strip is redrawn from the plan the server answers with, so a refused
+  // commit (a 400 naming the range, a 409 while a job holds the project)
+  // leaves the drawing exactly on the server's state with the message shown.
   //
-  // Undo is a client-side stack of snapshots, `null` meaning no edit, pushed
-  // only when a commit SUCCEEDS. It is lost on reload: the server keeps only
-  // the current cut, and the view says so.
-  const [history, setHistory] = useState<{ past: Snapshot[]; future: Snapshot[] }>({ past: [], future: [] });
+  // Undo is a client-side stack of OPERATIONS - a cut or a split stores the
+  // whole edit before and after, a drag or a Reset the moved sentences'
+  // offsets before and after - pushed only when a commit SUCCEEDS; undo
+  // sends the "before", redo the "after". It is lost on reload: the server
+  // keeps only the current state, and the view says so.
+  const [history, setHistory] = useState<{ past: Entry[]; future: Entry[] }>({ past: [], future: [] });
   /** A refusal made here rather than by the server ("keep at least one range"). */
   const [refusal, setRefusal] = useState<string | null>(null);
+  /** Take the blocks a move painted through their transforms back to where the plan draws them. */
+  const clearMoved = useCallback(() => {
+    blockNodes.current.forEach((node) => { node.style.transform = ""; });
+    dragGhosts.current.forEach((node) => { node.style.display = "none"; });
+    if (moveLabelRef.current) moveLabelRef.current.style.display = "none";
+  }, []);
   // THE RACE THE LOCK CLOSES. A commit succeeds and the plan is invalidated,
   // but until the refetch lands the strip is still drawn from the PREVIOUS
   // plan (`keepPreviousData`) - and the server re-measures the speaking rate
@@ -1014,60 +1183,175 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
   const [awaiting, setAwaiting] = useState<{ data: number; error: number } | null>(null);
   const planStampRef = useRef({ data: plan.dataUpdatedAt, error: plan.errorUpdatedAt });
   planStampRef.current = { data: plan.dataUpdatedAt, error: plan.errorUpdatedAt };
-  useEffect(() => {
+  // A LAYOUT effect: the render that brings the new plan also gives the moved
+  // blocks their new `left`, and the transforms a drag left on them would
+  // paint one frame doubled if they were cleared only after that paint.
+  useLayoutEffect(() => {
     if (!awaiting) return;
     // Leaving the tab does NOT clear it: the plan is refetched on return (the
     // commit invalidated it) and that landing is what unlocks - clearing on
     // `!active` would reopen the window for the first gesture after coming
     // back, computed against the plan the tab left with.
-    if (plan.dataUpdatedAt !== awaiting.data || plan.errorUpdatedAt !== awaiting.error) setAwaiting(null);
-  }, [awaiting, plan.dataUpdatedAt, plan.errorUpdatedAt]);
+    if (plan.dataUpdatedAt !== awaiting.data || plan.errorUpdatedAt !== awaiting.error) {
+      setAwaiting(null);
+      // The plan now draws the moved blocks where they landed.
+      clearMoved();
+    }
+  }, [awaiting, plan.dataUpdatedAt, plan.errorUpdatedAt, clearMoved]);
   /** Between a successful commit and the plan it produced: the strip is about to change. */
   const applying = awaiting !== null;
   const commit = useMutation({
-    mutationFn: ({ next }: Commit) => {
-      // Back to keep-everything is a DELETE, so the record reads as one that
-      // never had an edit, rather than a PUT of the whole source.
-      const whole = next === null || (next.length === 1 && wholeSource(next, sourceDurationRef.current));
-      return whole
+    mutationFn: ({ op }: Commit): Promise<Answer> => {
+      if (op.kind === "offsets") {
+        const body = Object.entries(op.values).map(([index, offset]) => ({ index: Number(index), offset }));
+        return api.patch<{ sentences: SavedSentence[] }>(`/api/projects/${projectId}/narration/offsets`, { offsets: body });
+      }
+      // Back to keep-everything on both tracks is a DELETE, so the record
+      // reads as one that never had an edit, rather than a PUT of the whole
+      // source. A whole-source SPLIT (two touching ranges) is still a PUT -
+      // its boundary is the point.
+      const video = trackBody(op.video, sourceDurationRef.current);
+      const narration = trackBody(op.narration, sourceDurationRef.current);
+      return video === null && narration === null
         ? api.delete<EditPayload>(`/api/projects/${projectId}/edit`)
-        : api.put<EditPayload>(`/api/projects/${projectId}/edit`, { keep: next });
+        : api.put<EditPayload>(`/api/projects/${projectId}/edit`, { video, narration });
     },
     onMutate: () => setRefusal(null),
-    onSuccess: (_stored, { next, kind }) => {
+    onSuccess: (answer, variables) => {
+      const { op } = variables;
       // What the server held until this instant is what undo goes back to.
-      const before = committedKeepRef.current;
-      committedKeepRef.current = next;
+      if (op.kind === "edit") {
+        committedRef.current = { video: op.video, narration: op.narration };
+        setSelection(null);
+      } else {
+        committedOffsetsRef.current = { ...committedOffsetsRef.current, ...op.values };
+        // The List view reads the new numbers from the page's copy, folded in
+        // rather than refetched - a refetch would drop half-typed words.
+        if ("sentences" in answer) onOffsetsSaved(answer.sentences);
+      }
       setHistory((h) => {
-        if (kind === "cut") return { past: [...h.past, before].slice(-UNDO_DEPTH), future: [] };
-        if (kind === "undo") return { past: h.past.slice(0, -1), future: [...h.future, before] };
-        return { past: [...h.past, before].slice(-UNDO_DEPTH), future: h.future.slice(0, -1) };
+        if (variables.kind === "do") {
+          return { past: [...h.past, { undo: variables.before, redo: op }].slice(-UNDO_DEPTH), future: [] };
+        }
+        if (variables.kind === "undo") return { past: h.past.slice(0, -1), future: [...h.future, variables.entry] };
+        return { past: [...h.past, variables.entry].slice(-UNDO_DEPTH), future: h.future.slice(0, -1) };
       });
-      setSelection(null);
       setAwaiting(planStampRef.current);
       void qc.invalidateQueries({ queryKey: narrationPlanKey(projectId) });
-      void qc.invalidateQueries({ queryKey: ["project", projectId] });
-      void qc.invalidateQueries({ queryKey: ["edit", projectId] });
+      if (op.kind === "edit") {
+        void qc.invalidateQueries({ queryKey: ["project", projectId] });
+        void qc.invalidateQueries({ queryKey: ["edit", projectId] });
+      }
     },
+    onError: clearMoved,
   });
   const editLocked = jobActive || commit.isPending || applying;
+  /** Read at a drag's release, which is a stable callback: a key committed mid-drag must not be followed by a second commit. */
+  const editLockedRef = useRef(editLocked);
+  editLockedRef.current = editLocked;
   const editError = refusal ?? (commit.isError ? errorMessage(commit.error) : null);
+  const bothLocked = locks.video && locks.narration;
 
-  /** Camtasia's ripple delete: remove the selection, close the gap. */
+  /**
+   * Commit a new edit (a cut, a split) with what it replaces as its undo.
+   * Compared and stored in the PUT body's own terms - a whole track is null -
+   * so a split on the very start of an untouched track, which makes a list
+   * that is still the whole source, commits nothing and leaves no undo entry.
+   */
+  const commitEdit = useCallback((next: EditState) => {
+    const before = committedRef.current;
+    const source = sourceDurationRef.current;
+    if (sameEdit(next, before, source)) return;
+    const after: EditState = { video: trackBody(next.video, source), narration: trackBody(next.narration, source) };
+    commit.mutate({ kind: "do", op: { kind: "edit", ...after }, before: { kind: "edit", ...before } });
+  }, [commit]);
+
+  /**
+   * Camtasia's ripple delete on the unlocked tracks (`nextEditForCut`,
+   * lib/edit.ts): the selection removed from each list that is not locked,
+   * its gap closed; a locked list left exactly as it is (trap 19) - so
+   * cutting the picture with Narration locked moves no pin, and every later
+   * sentence lands earlier against the picture by the length removed. A
+   * locked track that is whole stays `null`, which is not a refusal: the
+   * helper says which track, if any, the cut would empty.
+   */
   const cutSelection = useCallback(() => {
     const sel = selectionRef.current;
     if (!sel || editLocked) return;
-    const next = removeRange(keepRef.current, sel.start, sel.end);
-    if (next === null) { setRefusal("Keep at least one range — that selection would remove the whole video."); return; }
-    commit.mutate({ next, kind: "cut" });
-  }, [commit, editLocked]);
+    const held = locksRef.current;
+    if (held.video && held.narration) return;
+    const outcome = nextEditForCut(committedRef.current, held, sel.start, sel.end, sourceDurationRef.current);
+    if (outcome.refused) {
+      const track = outcome.refused === "video" ? "picture" : "narration";
+      setRefusal(`Keep at least one range — that selection would remove the whole ${track}.`);
+      return;
+    }
+    commitEdit(outcome.next);
+  }, [commitEdit, editLocked]);
+
+  /**
+   * Split at the playhead (`S`): a boundary in each unlocked list - or in
+   * every list, regardless of locks, for Ctrl+Shift+S - at the source moment
+   * under the playhead (`nextEditForSplit`). Nothing is removed (trap 23);
+   * the pieces it makes are what a click selects. A split on an existing
+   * boundary changes no list and commits nothing.
+   */
+  const splitAtPlayhead = useCallback((all: boolean) => {
+    if (editLocked) return;
+    commitEdit(nextEditForSplit(committedRef.current, locksRef.current, positionRef.current, sourceDurationRef.current, all));
+  }, [commitEdit, editLocked]);
+
+  /** The blocks a nudge or a Reset acts on: the selected blocks, else the chosen sentence when it is on the strip. */
+  const actedOn = useCallback((): PlanSentence[] => {
+    const chosen = selectedBlocksRef.current;
+    if (chosen.size > 0) return sentences.filter((s) => chosen.has(s.index));
+    const one = selected !== null ? sentences.find((s) => s.index === selected) : undefined;
+    return one ? [one] : [];
+  }, [selected, sentences]);
+  /** ONE request for however many blocks: their offsets before (from the stored copy) and after. False when nothing changed. */
+  const commitOffsets = useCallback((next: { index: number; offset: number | null }[]): boolean => {
+    const stored = committedOffsetsRef.current;
+    const changed = next.filter(({ index, offset }) => (stored[index] ?? null) !== offset);
+    if (changed.length === 0) return false;
+    const before: Record<number, number | null> = {};
+    const after: Record<number, number | null> = {};
+    for (const { index, offset } of changed) {
+      before[index] = stored[index] ?? null;
+      after[index] = offset;
+    }
+    commit.mutate({ kind: "do", op: { kind: "offsets", values: after }, before: { kind: "offsets", values: before } });
+    return true;
+  }, [commit]);
+  /**
+   * The blocks as `dragOffsets` wants them: from what is DRAWN - the plan's
+   * pin, never the page's stored offset, which can be a plan refetch behind
+   * (a value typed in the List a moment ago) and would land the block
+   * seconds from where it was dropped. The stored copy is undo's business
+   * only (`commitOffsets`).
+   */
+  const drawn = (blocks: PlanSentence[]) => blocks.map((s) => ({ index: s.index, start: s.start, offset: s.pinned_start - s.start }));
+  /** `[` / `]`: the selected blocks a little earlier or later, one request per press. */
+  const nudge = useCallback((deltaSeconds: number) => {
+    if (editLocked) return;
+    const blocks = actedOn();
+    if (blocks.length === 0) return;
+    commitOffsets(dragOffsets(drawn(blocks), deltaSeconds));
+  }, [actedOn, commitOffsets, editLocked]);
+  /** Reset timing: back to the spoken moment for the selected sentences - `offset: null` for each. */
+  const resetTiming = useCallback(() => {
+    if (editLocked) return;
+    commitOffsets(actedOn().map((s) => ({ index: s.index, offset: null })));
+  }, [actedOn, commitOffsets, editLocked]);
+
   const undo = useCallback(() => {
     if (history.past.length === 0 || editLocked) return;
-    commit.mutate({ next: history.past[history.past.length - 1], kind: "undo" });
+    const entry = history.past[history.past.length - 1];
+    commit.mutate({ kind: "undo", op: entry.undo, entry });
   }, [commit, editLocked, history.past]);
   const redo = useCallback(() => {
     if (history.future.length === 0 || editLocked) return;
-    commit.mutate({ next: history.future[history.future.length - 1], kind: "redo" });
+    const entry = history.future[history.future.length - 1];
+    commit.mutate({ kind: "redo", op: entry.redo, entry });
   }, [commit, editLocked, history.future]);
 
   // ── the selection gesture ────────────────────────────────────────────────
@@ -1085,17 +1369,21 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
     return body ? pxToSeconds(clientX - body.getBoundingClientRect().left, ppsRef.current) : 0;
   }, []);
 
-  /** Every drag is captured on the BODY, whichever child began it, so one
-   *  pair of move/up handlers serves the ruler, the head and both handles.
-   *  `grabbed` is the timeline moment of the thing under the pointer (a
-   *  handle, the head), so that thing follows the pointer from where it was
-   *  rather than jumping to it. */
+  /** Every drag is handled on the BODY, whichever child began it, so one
+   *  pair of move/up handlers serves the ruler, the head, both handles, the
+   *  blocks and the lanes. The pointer is captured LAZILY - in the move
+   *  handler, the moment a drag has really moved - never here: capture on
+   *  pointer-down retargets the click (and the double-click) the browser
+   *  fires after an unmoved release to the capturing element, and no block
+   *  or head would ever receive its own. Until then the events bubble from
+   *  the pressed child to the body anyway. `grabbed` is the timeline moment
+   *  of the thing under the pointer (a handle, the head, a block), so that
+   *  thing follows the pointer from where it was rather than jumping to it. */
   const beginDrag = useCallback((
-    event: ReactPointerEvent, kind: DragKind, anchor: number, grabbed?: number,
+    event: ReactPointerEvent, kind: DragKind, anchor: number, grabbed?: number, move?: Pick<Drag, "index" | "members" | "snapTo">,
   ) => {
     const body = bodyRef.current;
     if (!body || event.button !== 0) return;
-    try { body.setPointerCapture(event.pointerId); } catch { /* a synthetic pointer */ }
     dragRef.current = {
       kind,
       anchor,
@@ -1104,19 +1392,46 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
       startX: event.clientX,
       moved: false,
       pointerId: event.pointerId,
+      delta: 0,
+      ...move,
     };
     event.stopPropagation();
     event.preventDefault();
   }, [secondsAt]);
 
+  /** Paint the marquee's band over the Narration lane between two moments, through its ref. */
+  const paintMarquee = useCallback((a: number, b: number) => {
+    const band = marqueeRef.current;
+    if (!band) return;
+    const lo = Math.max(0, Math.min(a, b)) * ppsRef.current;
+    const hi = Math.max(a, b) * ppsRef.current;
+    band.style.display = "";
+    band.style.left = `${lo}px`;
+    band.style.width = `${Math.max(1, hi - lo)}px`;
+  }, []);
+
   const onBodyPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (!drag.moved) {
+      // A release this handler never saw (the button let go off the strip
+      // before the drag began, so nothing was captured): not a drag.
+      if (event.buttons === 0) { dragRef.current = null; return; }
       if (Math.abs(event.clientX - drag.startX) < DRAG_SLOP_PX) return;
       drag.moved = true;
+      // Now it is a drag: capture, so the moves and the release reach the
+      // body wherever the pointer goes (allowed while the button is down).
+      try { bodyRef.current?.setPointerCapture(event.pointerId); } catch { /* a synthetic pointer */ }
       // A scrub pauses: seek on every move, commit nothing.
       if (drag.kind === "scrub") halt(position());
+      // A move leaves an outline where each block was, so a never-nudged
+      // block has a trace to come back to while it is being dragged.
+      if (drag.kind === "move") {
+        for (const s of drag.members ?? []) {
+          const ghost = dragGhosts.current.get(s.index);
+          if (ghost) ghost.style.display = "";
+        }
+      }
     }
     const t = secondsAt(event.clientX) - drag.offset;
     if (drag.kind === "scrub") {
@@ -1126,29 +1441,124 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
       paint();
       return;
     }
+    if (drag.kind === "marquee") {
+      paintMarquee(drag.anchor, secondsAt(event.clientX));
+      return;
+    }
+    if (drag.kind === "move") {
+      // Every selected block follows the pointer by the same delta, painted
+      // as a transform on the moved blocks - never state per frame. The
+      // grabbed block's pin snaps (Camtasia's rule: to the playhead, the
+      // joins, the other sentences' pins and landed ends, and its own spoken
+      // moment) unless Ctrl is held; the delta is then clamped so no member
+      // leaves the audition.
+      const members = drag.members ?? [];
+      const grabbed = members.find((s) => s.index === drag.index) ?? members[0];
+      if (!grabbed) return;
+      const pps = ppsRef.current;
+      let delta = (event.clientX - drag.startX) / pps;
+      let snapped: number | null = null;
+      if (!(event.ctrlKey || event.metaKey) && drag.snapTo) {
+        const landed = snap(grabbed.pinned_start + delta, drag.snapTo, SNAP_PX / pps);
+        delta = landed.t - grabbed.pinned_start;
+        snapped = landed.snapped;
+      }
+      const pins = members.map((s) => s.pinned_start);
+      delta = Math.max(delta, -Math.min(...pins));
+      delta = Math.min(delta, totalRef.current - Math.max(...pins));
+      drag.delta = delta;
+      for (const s of members) {
+        const node = blockNodes.current.get(s.index);
+        if (node) node.style.transform = `translateX(${delta * pps}px)`;
+      }
+      const label = moveLabelRef.current;
+      if (label) {
+        const at = grabbed.pinned_start + delta;
+        label.style.display = "";
+        label.style.transform = `translateX(${at * pps}px)`;
+        label.textContent = snapped === null ? timecode(at) : `${timecode(at)} ⌖`;
+      }
+      return;
+    }
     // A handle drags its own end; Ctrl+drag grows from where it began. Painted
     // through the ref, never through state, until release.
     selectionRef.current = drag.kind === "in" ? normalize(t, drag.anchor) : normalize(drag.anchor, t);
     paint();
-  }, [halt, normalize, paint, position, secondsAt, syncVideo]);
+  }, [halt, normalize, paint, paintMarquee, position, secondsAt, syncVideo]);
+
+  /** A piece under the pointer becomes the selection: the handles jump to its ends and the band spans it. */
+  const selectPiece = useCallback((piece: Piece | null) => {
+    if (!piece) return;
+    setSelectedBlocks(NO_BLOCKS);
+    commitSelection(normalize(piece.start, piece.end));
+  }, [commitSelection, normalize]);
+  /**
+   * A click on a lane (`pick`): the piece under it, once the lane has more
+   * than one; on a lane with a single piece, or a LOCKED lane - Camtasia
+   * does not select a locked track's clips, and a selection there would arm
+   * a cut of the other track - the click seeks, as a click on the strip
+   * always has.
+   */
+  const pickOnLane = useCallback((track: Track, list: Piece[], clientX: number) => {
+    if (clickSelectsPiece(list) && !locksRef.current[track]) selectPiece(pieceAt(list, secondsAt(clientX)));
+    else seek(secondsAt(clientX));
+  }, [secondsAt, seek, selectPiece]);
 
   const onBodyPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
-    try { bodyRef.current?.releasePointerCapture(event.pointerId); } catch { /* already released */ }
-    // The browser fires a click after this pointerup; it must not seek again.
-    // Cleared on the next tick in case no click follows (a release off-screen).
-    suppressClick.current = true;
+    if (drag.moved) { try { bodyRef.current?.releasePointerCapture(event.pointerId); } catch { /* already released */ } }
+    // The browser fires a click after this pointerup; after a real drag, or
+    // a scrub or a marquee (whose click is the seek or the pick made here),
+    // it must not act again. Cleared on the next tick in case no click
+    // follows (a release off-screen). An unmoved release on a block or a
+    // handle lets the click through: the block's own handler is where a
+    // click chooses, selects and seeks (lib/edit.ts, `releaseSuppressesClick`).
+    suppressClick.current = releaseSuppressesClick(drag.kind, drag.moved);
     setTimeout(() => { suppressClick.current = false; }, 0);
-    if (drag.kind === "scrub") {
-      // A click on the ruler seeks, and keeps playing if it was; a click on
-      // the head, or a pointer the browser cancelled, does nothing.
-      if (!drag.moved && drag.seekOnClick && event.type !== "pointercancel") seek(secondsAt(event.clientX));
+    const cancelled = event.type === "pointercancel";
+    if (!drag.moved) {
+      // What a click means, per kind (lib/edit.ts, `unmovedRelease`).
+      switch (unmovedRelease(drag.kind, drag.seekOnClick, cancelled)) {
+        case "seek": seek(secondsAt(event.clientX)); return;
+        case "pick": pickOnLane("narration", narrationPiecesRef.current, event.clientX); return;
+        case "keep-selection": commitSelection(selectionRef.current); return;
+        case "click": if (moveLabelRef.current) moveLabelRef.current.style.display = "none"; return;
+        default: return;
+      }
+    }
+    if (drag.kind === "scrub") return;  // scrubbed on every move; nothing to commit
+    if (drag.kind === "marquee") {
+      if (marqueeRef.current) marqueeRef.current.style.display = "none";
+      if (cancelled) return;
+      // Camtasia's rubber band: every block the marquee crossed.
+      const lo = Math.min(drag.anchor, secondsAt(event.clientX));
+      const hi = Math.max(drag.anchor, secondsAt(event.clientX));
+      const crossed = sentences.filter((s) => {
+        const left = s.pinned_start;
+        const right = left + Math.max(DRAG_SLOP_PX / ppsRef.current, s.end - s.start);
+        return right >= lo && left <= hi;
+      }).map((s) => s.index);
+      setSelectedBlocks(new Set(crossed));
+      return;
+    }
+    if (drag.kind === "move") {
+      if (moveLabelRef.current) moveLabelRef.current.style.display = "none";
+      // ONE request on release, never per frame (trap 8): the moved blocks'
+      // offsets, from where they are DRAWN plus the delta. The transforms
+      // stay until the plan that draws the blocks where they landed is in -
+      // or are cleared at once when nothing changed, the commit failed, the
+      // pointer was cancelled, or a key committed something mid-drag and the
+      // gesture is locked (a second commit computed against a moving target
+      // could land 0.05 s from where the block was painted).
+      const changed = !cancelled && !editLockedRef.current && Math.abs(drag.delta) >= EPSILON
+        && commitOffsets(dragOffsets(drawn(drag.members ?? []), drag.delta));
+      if (!changed) clearMoved();
       return;
     }
     commitSelection(selectionRef.current);
-  }, [commitSelection, secondsAt, seek]);
+  }, [clearMoved, commitOffsets, commitSelection, pickOnLane, secondsAt, seek, sentences]);
 
   /** Down on the ruler: scrub, or with Ctrl a selection from this point. */
   const onRulerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1178,6 +1588,74 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
     const box = event.currentTarget.getBoundingClientRect();
     seek(pxToSeconds(event.clientX - box.left, pps));
   };
+  /**
+   * A click on the Video or Audio lane: the piece under it, from the video
+   * list - once the lane has more than one and the video is not locked;
+   * otherwise the click seeks, as a click on the strip always has
+   * (`pickOnLane`).
+   */
+  const onPieceClick = (event: MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    if (suppressClick.current || event.ctrlKey || event.metaKey) return;
+    pickOnLane("video", videoPieces, event.clientX);
+  };
+  /** Down on empty Narration-lane space: a marquee (a click selects the piece); Ctrl+drag stays the body's. */
+  const onNarrationLanePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.ctrlKey || event.metaKey) return;
+    const at = clampTime(secondsAt(event.clientX), totalRef.current);
+    beginDrag(event, "marquee", at, at);
+  }, [beginDrag, secondsAt]);
+  /**
+   * Down on a block: a MOVE of every selected block (or this one alone when
+   * it is not selected). The snap candidates are gathered here, once per
+   * drag: the playhead, the video's joins, the other sentences' pins and
+   * landed ends, and the block's own spoken moment - the ghost - so "back to
+   * where it was said" is a snap, not a hunt. Ctrl leaves the event to the
+   * body (Ctrl+drag is the range selection everywhere; Ctrl+click toggles
+   * the block in the click handler).
+   */
+  const onBlockPointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>, sentence: PlanSentence) => {
+    if (event.ctrlKey || event.metaKey || event.button !== 0) return;
+    event.stopPropagation();
+    if (editLocked) return;  // the click still selects; nothing moves while a commit is in flight
+    const chosen = selectedBlocksRef.current;
+    const members = chosen.has(sentence.index) ? sentences.filter((s) => chosen.has(s.index)) : [sentence];
+    const moving = new Set(members.map((s) => s.index));
+    const snapTo = [0, durationRef.current, positionRef.current, ...joinsRef.current.map((join) => join.at), sentence.start];
+    for (const s of sentences) {
+      if (moving.has(s.index)) continue;
+      snapTo.push(s.pinned_start);
+      const landed = startsAt[s.index];
+      if (landed) snapTo.push(landed.end);
+    }
+    beginDrag(event, "move", sentence.pinned_start, sentence.pinned_start, { index: sentence.index, members, snapTo });
+  }, [beginDrag, editLocked, sentences, startsAt]);
+  /** Click = this block alone (and seek, as before); Ctrl+click toggles it; Shift+click extends from the last plain click. */
+  const onBlockClick = useCallback((event: MouseEvent<HTMLButtonElement>, sentence: PlanSentence, landedAt: number | null) => {
+    event.stopPropagation();
+    if (suppressClick.current) return;
+    if (event.shiftKey) {
+      const anchor = blockAnchorRef.current ?? sentence.index;
+      const from = sentences.findIndex((s) => s.index === anchor);
+      const to = sentences.findIndex((s) => s.index === sentence.index);
+      const span = from < 0 ? [sentence] : sentences.slice(Math.min(from, to), Math.max(from, to) + 1);
+      setSelectedBlocks(new Set(span.map((s) => s.index)));
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      setSelectedBlocks((held) => {
+        const next = new Set(held);
+        if (next.has(sentence.index)) next.delete(sentence.index);
+        else next.add(sentence.index);
+        return next;
+      });
+      return;
+    }
+    blockAnchorRef.current = sentence.index;
+    setSelectedBlocks(new Set([sentence.index]));
+    onSelect(sentence.index);
+    seek(landedAt ?? sentence.pinned_start);
+  }, [onSelect, seek, sentences]);
 
   // ── the transport's other moves ──────────────────────────────────────────
   /** Comma / Period: a frame is 1/30 s here (see FRAME_SECONDS); stepping pauses. */
@@ -1221,11 +1699,25 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
   // render.
   const keyHandler = useRef<(event: KeyboardEvent) => boolean>(() => false);
   keyHandler.current = (event) => {
-    if (event.altKey) return false;
     const ctrl = event.ctrlKey || event.metaKey;
     const shift = event.shiftKey;
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     const code = event.code;
+    // The nudge keys, by the physical key (the two right of P) OR by what it
+    // typed: on a QWERTZ layout `[` is AltGr+8 - Alt AND Ctrl held, as
+    // Windows reports AltGr - so these are the one exception to the Alt
+    // bail-out below, and to "plain Ctrl+[ / ] are Camtasia's marker keys,
+    // untouched". `{` / `}` (Shift on a US layout, AltGr+7 / AltGr+0 on
+    // QWERTZ) are the quarter-second step.
+    const bracket = code === "BracketLeft" || key === "[" || key === "{" ? -1
+      : code === "BracketRight" || key === "]" || key === "}" ? 1 : 0;
+    if (event.altKey && bracket === 0) return false;
+    const once = !event.repeat;
+    if (bracket !== 0 && (!ctrl || event.altKey)) {
+      const large = shift || key === "{" || key === "}";
+      if (once) nudge(bracket * (large ? NUDGE_LARGE_SECONDS : NUDGE_SECONDS));
+      return true;
+    }
     // Space by `key` as well as by `code`: virtual keyboards and automation
     // set the one without the other.
     const space = code === "Space" || key === " ";
@@ -1235,15 +1727,24 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
     // swallowed, so a held Space cannot scroll the page either. Frame
     // stepping and the selection keys keep repeating - holding them is how
     // they are used.
-    const once = !event.repeat;
+    // The nudge keys and the split fire once per press too: a held `]`
+    // would be a request per repeat.
     if (!ctrl && !shift) {
       if (space) { if (once) togglePlay(); return true; }
       if (code === "Comma") { stepBy(-1); return true; }
       if (code === "Period") { stepBy(1); return true; }
-      if (key === "Escape") { if (!selectionRef.current) return false; setSelection(null); return true; }
+      // Escape clears the block selection first, then (a second press) the range.
+      if (key === "Escape") {
+        if (selectedBlocksRef.current.size > 0) { setSelectedBlocks(NO_BLOCKS); return true; }
+        if (!selectionRef.current) return false;
+        setSelection(null);
+        return true;
+      }
       // Camtasia's plain Delete leaves space on the timeline; this one has no
       // gaps (the edit is ranges of one source), so it closes the gap too.
       if (key === "Backspace" || key === "Delete") { if (once) cutSelection(); return true; }
+      // TechSmith's S: split the selected / unlocked tracks at the playhead.
+      if (code === "KeyS" || key === "s") { if (once) splitAtPlayhead(false); return true; }
       return false;
     }
     if (shift && !ctrl) {
@@ -1262,6 +1763,8 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
     // Ctrl+Shift
     if (key === "z") { if (once) redo(); return true; }
     if (key === "d") { setSelection(null); return true; }
+    // Ctrl+Shift+S: split every track at the playhead, locks or not.
+    if (code === "KeyS" || key === "s") { if (once) splitAtPlayhead(true); return true; }
     if (key === "Home") { extendTo("start"); return true; }
     if (key === "End") { extendTo("end"); return true; }
     if (code === "Equal" || code === "NumpadAdd" || key === "+" || key === "=") { zoomStep(1); return true; }
@@ -1311,12 +1814,32 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
   const ready = speakable.filter((s) => clipSeconds[s.index] !== undefined).length;
   const failures = speakable.filter((s) => failed[s.index] !== undefined).length;
   // Sentences with words that are not muted and STILL will not be in the
-  // render: their offset pins them at or past the end of the video, where the
-  // mux drops them. The one state the owner cannot see coming, so it is said
-  // once at the top as well as on the block.
+  // render: pinned at or past the end of the picture, where the mux drops
+  // them - by their offset, or, since E3, because the picture was cut short
+  // under a locked narration and now ends before they are spoken. The one
+  // state the owner cannot see coming, so it is said once at the top as well
+  // as on the block, and each variant names its own remedy: an offset is
+  // pulled back; a sentence the picture ran out on is cut with the
+  // narration too, or dragged earlier.
   const dropped = sentences.filter((s) => s.past_end);
+  const hasOffset = (s: PlanSentence) => Math.abs(s.pinned_start - s.start) >= 0.001;
+  const droppedByOffset = dropped.filter(hasOffset);
+  const droppedByPicture = dropped.filter((s) => !hasOffset(s));
+  const names = (list: PlanSentence[]) => list.map((s) => `#${s.index + 1}`).join(", ");
   const sliderValue = Math.round(sliderFromZoom(zoomNow, zoomMax) * 1000);
-  const status = commit.isPending ? "Saving the cut…" : applying ? "Re-reading the plan…" : null;
+  const status = commit.isPending
+    ? (commit.variables?.op.kind === "offsets" ? "Saving the timing…" : "Saving the cut…")
+    : applying ? "Re-reading the plan…" : null;
+  const acted = actedOn();
+  const cutTitle = bothLocked
+    ? "Both tracks are locked — unlock one to cut"
+    : "Remove the selection from the unlocked tracks and close the gap (Ctrl+Delete, Backspace, Ctrl+X)";
+  const lockTitle = (track: Track) => (locks[track]
+    ? `Unlock ${track}: cuts and splits apply to it again`
+    : `Lock ${track}: cuts and splits leave it exactly as it is`);
+  const nameTitle = (track: Track) => (channel === track
+    ? "Selected channel — click again to unlock both tracks"
+    : `Select the ${track} channel: the other track locks, so a cut or a split edits just this one`);
 
   return (
     <div className="os-tl">
@@ -1324,18 +1847,34 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
         Play here to hear the new narration against the picture — no render, no job; every sentence
         is fetched exactly as the re-voice will speak it. A block sits where its sentence is{" "}
         <strong>aimed</strong>; a pin is a floor, so a clip that runs long is first sped up a little
-        to fit, and only marked when it really will push the next sentence late. Offsets are typed
-        in the List view. To cut: drag the green or red handle on the playhead, or Ctrl+drag, to
-        select; the scissors (or Ctrl+Delete, Backspace) remove the selection and close the gap;
-        Ctrl+Z undoes. The picture skips at a join because that is the edit.
+        to fit, and only marked when it really will push the next sentence late. To cut: drag the
+        green or red handle on the playhead, or Ctrl+drag, to select; the scissors (or Ctrl+Delete,
+        Backspace) remove the selection and close the gap; Ctrl+Z undoes. The picture skips at a
+        join because that is the edit. Click a track's <strong>name</strong> to edit just that
+        channel (the other track locks; the lock icons toggle one at a time), and a locked track
+        keeps every pin exactly where it is. <strong>S</strong> splits the unlocked tracks at the
+        playhead (Ctrl+Shift+S all of them); once a lane is split, clicking a piece selects it
+        (until then a click on a lane seeks, as on the ruler). <strong>Drag</strong> a
+        sentence block to move it — it snaps to the playhead, the joins, the other sentences and
+        its own spoken moment (hold Ctrl to drag freely) — or nudge the selected blocks with
+        [ and ] (Shift for a quarter second); Reset timing puts them back where they were spoken.
       </div>
 
-      {dropped.length > 0 && (
+      {droppedByOffset.length > 0 && (
         <div className="os-muted os-small">
-          {dropped.length} sentence{dropped.length === 1 ? " is" : "s are"} pinned at or past the end
-          of the video, so the re-voice will leave {dropped.length === 1 ? "it" : "them"} out
-          entirely: {dropped.map((s) => `#${s.index + 1}`).join(", ")}. Pull the offset back inside
-          the video in the List view.
+          {droppedByOffset.length} sentence{droppedByOffset.length === 1 ? " is" : "s are"} pinned at or
+          past the end of the picture by {droppedByOffset.length === 1 ? "its" : "their"} offset, so the
+          re-voice will leave {droppedByOffset.length === 1 ? "it" : "them"} out entirely:{" "}
+          {names(droppedByOffset)}. Pull the offset back inside the picture — drag the block earlier,
+          nudge it with [, or type it in the List view.
+        </div>
+      )}
+      {droppedByPicture.length > 0 && (
+        <div className="os-muted os-small">
+          The cut picture now ends before {droppedByPicture.length === 1 ? "this sentence is" : "these sentences are"}{" "}
+          spoken, so the re-voice will leave {droppedByPicture.length === 1 ? "it" : "them"} out entirely:{" "}
+          {names(droppedByPicture)}. Unlock Narration and cut it too, or drag
+          {droppedByPicture.length === 1 ? " the sentence" : " them"} earlier.
         </div>
       )}
 
@@ -1434,7 +1973,7 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
             type="button"
             className="os-tl-btn"
             aria-label="Undo"
-            title="Undo the last cut (Ctrl+Z)"
+            title="Undo the last edit — a cut, split, drag, nudge or reset (Ctrl+Z)"
             disabled={history.past.length === 0 || editLocked}
             onClick={undo}
           >
@@ -1444,7 +1983,7 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
             type="button"
             className="os-tl-btn"
             aria-label="Redo"
-            title="Redo (Ctrl+Y, Ctrl+Shift+Z)"
+            title="Redo the last undone edit — a cut, split, drag, nudge or reset (Ctrl+Y, Ctrl+Shift+Z)"
             disabled={history.future.length === 0 || editLocked}
             onClick={redo}
           >
@@ -1455,11 +1994,33 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
             type="button"
             className="os-tl-btn"
             aria-label="Cut"
-            title="Remove the selection and close the gap (Ctrl+Delete, Backspace, Ctrl+X)"
-            disabled={!selection || editLocked}
+            title={cutTitle}
+            disabled={!selection || editLocked || bothLocked}
             onClick={cutSelection}
           >
             <Scissors size={15} />
+          </button>
+          <button
+            type="button"
+            className="os-tl-btn"
+            aria-label="Split at the playhead"
+            title={bothLocked ? "Both tracks are locked — unlock one to split (Ctrl+Shift+S splits all)" : "Split the unlocked tracks at the playhead (S; Ctrl+Shift+S splits all)"}
+            disabled={editLocked || bothLocked}
+            onClick={() => splitAtPlayhead(false)}
+          >
+            <SquareSplitHorizontal size={15} />
+          </button>
+          <button
+            type="button"
+            className="os-tl-btn"
+            aria-label="Reset timing"
+            title={acted.length > 0
+              ? `Reset timing: put the selected sentence${acted.length === 1 ? "" : "s"} back where ${acted.length === 1 ? "it was" : "they were"} spoken`
+              : "Reset timing: select a sentence block first"}
+            disabled={editLocked || !acted.some((s) => (offsets[s.index] ?? null) !== null)}
+            onClick={resetTiming}
+          >
+            <RotateCcw size={14} />
           </button>
           {status && <span className="os-tl-status">{status}</span>}
           {jobActive && !status && <span className="os-tl-status">A job holds the project — cuts wait for it.</span>}
@@ -1491,12 +2052,33 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
         </div>
 
         <div className="os-tl-tracks">
-          {/* Track headers: sticky by construction - the strip scrolls in its own column. */}
-          <div className="os-tl-headers" aria-hidden="true">
+          {/* Track headers: sticky by construction - the strip scrolls in its
+              own column. Camtasia's lock on each editable track; the name
+              selects the channel; the original audio follows the video. */}
+          <div className="os-tl-headers">
             <div className="os-tl-header ruler" />
-            <div className="os-tl-header"><Video size={13} /> <span>Video</span></div>
-            <div className="os-tl-header"><AudioLines size={13} /> <span>Audio · original<small>reference only</small></span></div>
-            <div className="os-tl-header"><Mic size={13} /> <span>Narration</span></div>
+            <div className={`os-tl-header${locks.video ? " locked" : ""}${channel === "video" ? " selected" : ""}`}>
+              <Video size={13} />
+              <button type="button" className="os-tl-track-name" title={nameTitle("video")} aria-pressed={channel === "video"} onClick={() => selectChannel("video")}>
+                Video
+              </button>
+              <button type="button" className="os-tl-lock" aria-label={lockTitle("video")} aria-pressed={locks.video} title={lockTitle("video")} onClick={() => toggleLock("video")}>
+                {locks.video ? <Lock size={12} /> : <Unlock size={12} />}
+              </button>
+            </div>
+            <div className={`os-tl-header${locks.video ? " locked" : ""}`}>
+              <AudioLines size={13} />
+              <span>Audio · original<small>reference only · follows Video</small></span>
+            </div>
+            <div className={`os-tl-header${locks.narration ? " locked" : ""}${channel === "narration" ? " selected" : ""}`}>
+              <Mic size={13} />
+              <button type="button" className="os-tl-track-name" title={nameTitle("narration")} aria-pressed={channel === "narration"} onClick={() => selectChannel("narration")}>
+                Narration
+              </button>
+              <button type="button" className="os-tl-lock" aria-label={lockTitle("narration")} aria-pressed={locks.narration} title={lockTitle("narration")} onClick={() => toggleLock("narration")}>
+                {locks.narration ? <Lock size={12} /> : <Unlock size={12} />}
+              </button>
+            </div>
           </div>
 
           <div className="os-tl-scroll" ref={attachStrip}>
@@ -1543,7 +2125,26 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
                 />
               </div>
 
-              <div className="os-tl-film" style={{ width: pictureWidth || "100%" }} aria-hidden="true">
+              {/* The pieces of the Video and Audio lanes - the stretches of
+                  the VIDEO list between its boundaries, what a click selects
+                  - as layers over the two lanes (the film and the waveform
+                  beneath are not positioned, so these paint above them). The
+                  Narration lane's pieces sit inside its own lane, under the
+                  blocks. */}
+              {(["video", "audio"] as const).map((lane) => (
+                <div key={lane} className={`os-tl-pieces ${lane}${locks.video ? " locked" : ""}`} onClick={onPieceClick}>
+                  {videoPieces.map((piece) => (
+                    <div
+                      key={piece.start}
+                      className="os-tl-piece"
+                      style={{ left: piece.start * pps, width: Math.max(1, (piece.end - piece.start) * pps) }}
+                      title={`${timecode(piece.start)} – ${timecode(piece.end)} (${timecode(piece.sourceStart)} – ${timecode(piece.sourceEnd)} of the source). Click to select.`}
+                    />
+                  ))}
+                </div>
+              ))}
+
+              <div className={`os-tl-film${locks.video ? " locked" : ""}`} style={{ width: pictureWidth || "100%" }} aria-hidden="true">
                 {thumbs.length > 0
                   ? thumbs.map((src, i) => <img key={i} src={src} alt="" draggable={false} />)
                   : <div className="os-tl-film-empty" />}
@@ -1552,7 +2153,7 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
               {/* ONE path for the whole strip — never 2728 rects, never a canvas.
                   See lib/timeline.ts. */}
               <svg
-                className="os-tl-wave"
+                className={`os-tl-wave${locks.video ? " locked" : ""}`}
                 style={{ width: pictureWidth || "100%" }}
                 viewBox={`0 0 ${Math.max(1, pooled.length)} 100`}
                 preserveAspectRatio="none"
@@ -1561,21 +2162,46 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
                 <path d={path} />
               </svg>
 
-              <div className="os-tl-blocks">
+              {/* The Narration lane: its pieces (from ITS list) under the
+                  blocks, a marquee on the empty space between them, and one
+                  block per sentence that can be dragged along the lane. */}
+              <div className={`os-tl-blocks${locks.narration ? " locked" : ""}`} onPointerDown={onNarrationLanePointerDown}>
+                <div className={`os-tl-pieces narration${locks.narration ? " locked" : ""}`}>
+                  {narrationPieces.map((piece) => (
+                    <div
+                      key={piece.start}
+                      className="os-tl-piece"
+                      style={{ left: piece.start * pps, width: Math.max(1, (piece.end - piece.start) * pps) }}
+                      title={`${timecode(piece.start)} – ${timecode(piece.end)} (${timecode(piece.sourceStart)} – ${timecode(piece.sourceEnd)} of the source). Click to select.`}
+                    />
+                  ))}
+                </div>
+                {narrationJoins.map((join) => (
+                  <div
+                    key={join.at}
+                    className={join.removed > 0 ? "os-tl-join lane" : "os-tl-join lane split"}
+                    style={{ left: join.at * pps }}
+                    title={describeJoin(join)}
+                  />
+                ))}
                 {sentences.map((sentence) => {
                   const landed = startsAt[sentence.index];
                   const moved = Math.abs(sentence.pinned_start - sentence.start) > 0.001;
                   const classes = ["os-tl-block",
                     sentence.speakable ? "" : "muted",
                     sentence.index === selected ? "selected" : "",
+                    selectedBlocks.has(sentence.index) ? "chosen" : "",
                     overrunning.has(sentence.index) ? "overrun" : "",
                     sentence.past_end || failed[sentence.index] ? "failed" : ""].filter(Boolean).join(" ");
                   // Said on the block itself, because it is the one state the owner
                   // cannot see coming: the sentence has words, is not muted, and
                   // will still be missing from the render.
                   const why = sentence.past_end
-                    ? "\nDROPPED: its offset pins it at or past the end of the video, so the re-voice leaves it out."
+                    ? (hasOffset(sentence)
+                      ? "\nDROPPED: its offset pins it at or past the end of the picture, so the re-voice leaves it out — drag it earlier or pull the offset back."
+                      : "\nDROPPED: the cut picture ends before it is spoken, so the re-voice leaves it out — unlock Narration and cut it too, or drag it earlier.")
                     : sentence.muted ? "\nMuted." : "";
+                  const nudged = (offsets[sentence.index] ?? null) !== null;
                   return (
                     <div key={sentence.index}>
                       {/* Where it was SPOKEN, whenever that is no longer where it is
@@ -1586,25 +2212,31 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
                           style={{ left: sentence.start * pps, width: Math.max(2, (sentence.end - sentence.start) * pps) }}
                         />
                       )}
+                      {/* Where it is being dragged FROM, shown only while it moves (through its ref). */}
+                      <div
+                        className="os-tl-ghost drag"
+                        ref={attachDragGhost(sentence.index)}
+                        style={{ display: "none", left: sentence.pinned_start * pps, width: Math.max(3, (sentence.end - sentence.start) * pps) }}
+                      />
                       <button
                         type="button"
+                        ref={attachBlock(sentence.index)}
                         className={classes}
                         aria-label={`Sentence ${sentence.index + 1} at ${timecode(sentence.pinned_start)}`}
+                        aria-pressed={selectedBlocks.has(sentence.index)}
                         title={`${sentence.text}\n\nSpoken ${timecode(sentence.start)} – ${timecode(sentence.end)}`
                           + `\nAimed at ${timecode(sentence.pinned_start)}`
                           + (landed ? `\nLands at ${timecode(landed.start)}` : "")
                           + (landed?.squeezedHere ? "\nSped up slightly to fit the gap after it." : "")
-                          + why}
+                          + why
+                          + "\n\nDrag to move it (Ctrl: no snapping); [ and ] nudge the selection"
+                          + (nudged ? "; Reset timing puts it back where it was spoken." : ".")}
                         style={{
                           left: sentence.pinned_start * pps,
                           width: Math.max(3, (sentence.end - sentence.start) * pps),
                         }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (e.ctrlKey || e.metaKey || suppressClick.current) return;  // a Ctrl+drag began here
-                          onSelect(sentence.index);
-                          seek(landed ? landed.start : sentence.pinned_start);
-                        }}
+                        onPointerDown={(e) => onBlockPointerDown(e, sentence)}
+                        onClick={(e) => onBlockClick(e, sentence, landed ? landed.start : null)}
                       >
                         <span className="os-tl-block-text">{sentence.text}</span>
                       </button>
@@ -1617,17 +2249,26 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
                     </div>
                   );
                 })}
+                {/* The marquee's band and the dragged block's time, painted through their refs. */}
+                <div className="os-tl-marquee" ref={marqueeRef} style={{ display: "none" }} aria-hidden="true" />
+                <div className="os-tl-move-label" ref={moveLabelRef} style={{ display: "none" }} aria-hidden="true" />
               </div>
 
               {/* Siblings of the lanes so they span all of them: the selection
-                  band (painted through its ref while a handle is dragged), a
-                  marker at every join with what was removed in its tooltip, and
-                  the playhead with its head and clock in the ruler. */}
-              <div className="os-tl-selection" ref={bandRef} style={{ display: "none" }} aria-hidden="true" />
+                  band (painted through its ref while a handle is dragged; it
+                  skips a locked lane), a marker at every VIDEO join with what
+                  was removed in its tooltip (the narration's are on its own
+                  lane), and the playhead with its head and clock in the ruler. */}
+              <div
+                className={`os-tl-selection${locks.video ? " no-video" : ""}${locks.narration ? " no-narration" : ""}`}
+                ref={bandRef}
+                style={{ display: "none" }}
+                aria-hidden="true"
+              />
               {joinList.map((join) => (
                 <div
                   key={join.at}
-                  className={join.removed > 0 ? "os-tl-join" : "os-tl-join split"}
+                  className={join.removed > 0 ? "os-tl-join picture" : "os-tl-join picture split"}
                   style={{ left: join.at * pps }}
                   title={describeJoin(join)}
                 />
@@ -1655,17 +2296,22 @@ export function NarrationTimeline({ projectId, provider, voiceId, speed, active,
           {startsAt[chosen.index]?.squeezedHere && <> · sped up to fit</>}
           {" · "}{chosen.voice} at {chosen.speed}×
           {chosen.muted && " · muted"}
-          {chosen.past_end && (
-            <> · <strong>dropped</strong> — its offset pins it at or past the end of the video, so the
-              re-voice leaves it out. Pull it back inside to hear it.</>
-          )}
+          {chosen.past_end && (hasOffset(chosen) ? (
+            <> · <strong>dropped</strong> — its offset pins it at or past the end of the picture, so the
+              re-voice leaves it out. Drag it earlier or pull the offset back to hear it.</>
+          ) : (
+            <> · <strong>dropped</strong> — the cut picture ends before it is spoken, so the re-voice
+              leaves it out. Unlock Narration and cut it too, or drag it earlier, to hear it.</>
+          ))}
           {failed[chosen.index] && <> · {failed[chosen.index]}</>}
         </div>
       ) : (
         <div className="os-muted os-small">
-          Click a block to select the sentence and move the playhead to it; click the ruler or the strip
-          to seek anywhere. Undo is for this visit — the app keeps only the current cut. Delete removes
-          the selection and closes the gap, like Ctrl+Delete: this timeline has no empty space to leave.
+          Click a block to select the sentence and move the playhead to it (Ctrl+click adds one, Shift+click
+          a run, a drag on the empty lane a marquee); click the ruler — or a lane that has not been split —
+          to seek anywhere. Undo is for this
+          visit — the app keeps only the current cut and timing. Delete removes the selection and closes
+          the gap, like Ctrl+Delete: this timeline has no empty space to leave.
         </div>
       )}
     </div>

@@ -690,3 +690,77 @@ def test_an_edit_whose_audio_is_gone_is_refused_rather_than_rendered_on_trust(cl
     assert job["status"] == "error"
     assert "extracted audio is missing" in job["error"]
     assert cuts == []
+
+
+# ── one list per track (phase E3) ─────────────────────────────────────────────
+
+def test_a_video_only_edit_cuts_the_picture_and_leaves_every_sentence_where_it_was(client, monkeypatch):
+    """A locked narration is untouched (spec §11, trap 19): the picture closes
+    up, no sentence is dropped or moved - the second, spoken over the removed
+    1.0-1.5, plays over what follows - and the engine is handed the transcript
+    in its own coordinates, exactly as an unedited project hands it."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.patch(f"/api/projects/{pid}/transcript/1", json={"offset": -0.4}).status_code == 200
+    keep = [[0.0, 1.0], [1.5, 4.0]]
+    assert client.put(f"/api/projects/{pid}/edit", json={"video": keep}).status_code == 200
+
+    assert _revoice(client, pid)["status"] == "done"
+    (cut,) = cuts
+    assert cut["keep"] == keep, "the picture is cut with the VIDEO list"
+    assert _FakeVideoProcessor.source == cut["dst"]
+    slide = _FakeVideoProcessor.captured.state.slides[0]
+    assert slide.original_segments == [
+        {"start": 0.0, "end": 2.0, "text": "Hello there."},
+        {"start": 2.0, "end": 4.0, "text": "This is a test.", "offset": -0.4},
+    ], "source seconds, untouched: nothing was projected"
+    assert (slide.original_start_time, slide.original_end_time) == (0.0, 4.0)
+    saved = store.get_project(pid)
+    assert saved["edit_rendered_at"] == saved["revoiced_at"]
+
+
+def test_a_narration_only_edit_projects_the_narration_over_the_uncut_picture(client, monkeypatch):
+    """A locked picture is untouched: no picture step, the source itself is
+    muxed onto, and the sentences arrive projected through the NARRATION list
+    - the second's start lies in the removed 1.5-2.5, so it is dropped and
+    the third moves up by the second. The output still differs from an
+    unedited render, so the stamp is set."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = store.import_upload("clip.mp4", b"video-bytes")["id"]
+    store.set_transcript(pid, [
+        {"start": 0.0, "end": 1.0, "text": "Kept."},
+        {"start": 1.6, "end": 2.4, "text": "Cut from the narration."},
+        {"start": 3.0, "end": 4.0, "text": "Kept too."},
+    ])
+    assert client.patch(f"/api/projects/{pid}/transcript/2", json={"offset": 0.2}).status_code == 200
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"narration": [[0.0, 1.5], [2.5, 4.0]]}).status_code == 200
+
+    assert _revoice(client, pid)["status"] == "done"
+    assert cuts == [], "the picture is whole: no picture step"
+    assert _FakeVideoProcessor.source == store.PROJECTS_DIR / pid / "clip.mp4"
+    slide = _FakeVideoProcessor.captured.state.slides[0]
+    assert slide.original_segments == [
+        {"start": 0.0, "end": 1.0, "text": "Kept."},
+        {"start": 2.0, "end": 3.0, "text": "Kept too.", "offset": 0.2},
+    ], "timeline seconds through the narration list, the offset untouched"
+    assert slide.speaker_notes == "Kept. Kept too."
+    saved = store.get_project(pid)
+    assert saved["edit_rendered_at"] == saved["revoiced_at"], "the output differs from an unedited render, so the stamp moves"
+    assert [s["start"] for s in saved["transcript"]] == [0.0, 1.6, 3.0], "the transcript never moves"
+
+
+def test_a_narration_only_edit_that_removes_every_sentence_is_refused(client, monkeypatch):
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    cuts = _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    assert client.put(f"/api/projects/{pid}/edit", json={"narration": [[2.5, 4.0]]}).status_code == 200, "no sentence starts here"
+
+    job = _revoice(client, pid)
+    assert job["status"] == "error"
+    assert "removes every sentence" in job["error"]
+    assert cuts == []

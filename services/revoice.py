@@ -8,13 +8,14 @@ synthesises per-sentence TTS and swaps the audio track onto the untouched
 original frames (ffmpeg ``-c:v copy`` + ``apad`` to the video length).
 
 **The render of an edit is this same job.** When the project carries an edit
-(``services.edit``: the ranges of the source that are kept) that removes
-anything, the kept ranges are first re-encoded into a picture-only
-intermediate (``core.video_creator.cut_picture``) and the transcript is handed
-to the engine PROJECTED into the output's seconds - so the engine sees a
-transcript in a shorter recording and does what it always does. One job kind,
-one code path, and nothing in ``_revoice_video`` changes. With no edit, or one
-that keeps everything, the path is exactly the one above, byte for byte.
+(``services.edit``: the ranges of the source that are kept, one list per
+track) whose VIDEO list removes anything, the kept ranges are first re-encoded
+into a picture-only intermediate (``core.video_creator.cut_picture``); when its
+NARRATION list removes anything, the transcript is handed to the engine
+PROJECTED into the output's seconds - so the engine sees a transcript in a
+shorter recording and does what it always does. One job kind, one code path,
+and nothing in ``_revoice_video`` changes. With no edit, or one that keeps
+everything, the path is exactly the one above, byte for byte.
 """
 
 import shutil
@@ -58,9 +59,10 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
 
     # The edit, applied by the same function the audition plan applies it
     # with: ``segments`` is the transcript as the render will speak it - in
-    # timeline seconds when the picture is to be cut, the stored transcript
-    # itself (the same objects, untouched) when there is no edit or it keeps
-    # everything. The source's length is the WAV header's, as everywhere.
+    # timeline seconds when the NARRATION list removes anything, the stored
+    # transcript itself (the same objects, untouched) when there is no edit,
+    # or it keeps everything, or only the picture is cut. The source's length
+    # is the WAV header's, as everywhere.
     applied = edit.apply(record, stored, waveform.duration_for(pid))
     segments = applied.sentences
     if not narration.count_spoken(segments):
@@ -68,7 +70,7 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         # that with a bare False the caller below turns into "Re-voice failed".
         # Said plainly here as well as at the route, so calling the service
         # directly gets the same answer.
-        if applied.cut:
+        if applied.projected:
             raise ValueError(
                 "The edit removes every sentence that would be spoken, so there would be no "
                 "narration. Keep at least one, or clear the edit."
@@ -151,14 +153,15 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     # re-voice actually runs (and so tests can monkeypatch VideoProcessor).
     from services import processing
 
-    # The picture. With no edit, or one that keeps everything, the engine muxes
-    # the narration straight onto the untouched source - the path every project
-    # has always taken. With a cut, the kept ranges are first re-encoded into a
-    # picture-only intermediate under the job's scratch directory (one ffmpeg
-    # run; never a stream copy, which cannot start on the P-frames a cut lands
-    # on), and the engine muxes onto THAT: it is told the cut picture is the
-    # source, sees a transcript in a shorter recording, and does what it always
-    # does. The scratch directory outlives the mux and is removed after it.
+    # The picture. With no edit, or one whose VIDEO list keeps everything, the
+    # engine muxes the narration straight onto the untouched source - the path
+    # every project has always taken. With a cut, the kept ranges are first
+    # re-encoded into a picture-only intermediate under the job's scratch
+    # directory (one ffmpeg run; never a stream copy, which cannot start on
+    # the P-frames a cut lands on), and the engine muxes onto THAT: it is told
+    # the cut picture is the source, sees a transcript in a shorter recording,
+    # and does what it always does. The scratch directory outlives the mux and
+    # is removed after it.
     render_source = source_video
     scratch = None
     try:
@@ -168,12 +171,12 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
 
             scratch = processing._job_scratch("edit_")
             render_source = scratch / f"{source_video.stem}_cut.mp4"
-            count = len(applied.keep)
+            count = len(applied.video)
             _report(0.08, f"Cutting the picture ({count} range{'' if count == 1 else 's'} kept)…")
             # The bitrate is the output preset's ("" = the codec default); in
             # E1 and E2 that is the default preset; choosing one is a later phase.
             cut = video_creator.cut_picture(
-                source_video, applied.keep, render_source,
+                source_video, applied.video, render_source,
                 video_bitrate=get_preset(DEFAULT_PRESET_ID)["video_bitrate"],
                 cancel_check=jobs.cancel_requested_here,
             )
@@ -218,8 +221,10 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     # The same filename whether or not the picture was cut, so a render that
     # applied an edit says so beside the stamp - and a whole-source run clears
     # it, as ``narration_audio`` below is cleared, so the record never claims
-    # an edit that the file on disk does not carry.
-    if applied.cut:
+    # an edit that the file on disk does not carry. Stamped whenever EITHER
+    # track removed anything: a narration-only edit leaves the picture whole
+    # but the output still differs from an unedited render.
+    if applied.cut or applied.projected:
         current["edit_rendered_at"] = current["revoiced_at"]
     else:
         current.pop("edit_rendered_at", None)

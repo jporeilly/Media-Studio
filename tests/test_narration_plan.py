@@ -404,7 +404,8 @@ def test_the_plans_speeds_are_the_render_s_under_an_edit_too(client, tmp_path, m
     keep = [[0.0, 6.0], [7.5, 30.0]]
     assert client.put(f"/api/projects/{pid}/edit", json={"keep": keep}).status_code == 200
     plan = _plan(client, pid, speed=1.1).json()
-    assert plan["duration"] == pytest.approx(28.5) and plan["edit"]["keep"] == keep
+    assert plan["duration"] == pytest.approx(28.5)
+    assert plan["edit"]["video"]["keep"] == plan["edit"]["narration"]["keep"] == keep, "the version-1 body: both tracks"
     assert [s["index"] for s in plan["sentences"]] == [0, 1, 3, 4, 5]
     assert [s["speed"] for s in plan["sentences"]] == [1.2, 1.1, 1.45, 1.1, 1.1], (
         "82 characters in 5 s asks for 1.2; the second sentence has only 1.5 s "
@@ -435,6 +436,70 @@ def test_the_plans_speeds_are_the_render_s_under_an_edit_too(client, tmp_path, m
     )
     assert [c["voice_id"] for c in rendered.calls] == [s["voice"] for s in spoken]
     assert not any("Cut away" in c["text"] for c in rendered.calls)
+
+    on_disk = store.get_project(pid)["transcript"]
+    assert [(s["start"], s["end"]) for s in on_disk] == [(s["start"], s["end"]) for s in segments], (
+        "the transcript never moves"
+    )
+    assert store.get_project(pid)["edit_rendered_at"] == store.get_project(pid)["revoiced_at"]
+
+
+def test_the_plans_speeds_are_the_render_s_under_a_per_track_edit_too(client, tmp_path, monkeypatch):
+    """E3's case of the pin above: the picture cut by one list and the
+    narration by another (spec §11, trap 18). The plan projects the sentences
+    through the NARRATION list and bounds the last one by the PICTURE's
+    length; the render cuts the picture with the VIDEO list and speaks the
+    same projected sentences at the same speeds. Either side projecting
+    through the wrong list would fail here: the two lists remove different
+    stretches, so the starts - and with them the windows - would differ.
+    """
+    from pathlib import Path
+
+    from services import revoice
+
+    segments = [
+        {"start": 0.0, "end": 2.0, "text": FAST[0]["text"]},
+        {"start": 5.0, "end": 7.0, "text": "A short one."},
+        {"start": 6.5, "end": 7.4, "text": "Cut from the narration, not from the picture."},
+        {"start": 8.0, "end": 9.0, "text": FAST[1]["text"], "speed": 1.45},
+        {"start": 12.0, "end": 14.0, "text": "Muted, so the one before it inherits its room.", "muted": True},
+        {"start": 20.0, "end": 24.0, "text": "The last sentence, which runs to the end of the video."},
+    ]
+    pid = _video(segments, audio_seconds=30.0)
+    video = [[0.0, 10.0], [12.0, 30.0]]           # the picture: 28 s, cut where nothing is said
+    narration_keep = [[0.0, 6.0], [7.5, 30.0]]    # the narration: the third sentence dropped, later ones up by 1.5 s
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": video, "narration": narration_keep})
+    assert r.status_code == 200, r.text
+    plan = _plan(client, pid, speed=1.1).json()
+    assert plan["duration"] == pytest.approx(28.0), "the picture's length"
+    assert plan["edit"]["video"]["keep"] == video and plan["edit"]["narration"]["keep"] == narration_keep
+    assert [s["index"] for s in plan["sentences"]] == [0, 1, 3, 4, 5]
+    assert [s["start"] for s in plan["sentences"]] == [0.0, 5.0, 6.5, 10.5, 18.5], "through the narration list"
+    assert [s["speed"] for s in plan["sentences"]] == [1.2, 1.1, 1.45, 1.1, 1.1]
+
+    rendered = _stub_media_engine(monkeypatch, tmp_path, video_seconds=28.0)
+    import core.video_creator as vc
+
+    cut: dict = {}
+
+    def _cut_picture(source, keep_ranges, dst, video_bitrate="", cancel_check=None):
+        cut["keep"] = keep_ranges
+        Path(dst).write_bytes(b"PICTURE")
+        return True
+
+    monkeypatch.setattr(vc, "cut_picture", _cut_picture)
+
+    result = revoice.revoice_project(pid, STUDIO_EDGE_VOICE, speed=1.1, provider="edge_tts")
+    assert result["failed_sentences"] == 0
+    assert cut["keep"] == video, "the picture is cut with the VIDEO list, never the narration's"
+
+    spoken = [s for s in plan["sentences"] if not s["muted"]]
+    assert [c["text"] for c in rendered.calls] == [s["text"] for s in spoken]
+    assert [c["speed"] for c in rendered.calls] == [s["speed"] for s in spoken], (
+        "the plan advertised a speed the render did not use under the per-track edit"
+    )
+    assert [c["voice_id"] for c in rendered.calls] == [s["voice"] for s in spoken]
+    assert not any("Cut from the narration" in c["text"] for c in rendered.calls)
 
     on_disk = store.get_project(pid)["transcript"]
     assert [(s["start"], s["end"]) for s in on_disk] == [(s["start"], s["end"]) for s in segments], (

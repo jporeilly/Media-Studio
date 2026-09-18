@@ -5,33 +5,57 @@ import fixture from "../../../tests/fixtures/edit_projection.json";
 import {
   EPSILON,
   FRAME_SECONDS,
+  MAX_OFFSET,
   MAX_PPS,
   anchoredScrollLeft,
+  clickSelectsPiece,
   describeJoin,
+  dragOffsets,
   joins,
   maxZoom,
+  nextEditForCut,
+  nextEditForSplit,
   outputDuration,
+  pieceAt,
+  pieces,
   positionAfterEdit,
   projectPeaks,
+  releaseSuppressesClick,
   removeRange,
   renderEstimate,
   renderSummary,
   round3,
   rulerLabel,
+  sameEdit,
   sliderFromZoom,
+  snap,
+  splitAt,
   stepFrame,
   stepZoom,
   tickStep,
   ticks,
   toSource,
   toTimeline,
+  trackBody,
+  trackList,
+  unmovedRelease,
   wholeKeep,
   wholeSource,
   zoomFromSlider,
   zoomToSelection,
   type Keep,
+  type TrackEdit,
 } from "./edit";
 
+interface TrackCase {
+  video: Keep | null;
+  narration: Keep | null;
+  sentences: [number, number, number][];
+  duration: number;
+  narration_duration: number;
+  cut: boolean;
+  projected: boolean;
+}
 interface Fixture {
   source_duration: number;
   keep: Keep;
@@ -42,6 +66,12 @@ interface Fixture {
   clamps: [Keep, number, number][];
   whole_source: [Keep, number, boolean][];
   output_durations: [Keep, number][];
+  tracks: {
+    segments: [number, number][];
+    video: Keep;
+    narration: Keep;
+    cases: Record<"video_only" | "narration_only" | "both" | "together", TrackCase>;
+  };
 }
 const cases = fixture as unknown as Fixture;
 /** Five sentences over 12 s with 6.0–7.5 removed: the shared scenario. */
@@ -395,15 +425,315 @@ describe("the Render button", () => {
     expect(renderEstimate([], 12)).toBe(0);
   });
 
-  it("says what the render will do", () => {
-    expect(renderSummary(CORPUS, 341.008)).toBe(
+  it("says what the render will do, per track, in one sentence", () => {
+    // Cut together (the two lists equal): E2's line, word for word.
+    expect(renderSummary(CORPUS, CORPUS, 341.008)).toBe(
       "Cuts 1 range (5.0 s removed) and re-voices — about 25 s, plus any sentences the audition has not fetched yet.",
     );
-    expect(renderSummary([[2, 6], [7.5, 11]], 12)).toBe(
+    expect(renderSummary([[2, 6], [7.5, 11]], [[2, 6], [7.5, 11]], 12)).toBe(
       "Cuts 3 ranges (4.5 s removed) and re-voices — about 10 s, plus any sentences the audition has not fetched yet.",
     );
-    expect(renderSummary([[0, 6], [6, 12]], 12)).toBeNull();
-    expect(renderSummary([[0, 12]], 12)).toBeNull();
+    // The picture alone (the narration locked, or whole).
+    expect(renderSummary(CORPUS, null, 341.008)).toBe(
+      "Cuts 1 range of the picture (5.0 s removed) and re-voices — about 25 s, plus any sentences the audition has not fetched yet.",
+    );
+    expect(renderSummary(CORPUS, [[0, 341.008]], 341.008)).toBe(
+      "Cuts 1 range of the picture (5.0 s removed) and re-voices — about 25 s, plus any sentences the audition has not fetched yet.",
+    );
+    // Both, differently: the narration's TIMELINE is shortened; which sentences go is the plan's to say.
+    expect(renderSummary(KEEP, [[0, 6.4], [7, 12]], 12)).toBe(
+      "Cuts 1 range of the picture (1.5 s removed) and shortens the narration's timeline by 0.6 s "
+      + "(sentences spoken in the removed stretch are left out) and re-voices — about 10 s, "
+      + "plus any sentences the audition has not fetched yet.",
+    );
+    // The narration alone: no picture step, so no estimate to give.
+    expect(renderSummary(null, [[0, 6.4], [7, 12]], 12)).toBe(
+      "Shortens the narration's timeline by 0.6 s (sentences spoken in the removed stretch are left out) and re-voices — "
+      + "the picture is not cut, so it takes only as long as the sentences the audition has not fetched yet.",
+    );
+    expect(renderSummary([[0, 12]], [[0, 6.4], [7, 12]], 12)).toBe(
+      "Shortens the narration's timeline by 0.6 s (sentences spoken in the removed stretch are left out) and re-voices — "
+      + "the picture is not cut, so it takes only as long as the sentences the audition has not fetched yet.",
+    );
+  });
+
+  it("is nothing when neither track removes anything", () => {
+    expect(renderSummary([[0, 6], [6, 12]], null, 12)).toBeNull();
+    expect(renderSummary(null, [[0, 6], [6, 12]], 12)).toBeNull();
+    expect(renderSummary([[0, 12]], [[0, 12]], 12)).toBeNull();
+    expect(renderSummary(null, null, 12)).toBeNull();
+    expect(renderSummary([], [], 12)).toBeNull();
+  });
+});
+
+describe("splitAt — a boundary at the playhead", () => {
+  it("splits a range in two touching ranges at the source moment under the playhead", () => {
+    expect(splitAt([[0, 12]], 3)).toEqual([[0, 3], [3, 12]]);
+    // Timeline 7 under KEEP is source 8.5.
+    expect(splitAt(KEEP, 7)).toEqual([[0, 6], [7.5, 8.5], [8.5, 12]]);
+    expect(splitAt([[0, 12]], 1.00049)).toEqual([[0, 1], [1, 12]]);
+  });
+
+  it("is a no-op on an existing boundary and at either end", () => {
+    expect(splitAt(KEEP, 6)).toEqual(KEEP);
+    expect(splitAt(KEEP, 0)).toEqual(KEEP);
+    expect(splitAt(KEEP, 10.5)).toEqual(KEEP);
+    expect(splitAt([[0, 6], [6, 12]], 6)).toEqual([[0, 6], [6, 12]]);
+    // A hair from a boundary rounds onto it, and the sliver is not kept as [x, x].
+    expect(splitAt(KEEP, 6.0003)).toEqual(KEEP);
+    expect(splitAt(KEEP, 99)).toEqual(KEEP);
+    expect(splitAt([], 3)).toEqual([]);
+  });
+
+  it("removes nothing: the output is the same length and the list is still whole", () => {
+    const split = splitAt([[0, 12]], 4.2);
+    expect(outputDuration(split)).toBe(12);
+    expect(wholeSource(split, 12)).toBe(true);
+    expect(joins(split, 12)).toEqual([{ at: 4.2, removed: 0, from: 4.2, to: 4.2 }]);
+  });
+});
+
+describe("pieces — the stretches of a lane between boundaries", () => {
+  it("is one piece per kept range, laid end to end on the timeline", () => {
+    expect(pieces(KEEP, SOURCE)).toEqual([
+      { start: 0, end: 6, sourceStart: 0, sourceEnd: 6 },
+      { start: 6, end: 10.5, sourceStart: 7.5, sourceEnd: 12 },
+    ]);
+    expect(pieces([[0, 6], [6, 12]], SOURCE)).toEqual([
+      { start: 0, end: 6, sourceStart: 0, sourceEnd: 6 },
+      { start: 6, end: 12, sourceStart: 6, sourceEnd: 12 },
+    ]);
+  });
+
+  it("is the whole source when there is no list", () => {
+    expect(pieces([], SOURCE)).toEqual([{ start: 0, end: 12, sourceStart: 0, sourceEnd: 12 }]);
+  });
+
+  it("finds the piece under a moment, the later one at a boundary, and none outside", () => {
+    const list = pieces(KEEP, SOURCE);
+    expect(pieceAt(list, 2)).toBe(list[0]);
+    expect(pieceAt(list, 6)).toBe(list[1]);
+    expect(pieceAt(list, 10.5)).toBe(list[1]);
+    expect(pieceAt(list, 11)).toBeNull();
+    expect(pieceAt(list, -1)).toBeNull();
+  });
+});
+
+describe("the edit per track — a cut or a split on the unlocked tracks", () => {
+  const NONE: TrackEdit = { video: null, narration: null };
+  const OPEN = { video: false, narration: false };
+  const VIDEO_LOCKED = { video: true, narration: false };
+  const NARRATION_LOCKED = { video: false, narration: true };
+  const BOTH_LOCKED = { video: true, narration: true };
+  // The corpus: 341.008 s, the 5 s cut the live check makes.
+  const CORPUS = 341.008;
+  const AFTER_CUT: Keep = [[0, 47.3], [52.3, 341.008]];
+
+  it("derives a track's working list the same way on every path: stored, else the whole source", () => {
+    expect(trackList(null, CORPUS)).toEqual([[0, 341.008]]);
+    expect(trackList([], CORPUS)).toEqual([[0, 341.008]]);
+    expect(trackList(KEEP, SOURCE)).toBe(KEEP);
+  });
+
+  it("puts a whole track into the body as null, and keeps a whole-source split", () => {
+    expect(trackBody(null, SOURCE)).toBeNull();
+    expect(trackBody([], SOURCE)).toBeNull();
+    expect(trackBody([[0, 12]], SOURCE)).toBeNull();
+    expect(trackBody([[0, 12]], 12.0004)).toBeNull();
+    expect(trackBody([[0, 6], [6, 12]], SOURCE)).toEqual([[0, 6], [6, 12]]);
+    expect(trackBody(KEEP, SOURCE)).toBe(KEEP);
+  });
+
+  it("cuts both tracks with nothing stored and both unlocked — E2's cut, unchanged", () => {
+    expect(nextEditForCut(NONE, OPEN, 47.3, 52.3, CORPUS)).toEqual({ next: { video: AFTER_CUT, narration: AFTER_CUT }, refused: null });
+  });
+
+  it("cuts only the unlocked track when a channel is selected, and leaves the locked one exactly as it is", () => {
+    // The live check's case: the narration channel selected (video locked),
+    // nothing stored on either track. The narration is cut from the WHOLE
+    // source; the video stays whole - null, untouched, and NOT a refusal.
+    expect(nextEditForCut(NONE, VIDEO_LOCKED, 47.3, 52.3, CORPUS)).toEqual({ next: { video: null, narration: AFTER_CUT }, refused: null });
+    // The mirror.
+    expect(nextEditForCut(NONE, NARRATION_LOCKED, 47.3, 52.3, CORPUS)).toEqual({ next: { video: AFTER_CUT, narration: null }, refused: null });
+    // One track stored: the locked one is untouched whatever it holds, the
+    // unlocked one is cut from its own list.
+    const stored: TrackEdit = { video: KEEP, narration: null };
+    expect(nextEditForCut(stored, NARRATION_LOCKED, 7, 8, SOURCE)).toEqual({
+      next: { video: [[0, 6], [7.5, 8.5], [9.5, 12]], narration: null }, refused: null,
+    });
+    expect(nextEditForCut(stored, VIDEO_LOCKED, 7, 8, SOURCE)).toEqual({
+      next: { video: KEEP, narration: [[0, 7], [8, 12]] }, refused: null,
+    });
+  });
+
+  it("changes nothing with both tracks locked", () => {
+    expect(nextEditForCut(NONE, BOTH_LOCKED, 47.3, 52.3, CORPUS)).toEqual({ next: NONE, refused: null });
+    expect(nextEditForCut({ video: KEEP, narration: null }, BOTH_LOCKED, 1, 2, SOURCE)).toEqual({ next: { video: KEEP, narration: null }, refused: null });
+  });
+
+  it("refuses, naming the track, only when the cut would leave that track with nothing", () => {
+    expect(nextEditForCut(NONE, OPEN, 0, CORPUS, CORPUS)).toEqual({ next: null, refused: "video" });
+    expect(nextEditForCut(NONE, VIDEO_LOCKED, 0, CORPUS, CORPUS)).toEqual({ next: null, refused: "narration" });
+    expect(nextEditForCut({ video: KEEP, narration: null }, NARRATION_LOCKED, 0, 10.5, SOURCE)).toEqual({ next: null, refused: "video" });
+    // The narration outruns a cut picture: the same interval leaves it something.
+    expect(nextEditForCut({ video: KEEP, narration: null }, OPEN, 0, 10.5, SOURCE)).toEqual({ next: null, refused: "video" });
+  });
+
+  it("splits the unlocked tracks at the playhead, every track with `all`, and nothing on a boundary", () => {
+    const at = 100;
+    const SPLIT: Keep = [[0, 100], [100, 341.008]];
+    expect(nextEditForSplit(NONE, OPEN, at, CORPUS)).toEqual({ video: SPLIT, narration: SPLIT });
+    expect(nextEditForSplit(NONE, VIDEO_LOCKED, at, CORPUS)).toEqual({ video: null, narration: SPLIT });
+    expect(nextEditForSplit(NONE, NARRATION_LOCKED, at, CORPUS)).toEqual({ video: SPLIT, narration: null });
+    expect(nextEditForSplit(NONE, BOTH_LOCKED, at, CORPUS)).toEqual(NONE);
+    expect(nextEditForSplit(NONE, BOTH_LOCKED, at, CORPUS, true)).toEqual({ video: SPLIT, narration: SPLIT });
+    // On the very start, or on an existing boundary, the track is what it was
+    // - in the body's terms, so an untouched track stays null and there is
+    // nothing to commit.
+    expect(nextEditForSplit(NONE, OPEN, 0, CORPUS)).toEqual(NONE);
+    expect(nextEditForSplit({ video: SPLIT, narration: null }, OPEN, at, CORPUS)).toEqual({ video: SPLIT, narration: SPLIT });
+    expect(sameEdit(nextEditForSplit({ video: SPLIT, narration: SPLIT }, OPEN, at, CORPUS), { video: SPLIT, narration: SPLIT }, CORPUS)).toBe(true);
+  });
+
+  it("compares edits in the body's terms", () => {
+    expect(sameEdit(NONE, { video: [[0, 12]], narration: [] }, SOURCE)).toBe(true);
+    expect(sameEdit({ video: KEEP, narration: null }, { video: KEEP, narration: [[0, 12]] }, SOURCE)).toBe(true);
+    expect(sameEdit({ video: KEEP, narration: null }, { video: null, narration: KEEP }, SOURCE)).toBe(false);
+    expect(sameEdit(NONE, { video: [[0, 6], [6, 12]], narration: null }, SOURCE)).toBe(false);
+  });
+
+  it("lets a click select a piece only once a lane has more than one", () => {
+    expect(clickSelectsPiece(pieces([[0, 341.008]], CORPUS))).toBe(false);
+    expect(clickSelectsPiece(pieces([], CORPUS))).toBe(false);
+    expect(clickSelectsPiece(pieces([[0, 100], [100, 341.008]], CORPUS))).toBe(true);
+    expect(clickSelectsPiece(pieces(KEEP, SOURCE))).toBe(true);
+  });
+});
+
+describe("snap — within the threshold, to the nearest candidate", () => {
+  it("lands on the nearest candidate inside the threshold", () => {
+    expect(snap(10.03, [10, 20], 0.05)).toEqual({ t: 10, snapped: 10 });
+    expect(snap(19.96, [10, 20], 0.05)).toEqual({ t: 20, snapped: 20 });
+    expect(snap(15.02, [15.05, 15], 0.05)).toEqual({ t: 15, snapped: 15 });
+  });
+
+  it("leaves a moment alone outside it, and with nothing to snap to", () => {
+    expect(snap(10.06, [10, 20], 0.05)).toEqual({ t: 10.06, snapped: null });
+    expect(snap(10.06, [], 0.05)).toEqual({ t: 10.06, snapped: null });
+    expect(snap(10.05, [10], 0.05)).toEqual({ t: 10.05, snapped: null });  // the threshold is exclusive
+  });
+
+  it("gives a tie to the first candidate", () => {
+    expect(snap(10, [9.98, 10.02], 0.05)).toEqual({ t: 9.98, snapped: 9.98 });
+  });
+});
+
+describe("dragOffsets — a drag commits offsets, nothing else", () => {
+  it("moves every block by the same delta, measured from where it is drawn", () => {
+    expect(dragOffsets([
+      { index: 3, start: 10, offset: null },
+      { index: 4, start: 12, offset: 0.4 },
+    ], 1.5)).toEqual([{ index: 3, offset: 1.5 }, { index: 4, offset: 1.9 }]);
+    expect(dragOffsets([{ index: 0, start: 5, offset: -0.4 }], -0.6)).toEqual([{ index: 0, offset: -1 }]);
+  });
+
+  it("rounds to the stored precision and turns 0 into null", () => {
+    expect(dragOffsets([{ index: 0, start: 5, offset: 0.4 }], -0.4)).toEqual([{ index: 0, offset: null }]);
+    expect(dragOffsets([{ index: 0, start: 5, offset: 0.4 }], -0.4004)).toEqual([{ index: 0, offset: null }]);
+    expect(dragOffsets([{ index: 0, start: 5, offset: null }], 0.12345)).toEqual([{ index: 0, offset: 0.123 }]);
+  });
+
+  it("clamps to the server's bound", () => {
+    expect(MAX_OFFSET).toBe(300);
+    expect(dragOffsets([{ index: 0, start: 5, offset: 299 }], 5)).toEqual([{ index: 0, offset: 300 }]);
+    expect(dragOffsets([{ index: 0, start: 500, offset: -299 }], -5)).toEqual([{ index: 0, offset: -300 }]);
+  });
+
+  it("lands a block that was floored at zero where the pointer let go of it", () => {
+    // Start 1 s, offset -5: drawn at 0. Dragged 2 s right it must sit at 2 s
+    // (offset +1), not stay floored at 0 with an offset of -3.
+    expect(dragOffsets([{ index: 0, start: 1, offset: -5 }], 2)).toEqual([{ index: 0, offset: 1 }]);
+    // The caller passes what is DRAWN - the plan's `pinned_start − start`
+    // (here 0 − 1) - never the page's stored number, and the answer is the same.
+    expect(dragOffsets([{ index: 0, start: 1, offset: 0 - 1 }], 2)).toEqual([{ index: 0, offset: 1 }]);
+    expect(dragOffsets([{ index: 4, start: 12, offset: 12.4 - 12 }], 1.5)).toEqual([{ index: 4, offset: 1.9 }]);
+  });
+});
+
+describe("the pointer gestures — what an unmoved release means, and which clicks it swallows", () => {
+  it("seeks from the ruler and does nothing from the head", () => {
+    expect(unmovedRelease("scrub", true, false)).toBe("seek");
+    expect(unmovedRelease("scrub", false, false)).toBe("nothing");
+  });
+
+  it("picks the piece under a marquee's start, leaves a block's click to the block, keeps the selection for the rest", () => {
+    expect(unmovedRelease("marquee", false, false)).toBe("pick");
+    expect(unmovedRelease("move", false, false)).toBe("click");
+    for (const kind of ["in", "out", "range"] as const) expect(unmovedRelease(kind, false, false)).toBe("keep-selection");
+  });
+
+  it("does nothing for a pointer the browser cancelled, whatever the kind", () => {
+    for (const kind of ["scrub", "in", "out", "range", "move", "marquee"] as const) {
+      expect(unmovedRelease(kind, true, true)).toBe("nothing");
+    }
+  });
+
+  it("swallows the follow-up click after a real drag, a scrub or a marquee - never after an unmoved block or handle release", () => {
+    for (const kind of ["scrub", "in", "out", "range", "move", "marquee"] as const) expect(releaseSuppressesClick(kind, true)).toBe(true);
+    expect(releaseSuppressesClick("scrub", false)).toBe(true);
+    expect(releaseSuppressesClick("marquee", false)).toBe(true);
+    expect(releaseSuppressesClick("move", false)).toBe(false);
+    expect(releaseSuppressesClick("range", false)).toBe(false);
+    expect(releaseSuppressesClick("in", false)).toBe(false);
+    expect(releaseSuppressesClick("out", false)).toBe(false);
+  });
+});
+
+describe("the fixture's tracks — two lists, one axis", () => {
+  const tracks = cases.tracks;
+  const list = (keep: Keep | null) => (keep && keep.length > 0 ? keep : wholeKeep(SOURCE));
+
+  it("is the shared scenario, not an emptied section", () => {
+    expect(tracks.segments).toHaveLength(5);
+    expect(tracks.video).toEqual(KEEP);
+    expect(Object.keys(tracks.cases).sort()).toEqual(["both", "narration_only", "together", "video_only"]);
+  });
+
+  it("places every listed sentence through the NARRATION list, and none of the dropped ones", () => {
+    for (const [name, c] of Object.entries(tracks.cases)) {
+      const through = list(c.narration);
+      const listed = new Map(c.sentences.map(([index, start, end]) => [index, { start, end }]));
+      tracks.segments.forEach(([start], index) => {
+        const landed = toTimeline(start, through);
+        const expected = listed.get(index);
+        if (expected) expect(landed, `${name}: sentence ${index}`).toBe(expected.start);
+        else expect(landed, `${name}: sentence ${index} was dropped`).toBeNull();
+      });
+      // The picture's length is the VIDEO list's.
+      expect(outputDuration(list(c.video)), name).toBe(c.duration);
+      expect(outputDuration(list(c.narration)), name).toBe(c.narration_duration);
+      expect(!wholeSource(list(c.video), SOURCE), name).toBe(c.cut);
+      expect(!wholeSource(list(c.narration), SOURCE), name).toBe(c.projected);
+    }
+  });
+
+  it("would place them wrongly through the VIDEO list — the trap the cases exist to catch", () => {
+    const c = tracks.cases.both;
+    const wrong = c.sentences.filter(([index, start]) => toTimeline(tracks.segments[index][0], list(c.video)) !== start);
+    expect(wrong.length).toBeGreaterThan(0);
+    // ... while a video-only edit moves no sentence at all: nothing is projected.
+    for (const [index, start] of tracks.cases.video_only.sentences) expect(start).toBe(tracks.segments[index][0]);
+  });
+
+  it("draws each lane's pieces and joins from its own list", () => {
+    const c = tracks.cases.both;
+    expect(pieces(list(c.video), SOURCE).map((p) => [p.start, p.end])).toEqual([[0, 6], [6, 10.5]]);
+    expect(pieces(list(c.narration), SOURCE).map((p) => [p.start, p.end])).toEqual([[0, 6.4], [6.4, 11.4]]);
+    expect(joins(list(c.video), SOURCE).map((j) => j.at)).toEqual([6]);
+    expect(joins(list(c.narration), SOURCE).map((j) => j.at)).toEqual([6.4]);
+    // A locked (absent) track is one piece and no join.
+    expect(pieces(list(tracks.cases.video_only.narration), SOURCE)).toHaveLength(1);
+    expect(joins(list(tracks.cases.video_only.narration), SOURCE)).toEqual([]);
   });
 });
 

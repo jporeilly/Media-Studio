@@ -17,21 +17,25 @@ the whole app suite looks and feels the same.
 > transcript whose sentences can each be nudged, muted, given their own voice and speed and
 > played back one at a time, and a timeline view of those sentences over a filmstrip and the
 > original audio's waveform that plays the whole new narration against the picture without
-> running a re-voice (phases 1 to 3a of the narration timeline — no drag yet), an **edit
+> running a re-voice (phases 1 to 3b of the narration timeline — the drag lives on the edit
+> timeline's Narration lane), an **edit
 > timeline** in Camtasia's shape on a video project — the ranges of its source that are kept,
-> one list that a split, a trim and a ripple delete all change, made on the strip itself
-> (select a range with the playhead's green and red handles or Ctrl+drag, **Cut**, undo) and
-> rendered by **Render**, the re-voice with the picture cut first (E1 the model and the
-> render, E2 the gesture; trim handles, split at the playhead, markers and a music lane are
-> not built), re-voicing in
+> one list **per track** (video, narration) that a split, a trim and a ripple delete all
+> change, made on the strip itself (select a range with the playhead's green and red handles
+> or Ctrl+drag, **Cut**, undo; click a track's name to edit just that channel while the other
+> stays locked; `S` splits at the playhead into pieces that can be clicked and cut; drag a
+> sentence block along the Narration lane, with snapping, to re-time it) and rendered by
+> **Render**, the re-voice with the picture cut first (E1 the model and the render and E2 the
+> gesture in 0.7.0; E3 the tracks, built on top of it on 2026-09-18 and unversioned until the
+> owner's release call — 0.8.0 with or without E4's music lane; trim handles, markers and the
+> music lane are not built), re-voicing in
 > a new voice or a translated language that keeps step with
 > the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
 > configurable password policy, projects that belong to whoever imported them with an audit
 > log of every change for admins, self-update from Git, and a Windows desktop installer are
 > in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound
-> library, the rest of the narration timeline (dragging a sentence on the strip), the rest of
-> the edit timeline (trim handles, split at the playhead, markers, snapping, and a music lane
-> over the top), and the rest of the
+> library, the rest of the edit timeline (E4's music lane over the top; E5's trim handles,
+> markers, J/K/L and snapping of cuts), and the rest of the
 > administration work (notifications, a branding lock, an admin page of its own, per-kind job
 > limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
 > `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).

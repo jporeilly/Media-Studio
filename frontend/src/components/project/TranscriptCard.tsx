@@ -19,7 +19,7 @@ import {
 import { narrationPlanKey } from "../../lib/timeline";
 import { Button, Card, ErrorBox, Input, Tabs, Textarea } from "../ui";
 import { JobProgress, type Job } from "./JobProgress";
-import { NarrationTimeline } from "./NarrationTimeline";
+import { NarrationTimeline, type SavedSentence } from "./NarrationTimeline";
 
 interface Voice {
   voice_id: string;
@@ -124,6 +124,26 @@ export function TranscriptCard({
   // a row's voice box saves at once when what is in it came from picking off
   // the shared list, and waits for a blur when it was typed by hand.
   const voiceIds = useMemo(() => new Set(voiceOptions.map((v) => v.voice_id)), [voiceOptions]);
+  // The STORED offsets, by index, for the timeline's drag: what its undo
+  // goes back to. From the page's copy of the transcript, which is what the
+  // List's boxes read too, so the two views agree on the number.
+  const offsets = useMemo(() => {
+    const held: Record<number, number | null> = {};
+    (segments ?? []).forEach((s, i) => { held[i] = s.offset ?? null; });
+    return held;
+  }, [segments]);
+  // A drag or a nudge on the timeline saved several sentences at once: fold
+  // them into the editable copy exactly as `adjust`'s success folds one -
+  // never a refetch, which would drop half-typed words - so the List's
+  // Offset boxes read the new values. The server's `index` is only its
+  // address; the words are kept from the page's copy.
+  const onOffsetsSaved = (saved: SavedSentence[]) => {
+    const byIndex = new Map(saved.map(({ index, ...segment }) => [index, segment]));
+    setSegments((prev) => prev && prev.map((seg, j) => {
+      const updated = byIndex.get(j);
+      return updated ? { ...updated, text: seg.text } : seg;
+    }));
+  };
 
   /** Drop one row's draft, so the box shows what is saved again. Declared
    *  before the mutation that calls it on settle. */
@@ -328,6 +348,8 @@ export function TranscriptCard({
           selected={selected}
           onSelect={setSelected}
           jobActive={jobActive}
+          offsets={offsets}
+          onOffsetsSaved={onOffsetsSaved}
         />
       </div>
 

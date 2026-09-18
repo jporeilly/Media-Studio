@@ -1,9 +1,11 @@
 """The narration editor: per-sentence adjustments to a transcribed video.
 
-Four routes:
+Five routes:
 
 - ``PATCH /api/projects/{pid}/transcript/{index}`` nudges when a single
   sentence is spoken, mutes it, or gives it its own voice or speed;
+- ``PATCH /api/projects/{pid}/narration/offsets`` nudges SEVERAL sentences at
+  once - the timeline's drag - as one write;
 - ``GET /api/projects/{pid}/transcript/{index}/preview`` speaks that one
   sentence back, so a voice or a speed can be heard before a whole re-voice is
   run for it;
@@ -16,11 +18,11 @@ Four routes:
 All are thin over ``services.narration`` (which owns the locking, the
 validation and the synthesis): the routes check the project exists and is the
 caller's and that it is a video, and map the service's errors to HTTP answers.
-The PATCH additionally refuses a write while a job is attached to the project
-(``services.jobs.require_idle``, a 409 - every slide write takes it and this one
-must too, since a re-voice job reads the transcript it is adjusting). The three
-GETs do NOT: they write nothing to the project, and refusing to let someone
-listen to or look at it while a job runs would be a 409 on a read.
+The two PATCHes additionally refuse a write while a job is attached to the
+project (``services.jobs.require_idle``, a 409 - every slide write takes it and
+these must too, since a re-voice job reads the transcript it is adjusting). The
+three GETs do NOT: they write nothing to the project, and refusing to let
+someone listen to or look at it while a job runs would be a 409 on a read.
 
 ``SegmentNotFound`` is answered differently by the two on purpose, and both are
 right: the PATCH is a write whose index argument is out of range (400, as it has
@@ -41,7 +43,7 @@ from fastapi.responses import FileResponse
 
 from api.audit import PROJECT_TRANSCRIPT_TIMING, audit
 from api.deps import current_user, readable_project, writable_project
-from api.schemas import SegmentOverride
+from api.schemas import OffsetsIn, SegmentOverride
 from services import narration, waveform
 
 router = APIRouter(prefix="/projects", tags=["narration"])
@@ -86,6 +88,36 @@ def update_transcript_segment(
     audit(PROJECT_TRANSCRIPT_TIMING, user=user, entity="project", entity_id=pid,
           detail=f"segment {index}: {', '.join(sorted(changes)) or '(nothing)'}")
     return segment
+
+
+@router.patch("/{pid}/narration/offsets")
+def update_narration_offsets(pid: str, body: OffsetsIn, user: dict = Depends(current_user)):
+    """Move several sentences at once: the timeline's drag, its nudge keys and
+    its Reset timing. One request for however many blocks moved, applied as
+    ONE write under the project's lock (``services.narration.update_offsets``),
+    so a marquee of twelve sentences is never twelve interleaving writes. The
+    single-sentence PATCH above is unchanged and stays the List view's; the
+    stored offsets are the same keys either way.
+
+    Answers: 200 ``{"sentences": [...]}`` - the updated sentences, each with
+    its ``index`` in the stored transcript -, 400 a deck/PDF, an index outside
+    the transcript (named) or given twice, or a bad offset, 404 no such
+    project, 409 a job holds the project, 422 an unknown key, an empty list, a
+    non-integer index or an offset that is not a number or is out of range.
+    """
+    writable(pid, user)
+    try:
+        updated = narration.update_offsets(pid, [(entry.index, entry.offset) for entry in body.offsets])
+    except narration.ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (narration.SegmentNotFound, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Once for the batch, and the indices and the field name only - never the
+    # values, which would say where every sentence was moved to, and never
+    # the words - as the single-sentence route above records its one.
+    audit(PROJECT_TRANSCRIPT_TIMING, user=user, entity="project", entity_id=pid,
+          detail=f"segments {', '.join(str(sentence['index']) for sentence in updated)}: offset")
+    return {"sentences": updated}
 
 
 @router.get("/{pid}/transcript/{index}/preview")

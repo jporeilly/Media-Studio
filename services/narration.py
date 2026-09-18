@@ -70,6 +70,10 @@ OVERRIDE_KEYS: tuple[str, ...] = ("offset", "muted", "voice", "provider", "speed
 # either way is far beyond any real correction and keeps a typo from pinning a
 # sentence into the next hour.
 MAX_OFFSET_SECONDS = 300.0
+# How many sentences one batch offsets write may carry (``update_offsets``).
+# Every index must be unique and inside the transcript, so a real batch is
+# bounded by the transcript itself; this is a bound on abuse, not on use.
+MAX_OFFSET_BATCH = 5000
 MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 MAX_VOICE_CHARS = 200
@@ -334,6 +338,61 @@ def update_segment(
     return segment
 
 
+def update_offsets(pid: str, offsets) -> list[dict]:
+    """Set several sentences' offsets in ONE read-modify-write.
+
+    ``offsets`` is ``[(index, seconds_or_None), ...]``: a drag of twelve
+    blocks along the timeline, a nudge of the selected ones, or a Reset
+    timing (``None`` clears the key). Every value goes through the rule
+    ``update_segment`` applies (``_offset``: within ±MAX_OFFSET_SECONDS,
+    finite, three decimals) and every index must be a whole number, unique
+    and inside the transcript - all checked BEFORE the write, so a refused
+    entry leaves the project exactly as it was. A value that rounds to zero
+    is stored as ABSENT, like ``None``: that is the List view's own rule for
+    its Offset box (``lib/narration.ts::numberChange``), applied here so a
+    block dragged back to where it was spoken leaves no key behind. Then one
+    write, under ``services.projects.project_lock``: twelve single-sentence
+    writes would each re-read and rewrite the whole record, interleaving
+    with each other and with the transcript Save (the edit timeline spec's
+    trap 21).
+
+    The memoised speaking rate is NOT dropped: an offset moves where a
+    sentence is pinned, not the texts the rate is measured over.
+
+    Returns the updated sentences, ``[{"index": i, ...segment}, ...]`` in
+    index order. Raises ``ProjectNotFound``, ``SegmentNotFound`` (naming the
+    index that is outside the transcript) or ``ValueError`` (a deck, no
+    entries, an index that is not a whole number or is given twice, a bad
+    value); nothing is written in any of those cases.
+    """
+    checked: dict[int, float | None] = {}
+    for index, value in offsets:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError(f"Segment index {index!r} must be a whole number.")
+        if index in checked:
+            raise ValueError(f"Segment {index} is given twice; name each sentence's offset once.")
+        seconds = _offset(value)
+        checked[index] = None if not seconds else seconds  # 0.0 (and -0.0) clear the key
+    if not checked:
+        raise ValueError("Give at least one sentence's offset.")
+
+    with store.project_lock(pid):
+        record = _record(pid)
+        transcript = _transcript(record)
+        # Every index resolved before any is applied: an index past the end
+        # in the twelfth entry must not leave the first eleven written.
+        updated = {index: dict(_segment(transcript, index)) for index in checked}
+        for index, value in checked.items():
+            if value is None:
+                updated[index].pop("offset", None)
+            else:
+                updated[index]["offset"] = value
+            transcript[index] = updated[index]
+        record["transcript"] = transcript
+        store.save_project(record)
+    return [{**updated[index], "index": index} for index in sorted(updated)]
+
+
 # -- auditioning the whole narration -----------------------------------------
 
 def _job_narration(provider, voice, speed) -> tuple[str, str, float]:
@@ -525,15 +584,18 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
     nothing is synthesised for them.
 
     **The edit is applied here, server-side** (``services.edit``): when the
-    project carries one that removes anything, every sentence comes back in
-    TIMELINE seconds - where it lands in the output, holes closed - ``duration``
-    is the output's length, and a sentence whose start was cut is not in the
-    list at all, exactly as it is not in the render. The projection is the
-    very function the render calls (``services.edit.apply``), never a copy of
-    it, for the same reason the rate rules are: the client must never
+    project's NARRATION list removes anything, every sentence comes back in
+    TIMELINE seconds - where it lands in the output, holes closed - and a
+    sentence whose start was cut is not in the list at all, exactly as it is
+    not in the render; when its VIDEO list removes anything, ``duration`` is
+    the picture's output length. The two lists close their holes from the
+    same zero, so a sentence pinned at or past the cut picture's end is
+    ``past_end`` exactly as one pinned past an uncut video is. The projection
+    is the very function the render calls (``services.edit.apply``), never a
+    copy of it, for the same reason the rate rules are: the client must never
     reimplement render arithmetic. ``edit`` in the payload is the edit the
-    sentences were projected through, so the timeline draws the one the plan
-    was made from.
+    sentences were projected through, one block per track, so the timeline
+    draws the one the plan was made from.
 
     Writes nothing, so - like the preview - it deliberately does not take
     ``jobs.require_idle``: refusing to let someone audition while a re-voice
@@ -580,14 +642,17 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
 
     # The edit, applied by the very function the render applies it with, so
     # the two cannot disagree about whether it changes anything or where a
-    # sentence lands once it has. With no edit, or one that keeps everything,
-    # ``sentences`` is the transcript itself and nothing below changes.
-    # ``listed`` pairs each sentence with its index in the STORED transcript -
-    # what the narration routes address a sentence by; the projection drops
-    # sentences, so a position in its list is not it.
+    # sentence lands once it has. With no edit, or one whose narration list
+    # keeps everything (a video-only edit included), ``sentences`` is the
+    # transcript itself and nothing below changes. ``listed`` pairs each
+    # sentence with its index in the STORED transcript - what the narration
+    # routes address a sentence by; the projection drops sentences, so a
+    # position in its list is not it. Keyed on ``projected``, never on
+    # ``cut``: a video-only edit projects nothing and a narration-only edit
+    # projects everything.
     applied = edit.apply(record, transcript, source_duration)
     listed = (
-        [(seg["index"], seg) for seg in applied.sentences] if applied.cut
+        [(seg["index"], seg) for seg in applied.sentences] if applied.projected
         else list(enumerate(transcript))
     )
 
@@ -600,6 +665,8 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
     duration = source_duration
     if duration is None:
         duration = float(record.get("duration") or 0.0) or section["end"]
+    # The PICTURE's length when it is cut: the mux is ``-shortest``, so that
+    # is what bounds the last sentence and drops one pinned past it.
     if applied.cut:
         duration = applied.output_duration
 
@@ -686,11 +753,12 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
         # drift from the loop it is supposed to be predicting.
         "squeeze_tolerance": processing.SQUEEZE_TOLERANCE,
         "squeeze_max_factor": processing.SQUEEZE_MAX_FACTOR,
-        # The edit the sentences above were projected through - the kept
-        # ranges in SOURCE seconds (null = everything), the source's length and
-        # the output's - so the client draws the very edit the plan was made
-        # from rather than fetching it separately and risking a newer one.
-        "edit": edit.payload(applied.keep, source_duration),
+        # The edit the sentences above were projected through - each track's
+        # kept ranges in SOURCE seconds (null = everything), the source's
+        # length and the output's - so the client draws the very edit the plan
+        # was made from rather than fetching it separately and risking a
+        # newer one.
+        "edit": edit.payload(applied.video, applied.narration, source_duration),
         "sentences": sentences,
     }
 

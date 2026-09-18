@@ -1,12 +1,13 @@
-"""The edit: which ranges of a video's one source are kept (porting vertical
-6, phase E1 - the model and the render; the timeline gesture is E2).
+"""The edit: which ranges of a video's one source are kept, per track
+(porting vertical 6: E1 the model and the render, E2 the timeline gesture,
+E3 one list per track - video and narration).
 
 Three routes, thin over ``services.edit``, which owns the validation, the
 projection and the locking:
 
-- ``GET /api/projects/{pid}/edit`` - the kept ranges (``null`` means
+- ``GET /api/projects/{pid}/edit`` - each track's kept ranges (``null`` means
   everything), the source's length and the output's;
-- ``PUT /api/projects/{pid}/edit`` - replace the whole list;
+- ``PUT /api/projects/{pid}/edit`` - replace the lists;
 - ``DELETE /api/projects/{pid}/edit`` - back to keep-everything.
 
 The GET is a read and is allowed while a job holds the project. The PUT and
@@ -45,20 +46,30 @@ def writable(pid: str, user: dict) -> dict:
 
 
 def _summary(stored: dict) -> str:
-    """The audit detail: how many ranges and how much was removed - never the
-    times, which would say where every cut is."""
-    count = len(stored["keep"])
-    removed = max(0.0, (stored["source_duration"] or 0.0) - stored["output_duration"])
-    return f"{count} range{'' if count == 1 else 's'} kept, {removed:.1f} s removed"
+    """The audit detail, per track: how many ranges and how much was removed,
+    or "whole" - never the times, which would say where every cut is."""
+    parts = []
+    for track in edit.TRACKS:
+        held = stored[track]
+        if held["keep"] is None:
+            parts.append(f"{track}: whole")
+            continue
+        count = len(held["keep"])
+        removed = max(0.0, (stored["source_duration"] or 0.0) - held["output_duration"])
+        parts.append(f"{track}: {count} range{'' if count == 1 else 's'} kept, {removed:.1f} s removed")
+    return "; ".join(parts)
 
 
 @router.get("/{pid}/edit")
 def get_edit(pid: str, user: dict = Depends(current_user)):
-    """The project's edit: ``keep`` is the list of kept ``[start, end]``
-    ranges in source seconds, or ``null`` when the whole source is kept;
-    ``source_duration`` is the extracted audio's length (``null`` until the
-    video has been transcribed) and ``output_duration`` what a render would
-    be (``null`` while neither is known).
+    """The project's edit: for each of ``video`` and ``narration``, ``keep``
+    is the list of kept ``[start, end]`` ranges in source seconds, or
+    ``null`` when that track keeps the whole source, with that track's
+    ``output_duration``; ``source_duration`` is the extracted audio's length
+    (``null`` until the video has been transcribed) and the top-level
+    ``output_duration`` what a render would be - the picture's - (``null``
+    while neither is known). A version-1 edit answers in this shape, both
+    tracks alike.
 
     Answers: 200, 400 a deck/PDF or an edit this version cannot read, 404 no
     such project.
@@ -72,17 +83,23 @@ def get_edit(pid: str, user: dict = Depends(current_user)):
 
 @router.put("/{pid}/edit")
 def put_edit(pid: str, body: EditIn, user: dict = Depends(current_user)):
-    """Replace the edit with ``keep``: ordered, non-overlapping ranges within
-    the source, in source seconds. Returns the edit as stored.
+    """Replace the edit: ``video`` and ``narration``, each a list of ordered,
+    non-overlapping ranges within the source in source seconds, or null (left
+    out) to keep that track whole - or ``keep``, the version-1 body, which
+    means both. Returns the edit as stored.
 
-    Answers: 200 the stored edit, 400 a bad list (the message names the
-    range) or a deck/PDF, 404 no such project, 409 a job holds the project or
-    the video has no extracted audio yet (the ranges are checked against its
-    length, and transcribing is what extracts it).
+    Answers: 200 the stored edit, 400 a bad list (the message names the track
+    and the range), no track at all, ``keep`` beside a per-track list, or a
+    deck/PDF, 404 no such project, 409 a job holds the project or the video
+    has no extracted audio yet (the ranges are checked against its length,
+    and transcribing is what extracts it).
     """
     writable(pid, user)
+    if body.keep is not None and (body.video is not None or body.narration is not None):
+        raise HTTPException(status_code=400, detail="Send either keep (both tracks) or video / narration, not both.")
+    video, narration_keep = (body.keep, body.keep) if body.keep is not None else (body.video, body.narration)
     try:
-        stored = edit.set_edit(pid, body.keep)
+        stored = edit.set_edit(pid, video=video, narration=narration_keep)
     except edit.ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except edit.SourceLengthUnknown as exc:
@@ -95,8 +112,8 @@ def put_edit(pid: str, body: EditIn, user: dict = Depends(current_user)):
 
 @router.delete("/{pid}/edit")
 def delete_edit(pid: str, user: dict = Depends(current_user)):
-    """Back to keep-everything. Returns the edit as it now stands (``keep``
-    null). Idempotent, and a project that had no edit is left as it is and
+    """Back to keep-everything. Returns the edit as it now stands (both
+    tracks' ``keep`` null). Idempotent, and a project that had no edit is left as it is and
     records nothing - there was nothing to clear. Answers: 200, 400 a
     deck/PDF, 404 no such project, 409 busy."""
     writable(pid, user)

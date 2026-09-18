@@ -1,12 +1,27 @@
-"""The edit: which ranges of a video project's ONE source are kept.
+"""The edit: which ranges of a video project's ONE source are kept, per track.
 
-A project gains an ordered list of the ranges of its source that survive the
-cut - ``record["edit"] = {"version": 1, "keep": [[start, end], ...]}`` in
-SOURCE seconds - and nothing else. **Absent means keep everything**, so every
-project made before this existed renders exactly as it did. A split, a trim
-and a ripple delete are all changes to that one list; there is no clip object
-and no position field, because position is *derived* (``to_timeline``) and
-that is what keeps the transcript's coordinates untouched.
+A project gains one ordered list PER TRACK of the ranges of its source that
+survive the cut, in SOURCE seconds, and nothing else::
+
+    "edit": {"version": 2,
+             "video":     {"keep": [[0.0, 47.3], [52.3, 341.008]]},
+             "narration": {"keep": [[0.0, 341.008]]}}
+
+**Absent means keep everything** - a track key absent keeps that track whole,
+both absent is no edit at all - so every project made before this existed
+renders exactly as it did. A split, a trim and a ripple delete are all changes
+to a list; there is no clip object and no position field, because position is
+*derived* (``to_timeline``) and that is what keeps the transcript's coordinates
+untouched. A version-1 record (E1's one list) is read as both tracks cut
+together and rewritten in this shape on the next write (spec §11.1).
+
+**Two lists, one axis.** The VIDEO list decides what the picture shows; the
+NARRATION list decides where a sentence lands and which sentences are dropped;
+both close their holes from the same zero. Camtasia's lock icons are the UI of
+it: cut the picture with the narration locked and every pin stays where it
+was, so a sentence spoken over the removed picture plays over what follows -
+the timing adjustment the owner asked for. A locked track is an untouched
+list, never one re-derived from the other (traps 18 and 19).
 
 **The transcript never moves.** ``services.projects.set_transcript`` decides
 that two entries are the same sentence by their ``start`` and ``end``, and a
@@ -37,13 +52,17 @@ every other writer of the outer ``project.json`` does.
 import math
 from dataclasses import dataclass
 
-from services import narration
+# Aliased because ``narration`` is the name of a TRACK below, and the
+# functions here take it as an argument.
+from services import narration as sentences_service
 from services import projects as store
 from services import waveform
 
-# The shape of ``record["edit"]``. Bumped when v2 (a second source, mixing)
-# changes the shape, so an old record is never guessed at.
-VERSION = 1
+# The shape of ``record["edit"]``: 2 since E3 (one list per track); version 1
+# (one list) is still READ, as cut together - see ``stored_tracks``. Bumped
+# only when a record could otherwise be guessed at; E4's music lane joins
+# this version additively (a missing key is no music).
+VERSION = 2
 
 # Seconds are stored to three decimal places, the transcript's own precision
 # (``services.transcription`` rounds Whisper's timestamps the same way).
@@ -273,117 +292,231 @@ def project_transcript(transcript, keep) -> list[dict]:
 
 # -- the record --------------------------------------------------------------
 
-def stored_keep(record: dict, source_duration) -> list[list[float]] | None:
-    """The record's edit as a validated ``keep`` list, or ``None`` when the
-    project has none (keep everything). A record from a newer version, or a
-    hand-edited one that does not validate, is a ``ValueError`` rather than a
-    silent keep-everything: rendering the whole video while the user believes
-    a cut is applied is the one thing this must not do quietly."""
+# The two lists the record may carry (spec §11.1), in the order the payload
+# and the audit name them. E4's ``music`` joins the same version additively.
+TRACKS = ("video", "narration")
+
+UNREADABLE = (
+    "This project's edit was written by a different version of the app and cannot be read; "
+    "clear it and cut again."
+)
+
+
+def _track_keep(name: str, keep, source_duration) -> list[list[float]]:
+    """One track's list through :func:`validate_keep`, the refusal naming the
+    track: with two lists in one body the route's 400 has to say WHICH one
+    is wrong ("narration: Range 2 [...] overlaps ...")."""
+    try:
+        return validate_keep(keep, source_duration)
+    except ValueError as exc:
+        raise ValueError(f"{name}: {exc}") from None
+
+
+def stored_tracks(record: dict, source_duration) -> tuple[list[list[float]] | None, list[list[float]] | None]:
+    """The record's edit as ``(video, narration)`` - each a validated ``keep``
+    list, or ``None`` when that track keeps everything - and ``(None, None)``
+    when the project has no edit at all.
+
+    **A version-1 record is read as cut together**: ``{"version": 1, "keep":
+    K}`` means ``video = narration = K`` - E1's own rule that whoever bumps
+    the version reads the older shape rather than refusing it (trap 22). It
+    is written back as version 2 on the next write; nothing migrates. A
+    record from a version this code does not know, or a hand-edited one that
+    does not validate, is a ``ValueError`` rather than a silent
+    keep-everything: rendering the whole video while the user believes a cut
+    is applied is the one thing this must not do quietly. Keys this version
+    does not read (E4's ``music``) ride through; a version-1 ``keep`` under
+    the version-2 number does not, because it could mean two things and
+    "no edit" is the quiet answer to neither.
+    """
     held = record.get("edit")
     if held is None:
-        return None
-    if not isinstance(held, dict) or held.get("version") != VERSION:
+        return None, None
+    if not isinstance(held, dict):
+        raise ValueError(UNREADABLE)
+    version = held.get("version")
+    if version == 1:
+        keep = validate_keep(held.get("keep"), source_duration)
+        return keep, keep
+    if version != VERSION:
+        raise ValueError(UNREADABLE)
+    if "keep" in held:
         raise ValueError(
-            "This project's edit was written by a different version of the app and cannot be read; "
+            "This project's edit mixes two shapes (a version-1 list under version 2) and cannot be read; "
             "clear it and cut again."
         )
-    return validate_keep(held.get("keep"), source_duration)
+    tracks: list[list[list[float]] | None] = []
+    for name in TRACKS:
+        track = held.get(name)
+        if track is None:
+            tracks.append(None)
+            continue
+        if not isinstance(track, dict):
+            raise ValueError(f"{name}: The edit must be a list of [start, end] ranges in seconds.")
+        tracks.append(_track_keep(name, track.get("keep"), source_duration))
+    return tracks[0], tracks[1]
+
+
+def stored_keep(record: dict, source_duration) -> list[list[float]] | None:
+    """E1's name for THE PICTURE's kept ranges: the video track's list, or
+    ``None`` when the picture is whole. Kept for its callers. The narration
+    has a list of its own since E3 and this does not know it - a transcript
+    is projected through :func:`stored_tracks`'s second list, never this one
+    (trap 18)."""
+    return stored_tracks(record, source_duration)[0]
 
 
 @dataclass(frozen=True)
 class Applied:
-    """What the edit does to one transcript: the stored ranges (``None`` when
-    there is no edit), whether the picture has to be cut at all, the sentences
-    in the coordinates the render will use, and how long the output is."""
+    """What the edit does to one transcript: the two stored lists (``None`` =
+    that track keeps everything); whether the PICTURE has to be cut at all
+    (``cut``: the video list removes something); whether ``sentences`` were
+    projected (``projected``: the narration list removes something); the
+    sentences in the coordinates the render will use; how long the output is
+    - the picture's length, which is what the render's ``-shortest`` mux
+    bounds everything to - and the narration track's own length beside it."""
 
-    keep: list[list[float]] | None
+    video: list[list[float]] | None
+    narration: list[list[float]] | None
     cut: bool
+    projected: bool
     sentences: list
     output_duration: float | None
+    narration_duration: float | None
+
+    @property
+    def keep(self) -> list[list[float]] | None:
+        """E1's name for the picture's list - what ``cut_picture`` is given."""
+        return self.video
 
 
 def apply(record: dict, transcript, source_duration) -> Applied:
     """The edit applied to ``transcript`` - THE function both the audition plan
     and the render call, so the two cannot disagree.
 
-    With no edit, or one that keeps the whole source, ``sentences`` is the
-    transcript itself, untouched and unprojected, and ``cut`` is False: that
-    path is byte-identical to a project that never had an edit. Otherwise
-    ``sentences`` is :func:`project_transcript`'s list in timeline seconds and
-    ``output_duration`` is the sum of the kept ranges.
+    Two lists, one axis (spec §11.2, trap 18): the NARRATION list decides
+    where a sentence lands and which sentences are dropped, the VIDEO list
+    decides what the picture shows, and both close their holes from the same
+    zero. ``sentences`` is :func:`project_transcript` through the narration
+    list iff that list removes anything; otherwise it is the transcript
+    itself, untouched and unprojected - the same objects - so a project with
+    no edit, a bare split and a video-only edit all hand the engine exactly
+    what E1's no-edit path handed it. ``cut`` is whether the video list
+    removes anything, i.e. whether the picture step runs. A locked track is
+    an absent (or whole) list here and is never re-derived from the other
+    (trap 19): cutting the picture with the narration untouched drops no
+    sentence and moves no pin.
 
     An edit whose source cannot be measured any more (``source_duration``
     None: the audio removed by hand after the edit was made) is refused with
     ``SourceLengthUnknown`` rather than applied on trust or silently ignored.
     """
-    keep = stored_keep(record, source_duration)
+    video, narration = stored_tracks(record, source_duration)
     length = None if source_duration is None else round(float(source_duration), PRECISION)
-    if keep is None:
-        return Applied(None, False, transcript, length)
+    if video is None and narration is None:
+        return Applied(None, None, False, False, transcript, length, length)
     if source_duration is None:
         raise SourceLengthUnknown(
             "This project has an edit but its extracted audio is missing, so the edit cannot be "
             "measured. Transcribe the video again, or clear the edit."
         )
-    if whole_source(keep, source_duration):
-        return Applied(keep, False, transcript, length)
-    return Applied(keep, True, project_transcript(transcript, keep), output_duration(keep))
+    cut = video is not None and not whole_source(video, source_duration)
+    projected = narration is not None and not whole_source(narration, source_duration)
+    return Applied(
+        video, narration, cut, projected,
+        project_transcript(transcript, narration) if projected else transcript,
+        output_duration(video) if cut else length,
+        output_duration(narration) if projected else length,
+    )
 
 
-def payload(keep, source_duration) -> dict:
+def _track_payload(keep, length) -> dict:
+    """One track as the routes report it: its list (``None`` = everything)
+    and its output's length - the source's when the track is whole, or when
+    even that is unknown, ``None`` rather than a length of nothing."""
+    return {"keep": keep, "output_duration": output_duration(keep) if keep else length}
+
+
+def payload(video, narration, source_duration) -> dict:
     """The shape the routes answer with, and what the audition plan embeds as
-    ``edit``: the kept ranges in SOURCE seconds (``None`` = everything), the
-    source's length to :data:`PRECISION` (``None`` before transcription) and
-    the output's. The length is rounded so a client working in the reported
-    coordinate space can send its last range's end straight back."""
+    ``edit``: one block per track - its kept ranges in SOURCE seconds
+    (``None`` = everything) and its output's length -, the source's length to
+    :data:`PRECISION` (``None`` before transcription) and the output's, which
+    is THE PICTURE's. The lengths are rounded so a client working in the
+    reported coordinate space can send its last range's end straight back."""
     length = None if source_duration is None else round(float(source_duration), PRECISION)
+    picture = _track_payload(video, length)
     return {
         "version": VERSION,
-        "keep": keep,
+        "video": picture,
+        "narration": _track_payload(narration, length),
         "source_duration": length,
-        # With no edit the output is the source; when even that is unknown,
-        # say so rather than claim a length of nothing.
-        "output_duration": output_duration(keep) if keep else length,
+        "output_duration": picture["output_duration"],
     }
 
 
 def describe(record: dict) -> dict:
-    """``GET /{pid}/edit``: the stored ranges (``None`` = everything), the
-    source's length when it is known, and the output's. Reads only."""
+    """``GET /{pid}/edit``: each track's stored ranges (``None`` =
+    everything), the source's length when it is known, and the output's. A
+    version-1 record answers in the version-2 shape, cut together. Reads only."""
     source_duration = waveform.duration_for(record["id"])
-    return payload(stored_keep(record, source_duration), source_duration)
+    video, narration = stored_tracks(record, source_duration)
+    return payload(video, narration, source_duration)
 
 
-def set_edit(pid: str, keep) -> dict:
-    """Store ``keep`` as the project's edit, replacing any previous one.
+def set_edit(pid: str, video=None, narration=None) -> dict:
+    """Store the given lists as the project's edit, replacing any previous
+    lists - a version-1 record included, which is rewritten in this shape.
 
-    Validated BEFORE the lock and before the first write, so a refused list
-    leaves the project exactly as it was. Raises ``SourceLengthUnknown`` when
-    the project has no extracted audio (nothing to measure against),
-    ``ValueError`` for a bad list or a deck, ``ProjectNotFound`` for a project
-    that is gone. The record is re-read inside
-    ``services.projects.project_lock`` immediately before it is written - the
-    same lock the transcript Save and the narration editor take - so neither
-    of them is overwritten with a stale copy.
+    MERGED into the stored edit rather than written from scratch: the
+    version and the two tracks are this function's to write (a track given
+    as ``None`` is REMOVED - it keeps everything - and a version-1 ``keep``
+    never survives under version 2), and every other key rides through
+    untouched, as ``stored_tracks`` promises on read - E4's ``music`` must not
+    be dropped by the first cut after it lands. Both tracks ``None`` is
+    refused, because an edit with no track is not an edit. Each list is
+    validated BEFORE the lock and before the first write, so a refused list
+    leaves the project exactly as it was. Raises ``ValueError``
+    for a bad list (naming the track and the range), no track at all, or a
+    deck; ``SourceLengthUnknown`` when the project has no extracted audio
+    (nothing to measure against); ``ProjectNotFound`` for a project that is
+    gone. The record is re-read inside ``services.projects.project_lock``
+    immediately before it is written - the same lock the transcript Save and
+    the narration editor take - so neither of them is overwritten with a
+    stale copy.
     """
+    if video is None and narration is None:
+        raise ValueError("Give at least one track to cut - video, narration or both.")
     source_duration = waveform.duration_for(pid)
     if source_duration is None:
         raise SourceLengthUnknown(waveform.NO_AUDIO_MESSAGE)
-    checked = validate_keep(keep, source_duration)
+    checked = {
+        name: _track_keep(name, keep, source_duration)
+        for name, keep in zip(TRACKS, (video, narration)) if keep is not None
+    }
 
     with store.project_lock(pid):
         record = store.get_project(pid)
         if record is None:
             raise ProjectNotFound("Project not found.")
-        if record.get("kind") not in narration.NARRATION_KINDS:
+        if record.get("kind") not in sentences_service.NARRATION_KINDS:
             raise ValueError("Only video projects can be cut.")
-        record["edit"] = {"version": VERSION, "keep": checked}
+        held = record.get("edit")
+        merged = dict(held) if isinstance(held, dict) else {}
+        merged["version"] = VERSION
+        merged.pop("keep", None)
+        for name in TRACKS:
+            if name in checked:
+                merged[name] = {"keep": checked[name]}
+            else:
+                merged.pop(name, None)
+        record["edit"] = merged
         store.save_project(record)
     # The edit decides which sentences are spoken, and the speaking rate is
     # measured from three of those - so the memoised rate no longer describes
     # this project. Outside the lock: it guards a different thing.
-    narration.forget_baseline(pid)
-    return payload(checked, source_duration)
+    sentences_service.forget_baseline(pid)
+    return payload(checked.get("video"), checked.get("narration"), source_duration)
 
 
 def clear_edit(pid: str) -> tuple[dict, bool]:
@@ -400,5 +533,5 @@ def clear_edit(pid: str) -> tuple[dict, bool]:
             record.pop("edit")
             store.save_project(record)
     if cleared:
-        narration.forget_baseline(pid)
-    return payload(None, waveform.duration_for(pid)), cleared
+        sentences_service.forget_baseline(pid)
+    return payload(None, None, waveform.duration_for(pid)), cleared

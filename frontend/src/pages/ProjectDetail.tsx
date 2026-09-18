@@ -302,11 +302,11 @@ export default function ProjectDetailPage() {
   const transcribeError = transcribe.isError ? errorMessage(transcribe.error) : activeKind === "transcribe" ? jobErrText : null;
   const revoiceError = revoice.isError ? errorMessage(revoice.error) : activeKind === "revoice" ? jobErrText : null;
   // The re-voice IS the render of the edit (one job kind, one code path -
-  // E1): when the edit removes anything the button says so, with what it will
-  // do and about how long the picture step takes. With no edit, or one that
-  // keeps everything, the button and the job are exactly as before.
-  const cut = edit.data?.keep && edit.data.source_duration !== null
-    ? renderSummary(edit.data.keep, edit.data.source_duration)
+  // E1): when EITHER track removes anything the button says so, with what it
+  // will do and about how long the picture step takes. With no edit, or one
+  // that keeps everything, the button and the job are exactly as before.
+  const cut = edit.data && edit.data.source_duration !== null
+    ? renderSummary(edit.data.video.keep, edit.data.narration.keep, edit.data.source_duration)
     : null;
 
   return (

@@ -1,5 +1,5 @@
 {
-  "_comment": "The projection's pinned cases, shared by services/edit.py (tests/test_edit.py) and frontend/src/lib/edit.ts (edit.test.ts) so the two copies cannot drift silently. Five sentences over a 12 s recording with 6.0-7.5 removed; the corpus keep in output_durations is the 5 s cut measured on the real 341 s source.",
+  "_comment": "The projection's pinned cases, shared by services/edit.py (tests/test_edit.py) and frontend/src/lib/edit.ts (edit.test.ts) so the two copies cannot drift silently. Five sentences over a 12 s recording with 6.0-7.5 removed; the corpus keep in output_durations is the 5 s cut measured on the real 341 s source. The tracks section is E3's: one list per track, the narration projected through the NARRATION list and the picture cut with the VIDEO list - a projection through the wrong list gives the same indices and the wrong starts, which is the trap these cases catch.",
   "source_duration": 12.0,
   "keep": [[0.0, 6.0], [7.5, 12.0]],
   "output_duration": 10.5,
@@ -35,5 +35,33 @@
     [[[0.0, 47.3], [52.3, 341.008]], 336.008],
     [[[0.0, 12.0]], 12.0],
     [[[0.0, 6.0], [7.5, 12.0]], 10.5]
-  ]
+  ],
+  "tracks": {
+    "_comment": "The same five sentences (start, end). The video list removes 6.0-7.5; the narration list removes 6.4-7.0 - both drop the third sentence, but the sentences after it move by 1.5 s under one list and 0.6 s under the other. Each case gives the sentences the plan lists, as [index, start, end] in the output's seconds, the picture's length (duration), the narration track's own length, and whether the picture is cut / the sentences projected.",
+    "segments": [[0.0, 2.0], [5.0, 7.0], [6.5, 7.4], [8.0, 9.0], [10.0, 12.0]],
+    "video": [[0.0, 6.0], [7.5, 12.0]],
+    "narration": [[0.0, 6.4], [7.0, 12.0]],
+    "cases": {
+      "video_only": {
+        "video": [[0.0, 6.0], [7.5, 12.0]], "narration": null,
+        "sentences": [[0, 0.0, 2.0], [1, 5.0, 7.0], [2, 6.5, 7.4], [3, 8.0, 9.0], [4, 10.0, 12.0]],
+        "duration": 10.5, "narration_duration": 12.0, "cut": true, "projected": false
+      },
+      "narration_only": {
+        "video": null, "narration": [[0.0, 6.4], [7.0, 12.0]],
+        "sentences": [[0, 0.0, 2.0], [1, 5.0, 6.4], [3, 7.4, 8.4], [4, 9.4, 11.4]],
+        "duration": 12.0, "narration_duration": 11.4, "cut": false, "projected": true
+      },
+      "both": {
+        "video": [[0.0, 6.0], [7.5, 12.0]], "narration": [[0.0, 6.4], [7.0, 12.0]],
+        "sentences": [[0, 0.0, 2.0], [1, 5.0, 6.4], [3, 7.4, 8.4], [4, 9.4, 11.4]],
+        "duration": 10.5, "narration_duration": 11.4, "cut": true, "projected": true
+      },
+      "together": {
+        "video": [[0.0, 6.0], [7.5, 12.0]], "narration": [[0.0, 6.0], [7.5, 12.0]],
+        "sentences": [[0, 0.0, 2.0], [1, 5.0, 6.0], [3, 6.5, 7.5], [4, 8.5, 10.5]],
+        "duration": 10.5, "narration_duration": 10.5, "cut": true, "projected": true
+      }
+    }
+  }
 }

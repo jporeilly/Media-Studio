@@ -402,6 +402,9 @@ Timeline behaviour:
   visible without a second panel.
 - Drag to offset, with a numeric nudge (±0.05 / ±0.25 s buttons and a typed field) for
   precision and for keyboard users. The drag is the convenience; the number is the contract.
+  *Built by E3 (2026-09-18):* the drag on the edit timeline's Narration lane, the nudges on
+  `[` / `]` (Shift for the quarter second), Reset timing, and the List's box as the readout —
+  `docs/porting/edit-timeline.md` §11.3.
 - The selected block gets mute / voice / speed / **Play** (§5) and a **Reset** that sends
   all four fields as `null`.
 - Blocks are **not** re-sorted when one is dragged past its neighbour — the pipeline never
@@ -666,17 +669,28 @@ several contradict a line that still reads as written:
   auditioned by the browser and refused 400 by the preview route — a per-sentence failure with
   no cause anybody could see.
 
-**Phase 3b — drag.** Not built here: it is delivered by the edit timeline's phase E3
-(`docs/porting/edit-timeline.md` §11.3, designed 2026-09-17), where the drag lives on the
-Narration lane beside the per-track cuts, commits **one** batch write of offsets on release
-(`PATCH …/narration/offsets`, under the store's lock) rather than one `PATCH …/transcript/{index}`
-per sentence, snaps to the playhead, the picture's cuts and the spoken moment, and keeps the
-±0.05 / ±0.25 s nudges on `[` / `]`. §6's drag bullet, the nudges and the keyboard
-equivalents all still read as written and are all still outstanding, as is trap 3's surviving
-half: **commit on drag end, not per frame**. Everything it needs is in place — `lib/timeline.ts` already owns seconds↔pixels and
-the zoom, the blocks are already positioned from `pinned_start`, and the audition already
-re-plays from the plan whenever an adjustment invalidates it — so 3b is the gesture, its
-keyboard equivalent, the hit-testing and the write, not a new data path.
+**Phase 3b — drag.** **DONE**, 2026-09-18, delivered by the edit timeline's phase E3
+(`docs/porting/edit-timeline.md` §11.3 for the design and its *As built* notes, §7's E3 block
+for what shipped, the Reviewer's findings and the proofs; CHANGELOG `#edit-timeline-tracks`,
+unversioned on top of 0.7.0 pending the owner's release call). The drag lives on the
+Narration lane beside the per-track cuts: a block — or every selected block, by the same
+delta — follows the pointer with its new time beside it, snaps within 8 px to the playhead,
+the picture's joins, the other sentences' pins and landed ends and its own spoken moment
+(Ctrl held disables it), and commits **one** batch write of offsets on release —
+`PATCH …/narration/offsets`, applied as one read-modify-write under the store's lock,
+audited once by indices — rather than one `PATCH …/transcript/{index}` per sentence; the
+±0.05 / ±0.25 s nudges are `[` / `]` and Shift (by physical key or by what it typed, so a
+QWERTZ layout works), **Reset timing** clears the selected blocks' offsets, undo and redo
+hold the offsets before and after, and the List view's Offset box reads the committed value
+at once (the timeline hands the saved sentences to `TranscriptCard`, which folds them in as a
+single adjustment is folded — never a refetch that would drop half-typed words). It commits
+`offset` only — never `start`/`end` — so the transcript still never moves, and trap 3's
+surviving half (**commit on drag end, not per frame**) is closed: the pointer moves paint a
+transform through refs, and the one request goes out on release. As predicted, no new data
+path: `lib/timeline.ts`'s seconds↔pixels and zoom, the blocks positioned from
+`pinned_start`, and the audition re-playing from the plan were what it needed. Not built
+with it: auto-scroll while dragging, and a two-dimensional marquee (the block marquee selects
+by the stretch of time it crosses).
 
 **Phase 4 (optional) — per-segment translation.** `core/translator.py:96-123`
 `translate_notes` already returns a list the same length as its input with failures passing
@@ -711,7 +725,10 @@ each that is a job with a progress bar, not a request.
    The two job writers deliberately do NOT take it: they re-read immediately before saving,
    and `jobs.require_idle` refuses an edit while a job holds the project. **Phase 3b still
    has to commit on drag end, not per frame** — that was the other half of this trap, phase
-   3a shipped no drag at all, and it is the half still outstanding.
+   3a shipped no drag at all, and it is the half still outstanding. *Closed by E3
+   (2026-09-18):* the drag commits once, on release, as one batch `PATCH …/narration/offsets`
+   under this same lock (`edit-timeline.md` §11.3, trap 21); the pointer moves paint a
+   transform and write nothing.
 4. **The transcript PATCH does not take `jobs.require_idle`.** Every slide write does
    (`api/routers/slides.py:42-47`). The new routes must, which adds a 409 the UI has to
    render — `api/app.py:72-74` already maps `ProjectBusy` to it.

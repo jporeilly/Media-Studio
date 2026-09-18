@@ -426,6 +426,15 @@ p { margin: 0 0 8px; }
 .os-tl-header svg { color: var(--tl-muted); flex-shrink: 0; }
 .os-tl-header > span { display: grid; min-width: 0; line-height: 1.2; }
 .os-tl-header small { font-size: 10px; color: var(--tl-muted); white-space: nowrap; }
+/* Camtasia's track header: the name selects the channel (the other track locks), the lock at the right toggles
+   one track. A locked header dims; the selected channel's name carries the brand colour. */
+.os-tl-track-name { flex: 1 1 auto; min-width: 0; padding: 2px 4px; margin: 0 -4px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.os-tl-track-name:hover { background: var(--tl-hover); }
+.os-tl-header.selected .os-tl-track-name { color: var(--brand); font-weight: 600; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 60%, transparent); }
+.os-tl-header.locked { color: var(--tl-muted); }
+.os-tl-lock { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin-left: auto; border: 0; border-radius: 4px; background: transparent; color: var(--tl-muted); cursor: pointer; flex-shrink: 0; }
+.os-tl-lock:hover { background: var(--tl-hover); color: var(--tl-text); }
+.os-tl-header.locked .os-tl-lock { color: var(--tl-join); }
 .os-tl-scroll { overflow-x: auto; overflow-y: hidden; background: var(--tl-bg); }
 .os-tl-body { position: relative; cursor: crosshair; user-select: none; }
 /* The ruler: labels at the top of each major tick, marks at the bottom; the in/out handles and times float over it. */
@@ -453,16 +462,42 @@ p { margin: 0 0 8px; }
 /* preserveAspectRatio="none" on the SVG itself: the path is drawn in bucket units and stretched to the strip. */
 .os-tl-wave { display: block; width: 100%; height: var(--tl-lane-h); background: var(--tl-row); border-bottom: 1px solid var(--tl-line); }
 .os-tl-wave path { fill: var(--tl-audio); opacity: 0.75; }
-.os-tl-blocks { position: relative; height: var(--tl-lane-h); background: var(--tl-row); border-bottom: 1px solid var(--tl-line); }
-.os-tl-block { position: absolute; top: 8px; bottom: 8px; border: 0; border-radius: 4px; padding: 2px 5px; overflow: hidden; text-align: left; font: inherit; font-size: 11px; line-height: 1.3; color: var(--tl-text); cursor: pointer; background: color-mix(in srgb, var(--brand) 34%, transparent); box-shadow: inset 0 0 0 1px var(--brand); }
+.os-tl-blocks { position: relative; height: var(--tl-lane-h); background: var(--tl-row); border-bottom: 1px solid var(--tl-line); touch-action: none; }
+/* A locked lane: dimmed and hatched, as Camtasia greys a locked track. The hatch is drawn on the lane's pieces
+   layer, which sits ABOVE the thumbnails and the waveform (a background on the film lane was hidden under its
+   images, and an SVG takes no pseudo-element), so it shows over every lane in both themes - the panel is dark in
+   both, and the hatch is white at low alpha. */
+.os-tl-film.locked, .os-tl-wave.locked, .os-tl-blocks.locked { opacity: 0.55; }
+/* The pieces: the stretches of a lane between boundaries, what a click selects (Camtasia's clips). The Video and
+   Audio layers sit over their lanes (the film and the waveform are not positioned, so a positioned layer paints
+   above them); the Narration lane's pieces are its own first children, under the blocks. A faint edge at every
+   boundary, a highlight under the pointer. */
+.os-tl-pieces { position: absolute; left: 0; right: 0; height: var(--tl-lane-h); cursor: pointer; }
+.os-tl-pieces.video { top: var(--tl-ruler-h); }
+.os-tl-pieces.audio { top: calc(var(--tl-ruler-h) + var(--tl-lane-h)); }
+.os-tl-pieces.narration { top: 0; }
+.os-tl-pieces.locked { background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.16) 0 5px, transparent 5px 14px); cursor: default; }
+.os-tl-pieces.locked .os-tl-piece:hover { background: none; box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.16), inset -1px 0 0 rgba(0, 0, 0, 0.45); }
+.os-tl-piece { position: absolute; top: 0; bottom: 0; box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.16), inset -1px 0 0 rgba(0, 0, 0, 0.45); }
+.os-tl-piece:hover { background: rgba(255, 255, 255, 0.07); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35); }
+.os-tl-block { position: absolute; top: 8px; bottom: 8px; border: 0; border-radius: 4px; padding: 2px 5px; overflow: hidden; text-align: left; font: inherit; font-size: 11px; line-height: 1.3; color: var(--tl-text); cursor: grab; background: color-mix(in srgb, var(--brand) 34%, transparent); box-shadow: inset 0 0 0 1px var(--brand); touch-action: none; will-change: transform; }
 .os-tl-block:hover { background: color-mix(in srgb, var(--brand) 48%, transparent); }
+.os-tl-block:active { cursor: grabbing; }
 .os-tl-block.selected { background: color-mix(in srgb, var(--brand) 62%, transparent); box-shadow: inset 0 0 0 2px var(--brand); }
+/* Part of the block selection (a drag moves these; the nudge keys act on them): a white rim over the brand's. */
+.os-tl-block.chosen { box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 3px var(--brand); }
 .os-tl-block.muted { background: #333; box-shadow: inset 0 0 0 1px #555; color: var(--tl-muted); }
 .os-tl-block.overrun { box-shadow: inset 0 0 0 1px var(--warn); }
 .os-tl-block.failed { background: color-mix(in srgb, var(--bad) 30%, transparent); box-shadow: inset 0 0 0 1px var(--bad); }
 .os-tl-block-text { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The marquee over the Narration lane (Camtasia's rubber band), and the dragged block's new time beside it -
+   both painted through refs while the pointer moves, never through state. */
+.os-tl-marquee { position: absolute; top: 2px; bottom: 2px; left: 0; z-index: 2; background: var(--tl-select); box-shadow: inset 0 0 0 1px var(--tl-select-edge); pointer-events: none; }
+.os-tl-move-label { position: absolute; top: 0; left: 0; z-index: 3; margin-top: -2px; padding: 1px 4px; border-radius: 3px; background: rgba(37, 99, 235, 0.9); color: #fff; font-size: 10px; line-height: 1.2; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; will-change: transform; }
 /* The original position, shown only once a sentence has been nudged: "what I moved", without a second panel. */
 .os-tl-ghost { position: absolute; top: 8px; bottom: 8px; border: 1px dashed rgba(255, 255, 255, 0.3); border-radius: 4px; pointer-events: none; }
+/* ... and, while a block is being dragged, where it is being dragged from (shown through its ref). */
+.os-tl-ghost.drag { border-color: color-mix(in srgb, var(--brand) 70%, transparent); }
 /* On the CULPRIT, where its clip really ends — the pipeline never re-sorts, so this is the moment the overrun costs. */
 .os-tl-overrun { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--warn); pointer-events: none; }
 /* Siblings of the lanes, not children of one, so they span all of them. The band is painted through its ref while
@@ -470,9 +505,17 @@ p { margin: 0 0 8px; }
    mistake goes unnoticed); the playhead is moved by a transform written straight to the DOM each animation frame
    (a setState per frame would re-render fifteen hundred blocks sixty times a second). */
 .os-tl-selection { position: absolute; top: 0; bottom: 0; left: 0; z-index: 2; background: var(--tl-select); box-shadow: inset 1px 0 0 var(--tl-select-edge), inset -1px 0 0 var(--tl-select-edge); pointer-events: none; }
+/* The band skips a locked lane: below the Video and Audio lanes when the video is locked, above the Narration
+   lane when the narration is; with both locked it has no height and only the ruler's handles show it. */
+.os-tl-selection.no-video { top: calc(var(--tl-ruler-h) + 2 * var(--tl-lane-h)); }
+.os-tl-selection.no-narration { bottom: var(--tl-lane-h); }
 .os-tl-join { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; z-index: 3; background: var(--tl-join); opacity: 0.85; cursor: help; }
 .os-tl-join::before { content: ""; position: absolute; top: 0; left: -4px; width: 10px; height: 6px; background: inherit; clip-path: polygon(0 0, 100% 0, 50% 100%); }
 .os-tl-join.split { background: var(--tl-muted); opacity: 0.7; }
+/* The video's joins span the ruler, the Video and the Audio lanes (the picture's axis); the narration's sit
+   inside its own lane, on top of its pieces and under its blocks. */
+.os-tl-join.picture { bottom: var(--tl-lane-h); }
+.os-tl-join.lane { z-index: auto; }
 .os-tl-playhead { position: absolute; top: 0; bottom: 0; left: 0; width: 1px; z-index: 4; background: var(--tl-playhead); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); pointer-events: none; will-change: transform; }
 /* The head in the ruler: a red tip on the line, grabbable, with the current time beside it as Camtasia prints it. */
 .os-tl-head { position: absolute; top: 0; left: -7px; width: 15px; height: 18px; pointer-events: auto; cursor: ew-resize; touch-action: none; }

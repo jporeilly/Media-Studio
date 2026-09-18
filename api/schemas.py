@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, Strin
 from core.tone_adapter import get_available_tones
 from core.translator import get_available_languages
 from services.ai_slides import CUSTOM_TONE, MAX_ISSUE_CHARS, QA_CRITERIA
-from services.narration import MAX_OFFSET_SECONDS, MAX_SPEED, MAX_VOICE_CHARS, MIN_SPEED
+from services.narration import MAX_OFFSET_BATCH, MAX_OFFSET_SECONDS, MAX_SPEED, MAX_VOICE_CHARS, MIN_SPEED
 from services.slides import MAX_NOTES_CHARS, MAX_PAUSE_SECONDS
 
 # A title-card text: stripped, so a whitespace-only value makes no card, and capped.
@@ -147,10 +147,18 @@ class SegmentOverride(BaseModel):
     speed: StrictFloat | None = Field(None, ge=MIN_SPEED, le=MAX_SPEED)
 
 
+# A kept-ranges list, `[[start, end], ...]` in source seconds.
+Ranges = list[list[StrictFloat | StrictInt]]
+
+
 class EditIn(BaseModel):
-    """PUT /api/projects/{pid}/edit: the whole list of kept ranges of the
-    source, in source seconds, replacing whatever was stored (the list is
-    small; a partial PATCH would buy nothing).
+    """PUT /api/projects/{pid}/edit: the kept ranges of the source, in source
+    seconds, one list per track - ``video`` and ``narration`` -, replacing
+    whatever was stored (the lists are small; a partial PATCH would buy
+    nothing). A track given as null or left out keeps everything. ``keep``
+    is the version-1 body and means BOTH tracks, for curl and any older
+    client; the route refuses it beside a per-track list, and an empty body,
+    with a 400.
 
     The numbers are strict so a boolean is not coerced to 1.0 (an int is still
     fine), and an unknown key is a 422 - ``extra="forbid"``, the lesson
@@ -158,12 +166,39 @@ class EditIn(BaseModel):
     silently. Everything else about a range - its order, an overlap, a bound
     past the source, NaN and infinity (which JSON lets through and a strict
     float accepts) - is ``services.edit.validate_keep``'s to refuse, with a
-    400 that names the range.
+    400 that names the track and the range.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    keep: list[list[StrictFloat | StrictInt]]
+    keep: Ranges | None = None
+    video: Ranges | None = None
+    narration: Ranges | None = None
+
+
+class OffsetIn(BaseModel):
+    """One sentence of the batch offsets PATCH: its index in the stored
+    transcript and its new offset, null clearing the override. The index is
+    strict (a bool or a string is a 422; whether it is IN the transcript is
+    the service's to answer, naming it, with a 400); the offset is bounded
+    and strict exactly as ``SegmentOverride.offset`` is."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: StrictInt
+    offset: StrictFloat | None = Field(None, ge=-MAX_OFFSET_SECONDS, le=MAX_OFFSET_SECONDS)
+
+
+class OffsetsIn(BaseModel):
+    """PATCH /api/projects/{pid}/narration/offsets: several sentences' offsets
+    in ONE request - the timeline's drag, or its Reset timing - applied as one
+    write under the project's lock (``services.narration.update_offsets``).
+    At least one entry; the cap is a bound on abuse, not on use (a two-hour
+    recording has about 1500 sentences)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    offsets: list[OffsetIn] = Field(min_length=1, max_length=MAX_OFFSET_BATCH)
 
 
 class GenerateRequest(BaseModel):

@@ -53,15 +53,24 @@ export interface PlanSentence {
   preview_url: string;
 }
 
+/** One track of the edit: its kept ranges in SOURCE seconds (`null` = everything) and its output's length. */
+export interface EditTrack {
+  keep: Keep | null;
+  output_duration: number | null;
+}
+
 /**
- * The edit as the routes and the plan report it (`services/edit.py::payload`):
- * the kept ranges of the source in SOURCE seconds, `null` meaning everything;
- * the source's length from the WAV header, `null` before transcription; and
- * the output's.
+ * The edit as the routes and the plan report it (`services/edit.py::payload`,
+ * version 2 since E3): one list per track — `video` is the picture's axis
+ * (the filmstrip, the waveform, the transport's seeks), `narration` the
+ * sentences' — each in SOURCE seconds with `null` meaning everything; the
+ * source's length from the WAV header, `null` before transcription; and the
+ * output's, which is the PICTURE's.
  */
 export interface EditPayload {
   version: number;
-  keep: Keep | null;
+  video: EditTrack;
+  narration: EditTrack;
   source_duration: number | null;
   output_duration: number | null;
 }
