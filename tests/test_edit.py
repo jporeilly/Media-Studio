@@ -36,7 +36,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api import store as auth_store
-from services import edit, jobs, narration, processing
+from services import edit, jobs, music, narration, processing
 from services import projects as store
 from utils import helpers
 from utils.config import config
@@ -70,6 +70,9 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(helpers, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(processing, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(narration, "_BASELINE_CACHE", {})
+    # The music library's directory, so a clip list is checked against an
+    # empty (or a test's own) library and never the repo's assets/music.
+    monkeypatch.setattr(music, "MUSIC_DIR", tmp_path / "music")
 
 
 @pytest.fixture(autouse=True)
@@ -130,13 +133,14 @@ def _put_tracks(client, pid, **tracks):
     return client.put(f"/api/projects/{pid}/edit", json=tracks)
 
 
-def _payload(video, narration, source=12.0):
+def _payload(video, narration, source=12.0, music=()):
     """The version-2 answer the routes and the plan carry, for a source of
-    ``source`` seconds: a whole track reports the source's length."""
+    ``source`` seconds: a whole track reports the source's length; ``music``
+    is the clips as read back (with ``file_duration`` and ``missing``)."""
     def track(keep):
         return {"keep": keep, "output_duration": edit.output_duration(keep) if keep else source}
     picture = track(video)
-    return {"version": 2, "video": picture, "narration": track(narration),
+    return {"version": 2, "video": picture, "narration": track(narration), "music": list(music),
             "source_duration": source, "output_duration": picture["output_duration"]}
 
 
@@ -429,6 +433,7 @@ def test_a_project_with_no_edit_keeps_everything(client):
         "version": 2,
         "video": {"keep": None, "output_duration": 12.0},
         "narration": {"keep": None, "output_duration": 12.0},
+        "music": [],
         "source_duration": 12.0,
         "output_duration": 12.0,
     }
@@ -441,6 +446,7 @@ def test_without_extracted_audio_there_is_no_length_to_report(client):
         "version": 2,
         "video": {"keep": None, "output_duration": None},
         "narration": {"keep": None, "output_duration": None},
+        "music": [],
         "source_duration": None,
         "output_duration": None,
     }
@@ -455,6 +461,7 @@ def test_put_stores_the_ranges_and_get_reads_them_back(client):
         "version": 2,
         "video": {"keep": [[0.0, 6.0], [7.5, 12.0]], "output_duration": 10.5},
         "narration": {"keep": [[0.0, 6.0], [7.5, 12.0]], "output_duration": 10.5},
+        "music": [],
         "source_duration": 12.0,
         "output_duration": 10.5,
     }
@@ -514,10 +521,6 @@ def test_the_body_is_strict(client):
     number. NaN and infinity get through pydantic and are the validator's."""
     pid = _video()
     assert client.put(f"/api/projects/{pid}/edit", json={"keep": KEEP, "version": 1}).status_code == 422
-    # No track at all is a well-formed body that names nothing to cut: a 400
-    # that says so, not a 422 (every field is optional since E3).
-    r = client.put(f"/api/projects/{pid}/edit", json={})
-    assert r.status_code == 400 and "at least one track" in r.json()["detail"]
     assert _put(client, pid, [[True, 6.0]]).status_code == 422
     assert _put_tracks(client, pid, video=[[True, 6.0]]).status_code == 422
     assert _put_tracks(client, pid, narration=[["0", 6.0]]).status_code == 422
@@ -706,6 +709,7 @@ def test_an_edit_whose_audio_has_gone_is_read_back_but_not_applied(client):
         "version": 2,
         "video": {"keep": KEEP, "output_duration": 10.5},
         "narration": {"keep": KEEP, "output_duration": 10.5},
+        "music": [],
         "source_duration": None,
         "output_duration": 10.5,
     }
@@ -828,7 +832,9 @@ def test_a_version_1_record_is_read_as_cut_together_and_written_back_as_version_
 
     assert store.get_project(pid)["edit"]["version"] == 1, "read, not rewritten: no migration"
     assert _put_tracks(client, pid, narration=NARRATION).status_code == 200
-    assert store.get_project(pid)["edit"] == {"version": 2, "narration": {"keep": NARRATION}}
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": NARRATION},
+    }, "rewritten as the two tracks it always meant; the one the body did not name keeps the v1 list"
 
 
 def test_a_version_2_record_reads_one_list_per_track():
@@ -935,38 +941,58 @@ def test_put_takes_one_list_per_track_and_the_v1_body_means_both(client):
     assert r.json()["narration"]["output_duration"] == 11.4
     assert _get(client, pid).json() == r.json()
 
+    # One track null, the other not named: the picture is whole again and the
+    # narration's list is exactly where it was.
+    r = _put_tracks(client, pid, video=None)
+    assert r.status_code == 200 and r.json() == _payload(None, NARRATION)
+    assert store.get_project(pid)["edit"] == {"version": 2, "narration": {"keep": NARRATION}}
+    assert _put_tracks(client, pid, video=KEEP, narration=KEEP).status_code == 200
+
     # The version-1 body means both tracks, for curl and any older client...
     assert _put(client, pid, KEEP).json() == _payload(KEEP, KEEP)
 
-    # ... but not beside a per-track list, and not with no track at all.
-    r = client.put(f"/api/projects/{pid}/edit", json={"keep": KEEP, "video": KEEP})
-    assert r.status_code == 400 and "not both" in r.json()["detail"]
-    r = client.put(f"/api/projects/{pid}/edit", json={"video": None, "narration": None})
-    assert r.status_code == 400 and "at least one track" in r.json()["detail"]
+    # ... but not beside a per-track list, whether that list is given or null.
+    for body in ({"keep": KEEP, "video": KEEP}, {"keep": KEEP, "video": None}, {"keep": KEEP, "music": None}):
+        r = client.put(f"/api/projects/{pid}/edit", json=body)
+        assert r.status_code == 400 and "not both" in r.json()["detail"], body
     assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "narration": {"keep": KEEP}}, "refused: nothing written"
+
+    # Both tracks null is "both whole again", not a refusal: with no music
+    # stored there is nothing left to describe, so the key goes entirely -
+    # which is what the client sends when the last cut is undone.
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": None, "narration": None})
+    assert r.status_code == 200 and r.json() == _payload(None, None)
+    assert "edit" not in store.get_project(pid), "an edit that is no edit is removed, as DELETE removes it"
 
 
 def test_a_put_merges_into_the_stored_edit_and_keeps_the_keys_it_does_not_own(client):
-    """``stored_tracks`` lets a key this version does not read (E4's
-    ``music``) ride through on read; the write must not drop it. Only the
-    version and the two tracks are ``set_edit``'s to write: a track not
-    given is removed, and a version-1 ``keep`` never survives under 2."""
+    """``stored_tracks`` lets a key this version does not read ride through
+    on read; the write must not drop it. Only the keys the BODY NAMES are
+    this call's to write - the others, the music included, are left exactly
+    as they were - and a version-1 ``keep`` never survives under 2."""
     pid = _video()
     record = store.get_project(pid)
-    record["edit"] = {"version": 2, "video": {"keep": KEEP}, "music": [{"file": "bed.mp3", "at": 1.0}]}
+    clip = {"id": "m1", "file": "bed.mp3", "at": 1.0, "in": 0.0, "out": 2.0, "gain": 0.2, "fade_in": 0.0, "fade_out": 0.0}
+    record["edit"] = {"version": 2, "video": {"keep": KEEP}, "music": [clip]}
     store.save_project(record)
 
     assert _put_tracks(client, pid, narration=NARRATION).status_code == 200
     assert store.get_project(pid)["edit"] == {
-        "version": 2, "narration": {"keep": NARRATION}, "music": [{"file": "bed.mp3", "at": 1.0}],
-    }, "the music survives; the video track, not given, is removed"
-    assert _get(client, pid).json() == _payload(None, NARRATION)
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": NARRATION}, "music": [clip],
+    }, "the music survives, and so does the video track the body did not name"
+    # Read back with the library's verdict on its file - not in this (empty)
+    # library, so flagged rather than refused (trap 25).
+    assert _get(client, pid).json() == _payload(KEEP, NARRATION, music=[{**clip, "file_duration": None, "missing": True}])
 
+    # A version-1 record is both tracks cut together, so it is rewritten in
+    # the version-2 shape rather than dropped by a PUT that names one track.
     record = store.get_project(pid)
     record["edit"] = {"version": 1, "keep": KEEP, "music": []}
     store.save_project(record)
-    assert _put_tracks(client, pid, video=KEEP).status_code == 200
-    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "music": []}
+    assert _put_tracks(client, pid, video=[[0.0, 12.0]]).status_code == 200
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": [[0.0, 12.0]]}, "narration": {"keep": KEEP}, "music": [],
+    }, "the v1 list became the narration's; the video's was replaced"
 
 
 def test_a_bad_track_is_a_400_that_names_the_track_and_the_range_and_stores_nothing(client):
@@ -984,16 +1010,42 @@ def test_a_bad_track_is_a_400_that_names_the_track_and_the_range_and_stores_noth
 
 
 def test_the_audit_summary_is_per_track_and_never_carries_times(client):
+    """The summary describes the edit as it now STANDS, not the keys the
+    body happened to name."""
     pid = _video()
     assert _put_tracks(client, pid, video=KEEP).status_code == 200
     assert _put_tracks(client, pid, narration=[[0.5, 12.0]]).status_code == 200
+    assert _put_tracks(client, pid, video=None).status_code == 200
     assert _put_tracks(client, pid, video=[[0.0, 6.0], [6.0, 12.0]], narration=NARRATION).status_code == 200
     assert [row["detail"] for row in _edit_rows()] == [
         "video: 2 ranges kept, 0.0 s removed; narration: 2 ranges kept, 0.6 s removed",
         "video: whole; narration: 1 range kept, 0.5 s removed",
+        "video: 2 ranges kept, 1.5 s removed; narration: 1 range kept, 0.5 s removed",
         "video: 2 ranges kept, 1.5 s removed; narration: whole",
     ]
     assert not any("7.5" in row["detail"] or "6.4" in row["detail"] for row in _edit_rows())
+
+
+def test_a_body_that_names_nothing_changes_nothing_and_records_nothing(client, monkeypatch):
+    """``{}`` is a 200 that answers with the edit as it stands - nothing
+    written, nothing forgotten, no audit row - exactly as a ``DELETE`` with
+    nothing to clear is. It was a 400, which made an empty commit an error
+    the client had to special-case."""
+    pid = _video()
+    assert _put_tracks(client, pid, video=KEEP).status_code == 200
+    before = (store.PROJECTS_DIR / pid / "project.json").read_bytes()
+    monkeypatch.setattr(store, "save_project", lambda record: pytest.fail("nothing to write, and it wrote"))
+
+    for body in ({}, {"keep": None}):
+        r = client.put(f"/api/projects/{pid}/edit", json=body)
+        assert r.status_code == 200, (body, r.text)
+        assert r.json() == _payload(KEEP, None), body
+    assert (store.PROJECTS_DIR / pid / "project.json").read_bytes() == before
+    assert [row["detail"] for row in _edit_rows()] == ["video: 2 ranges kept, 1.5 s removed; narration: whole"], (
+        "one row, for the one PUT that changed something"
+    )
+    stored, changed = edit.set_edit(pid)
+    assert changed is False and stored == _payload(KEEP, None), "the service answers the same way"
 
 
 def test_the_plan_projects_only_through_the_narration_list(client):
@@ -1016,7 +1068,9 @@ def test_the_plan_projects_only_through_the_narration_list(client):
     assert plan["sentences"][4]["past_end"] is True and plan["sentences"][4]["speakable"] is False
 
     # Narration only: the picture is whole and 12 s long; the sentences move.
-    assert _put_tracks(client, pid, narration=NARRATION).status_code == 200
+    # (The video list is cleared explicitly - a key the body does not name is
+    # left as it is.)
+    assert _put_tracks(client, pid, video=None, narration=NARRATION).status_code == 200
     plan = _plan(client, pid)
     assert plan["duration"] == 12.0 and plan["edit"] == _payload(None, NARRATION)
     assert [s["index"] for s in plan["sentences"]] == [0, 1, 3, 4]
@@ -1032,3 +1086,430 @@ def test_the_plan_projects_only_through_the_narration_list(client):
     assert plan["sentences"][3]["pinned_start"] == pytest.approx(10.4)
     assert plan["sentences"][3]["past_end"] is False, "10.4 is inside the 10.5 s picture"
     assert plan["sentences"][3]["window"] == pytest.approx(1.0), "to its own end, 11.4, which lies past the picture"
+
+
+# ── the music lane (E4a): clips on the output axis ────────────────────────────
+
+# The library as the edit sees it: name -> recorded length. No file on disk is
+# needed to validate a clip list, only the index's lengths.
+LIBRARY = {"bed.mp3": 30.0, "sting.wav": 4.5}
+
+
+def _clip(**over) -> dict:
+    """A valid clip on ``bed.mp3``; ``over`` replaces fields, and a value of
+    ``...`` removes one. ``in`` is a keyword, so it is spelled by unpacking:
+    ``{**_clip(), "in": 5.0}``."""
+    clip = {"id": "m1", "file": "bed.mp3", "at": 1.0, "in": 0.0, "out": 10.0,
+            "gain": 0.15, "fade_in": 1.0, "fade_out": 2.0}
+    for key, value in over.items():
+        if value is ...:
+            clip.pop(key)
+        else:
+            clip[key] = value
+    return clip
+
+
+def _read_back(clip: dict, library: dict = LIBRARY) -> dict:
+    """A stored clip as the routes and the plan report it."""
+    duration = library.get(clip["file"])
+    return {**clip, "file_duration": duration, "missing": duration is None}
+
+
+@pytest.fixture
+def library(monkeypatch):
+    """The music library's index as the edit reads it, with no file on disk."""
+    monkeypatch.setattr(music, "library", lambda: dict(LIBRARY))
+    return dict(LIBRARY)
+
+
+CLIP_A = _clip(id="a", file="sting.wav", at=0.5, out=4.5, fade_in=0.5, fade_out=0.5)
+CLIP_B = _clip(id="b", at=12.5, out=20.0)
+
+
+def test_valid_clips_come_back_rounded_typed_and_sorted_by_at():
+    late = {**_clip(id="late"), "at": 20.0004, "in": 5.0, "out": 29.9996, "gain": 1, "fade_in": 0, "fade_out": 0}
+    early = {**_clip(id="early", file="sting.wav"), "at": 0, "out": 4.5, "fade_in": 0.5, "fade_out": 0.5}
+    tied = {**_clip(id="tied"), "at": -0.0004, "out": 1, "fade_in": 0, "fade_out": 0}
+    checked = edit.validate_music([late, early, tied], LIBRARY)
+    assert [c["id"] for c in checked] == ["early", "tied", "late"], "sorted by at; equal starts keep their order"
+    assert checked[2] == {"id": "late", "file": "bed.mp3", "at": 20.0, "in": 5.0, "out": 30.0,
+                          "gain": 1.0, "fade_in": 0.0, "fade_out": 0.0}, "rounded to 3 dp, ints as floats"
+    assert all(isinstance(v, float) for c in checked for k, v in c.items() if k not in ("id", "file"))
+    assert str(checked[1]["at"]) == "0.0", "a hair under zero is zero, never -0.0"
+    assert edit.validate_music([], LIBRARY) == [], "an empty list is no music, and is allowed"
+    # The list handed in is not touched.
+    assert late["at"] == 20.0004
+
+
+def test_the_edges_of_every_bound_are_allowed():
+    ten = _clip(fade_in=4.0, fade_out=6.0)                      # the fades fill the clip exactly
+    to_the_end = {**_clip(id="e"), "in": 20.0, "out": 30.0}     # out at the file's end
+    rounds_in = {**_clip(id="r"), "out": 30.0004}               # rounds to the end
+    shortest = {**_clip(id="s", fade_in=0.05, fade_out=0.05), "in": 0.1, "out": 0.2}  # exactly 0.1 s
+    silent = _clip(id="z", gain=0)
+    checked = edit.validate_music([ten, to_the_end, rounds_in, shortest, silent], LIBRARY)
+    assert [c["out"] for c in checked] == [10.0, 30.0, 30.0, 0.2, 10.0]
+
+
+@pytest.mark.parametrize("clips, message", [
+    ("nope", "The music must be a list of clips"),
+    ({"id": "m1"}, "The music must be a list of clips"),
+    ([1], "music clip 1 must be an object with id, file, at, in, out, gain, fade_in, fade_out"),
+    ([_clip(gain=...)], "music clip 1 (m1): missing gain; a clip has exactly id, file, at, in, out, gain, fade_in, fade_out"),
+    ([_clip(extra=1)], "music clip 1 (m1): unknown extra; a clip has exactly"),
+    ([_clip(gain=..., extra=1)], "music clip 1 (m1): missing gain and unknown extra"),
+    ([_clip(id="")], "music clip 1: id must be 1-32 characters of a-z, 0-9, _ or -"),
+    ([_clip(id="Bad ID")], "music clip 1: id must be"),
+    ([_clip(id="x" * 33)], "music clip 1: id must be"),
+    ([_clip(id=7)], "music clip 1: id must be"),
+    ([_clip(), _clip(at=2.0)], "music clip 2 (m1): id 'm1' is already used by music clip 1"),
+    ([_clip(id="a"), _clip(id="m3f9a1", file="x.mp3")], "music clip 2 (m3f9a1): file 'x.mp3' is not in the library"),
+    ([_clip(file="")], "music clip 1 (m1): file must be the name of a library file"),
+    ([_clip(file=3)], "file must be the name of a library file"),
+    ([_clip(at=True)], "music clip 1 (m1): at must be a number"),
+    ([_clip(at="1")], "at must be a number"),
+    ([_clip(at=None)], "at must be a number"),
+    ([_clip(gain=float("nan"))], "music clip 1 (m1): gain must be a finite number"),
+    ([_clip(out=float("inf"))], "out must be a finite number"),
+    ([_clip(at=int("1" + "0" * 400))], "at must be a finite number"),
+    ([_clip(at=-0.5)], "music clip 1 (m1): at (-0.500) starts before 0"),
+    ([{**_clip(), "in": -1.0}], "music clip 1 (m1): in (-1.000) starts before 0"),
+    ([{**_clip(), "in": 10.0}], "music clip 1 (m1): out (10.000) must be after in (10.000)"),
+    ([{**_clip(), "in": 11.0}], "must be after in"),
+    ([{**_clip(fade_in=0, fade_out=0), "in": 5.0, "out": 5.05}], "music clip 1 (m1): the clip (0.050 s from in to out) is shorter than 0.1 s"),
+    ([_clip(out=30.001)], "music clip 1 (m1): out (30.001) runs past the end of 'bed.mp3', which is 30.000 s long"),
+    ([_clip(gain=-0.1)], "music clip 1 (m1): gain (-0.100) must be between 0 and 1"),
+    ([_clip(gain=1.001)], "gain (1.001) must be between 0 and 1"),
+    ([_clip(fade_in=-1)], "music clip 1 (m1): fade_in and fade_out must be 0 s or more"),
+    ([_clip(fade_out=-0.001)], "fade_in and fade_out must be 0 s or more"),
+    ([_clip(fade_in=5, fade_out=5.001)], "music clip 1 (m1): fade_in + fade_out (10.001 s) is longer than the clip (10.000 s)"),
+])
+def test_a_bad_clip_is_refused_by_position_id_and_field(clips, message):
+    with pytest.raises(ValueError) as exc:
+        edit.validate_music(clips, LIBRARY)
+    assert message in str(exc.value), str(exc.value)
+
+
+def test_a_clip_list_long_enough_to_be_an_attack_on_the_record_is_refused():
+    many = [_clip(id=f"c{i}", at=float(i)) for i in range(edit.MAX_CLIPS + 1)]
+    with pytest.raises(ValueError) as exc:
+        edit.validate_music(many, LIBRARY)
+    assert f"limited to {edit.MAX_CLIPS} clips" in str(exc.value)
+    assert len(edit.validate_music(many[:-1], LIBRARY)) == edit.MAX_CLIPS
+
+
+def test_stored_music_reads_absent_none_and_empty_as_no_music():
+    for record in ({}, {"edit": None}, {"edit": {"version": 2}}, {"edit": {"version": 2, "music": None}},
+                   {"edit": {"version": 2, "music": []}}, {"edit": {"version": 1, "keep": KEEP}}):
+        assert edit.stored_music(record, LIBRARY) == [], record
+
+
+def test_stored_music_reads_the_clips_back_with_their_files_lengths(library):
+    record = {"edit": {"version": 2, "video": {"keep": KEEP}, "music": [CLIP_B, CLIP_A]}}
+    assert edit.stored_music(record, LIBRARY) == [_read_back(CLIP_A), _read_back(CLIP_B)], "sorted, annotated"
+    assert edit.stored_music(record) == edit.stored_music(record, LIBRARY), "no library given: the index is read"
+    # The record's clips are not touched.
+    assert "missing" not in record["edit"]["music"][0]
+
+
+def test_a_file_that_left_the_library_is_flagged_on_read_never_refused():
+    """Trap 25: the clip comes back marked, its slice unbounded (the file's
+    length is unknown now); storing it again would be refused."""
+    gone = _clip(file="gone.mp3", out=999.0)
+    record = {"edit": {"version": 2, "music": [gone]}}
+    (clip,) = edit.stored_music(record, LIBRARY)
+    assert clip == {**gone, "file_duration": None, "missing": True}
+    with pytest.raises(ValueError) as exc:
+        edit.validate_music([gone], LIBRARY)
+    assert "file 'gone.mp3' is not in the library" in str(exc.value)
+
+
+def test_a_broken_clip_list_is_refused_on_read_naming_the_clip():
+    """As an unreadable track list is (E1's rule): never a silent no-music."""
+    with pytest.raises(ValueError) as exc:
+        edit.stored_music({"edit": {"version": 2, "music": [_clip(gain="loud")]}}, LIBRARY)
+    assert "This project's music cannot be read (music clip 1 (m1): gain must be a number.)" in str(exc.value)
+    assert "clear the edit" in str(exc.value)
+    with pytest.raises(ValueError):
+        edit.stored_music({"edit": {"version": 2, "music": "bed.mp3"}}, LIBRARY)
+    with pytest.raises(ValueError) as exc:
+        edit.stored_music({"edit": "nope"}, LIBRARY)
+    assert "different version" in str(exc.value)
+
+
+def test_apply_carries_the_music_and_changes_nothing_else():
+    transcript = [dict(s) for s in SEGMENTS]
+    untouched = edit.apply({}, transcript, 12.0, LIBRARY)
+    assert untouched.music == [] and untouched.sentences is transcript
+
+    music_only = edit.apply({"edit": {"version": 2, "music": [CLIP_B, CLIP_A]}}, transcript, 12.0, LIBRARY)
+    assert music_only.music == [_read_back(CLIP_A), _read_back(CLIP_B)]
+    assert (music_only.cut, music_only.projected) == (False, False)
+    assert music_only.sentences is transcript, "music is placed on the output; it projects nothing"
+    assert (music_only.output_duration, music_only.narration_duration) == (12.0, 12.0)
+    assert edit.apply({"edit": {"version": 2, "music": [CLIP_A]}}, transcript, None, LIBRARY).music == [_read_back(CLIP_A)], (
+        "a music-only edit needs no source length"
+    )
+
+    both = edit.apply({"edit": {"version": 2, "video": {"keep": KEEP}, "music": [CLIP_A]}}, transcript, 12.0, LIBRARY)
+    assert both.cut is True and both.music == [_read_back(CLIP_A)] and both.output_duration == 10.5
+    # And a record whose tracks this version cannot read is still refused, music or not.
+    with pytest.raises(ValueError):
+        edit.apply({"edit": {"version": 3, "music": [CLIP_A]}}, transcript, 12.0, LIBRARY)
+
+
+def test_set_edit_writes_only_the_keys_it_is_given_and_clears_on_none_or_empty(library):
+    """One rule for all three: UNCHANGED (the default) leaves a key exactly
+    as it is, ``None`` clears it - a track back to whole, the music gone -
+    and a list replaces it. So a cut never drops the clips and a clip
+    commit never drops the cut."""
+    pid = _video()
+    stored, changed = edit.set_edit(pid, music=[CLIP_B, CLIP_A])
+    assert changed and stored == _payload(None, None, music=[_read_back(CLIP_A), _read_back(CLIP_B)]), (
+        "a music-only edit is an edit"
+    )
+    assert store.get_project(pid)["edit"] == {"version": 2, "music": [CLIP_A, CLIP_B]}, "sorted; nothing derived is stored"
+
+    edit.set_edit(pid, video=KEEP)
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "music": [CLIP_A, CLIP_B]}, (
+        "UNCHANGED: a cut leaves the clips exactly as they were"
+    )
+    stored, _ = edit.set_edit(pid, narration=NARRATION)
+    assert stored["music"] == [_read_back(CLIP_A), _read_back(CLIP_B)], "and answers with them"
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": NARRATION}, "music": [CLIP_A, CLIP_B],
+    }, "and the video list it was not given"
+
+    edit.set_edit(pid, music=[CLIP_A])
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": NARRATION}, "music": [CLIP_A],
+    }, "a music-only call leaves both track lists alone"
+
+    stored, _ = edit.set_edit(pid, video=None, narration=None)
+    assert stored == _payload(None, None, music=[_read_back(CLIP_A)]), "null: the tracks are whole, the music kept"
+    assert store.get_project(pid)["edit"] == {"version": 2, "music": [CLIP_A]}
+
+    edit.set_edit(pid, video=KEEP, music=[])
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}}, "[] clears"
+    edit.set_edit(pid, music=[CLIP_A])
+    edit.set_edit(pid, narration=NARRATION, music=None)
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": NARRATION},
+    }, "None clears"
+
+    stored, changed = edit.set_edit(pid)
+    assert changed is False, "nothing given: a no-op, not a refusal"
+    assert stored == _payload(KEEP, NARRATION)
+
+    before = (store.PROJECTS_DIR / pid / "project.json").read_bytes()
+    with pytest.raises(ValueError) as exc:
+        edit.set_edit(pid, video=KEEP, music=[_clip(file="x.mp3")])
+    assert "file 'x.mp3' is not in the library" in str(exc.value)
+    assert (store.PROJECTS_DIR / pid / "project.json").read_bytes() == before, "validated before the lock: nothing written"
+
+
+def test_an_edit_that_is_no_edit_is_removed_rather_than_stored(library):
+    """``{"music": []}`` on a project that has none must not leave
+    ``{"version": 2}`` behind: a record with an edit that says nothing reads
+    as edited everywhere it is looked at, and ``clear_edit`` would then
+    report it as cleared."""
+    pid = _video()
+    stored, changed = edit.set_edit(pid, music=[])
+    assert changed and stored == _payload(None, None)
+    assert "edit" not in store.get_project(pid)
+
+    edit.set_edit(pid, video=KEEP, music=[CLIP_A])
+    edit.set_edit(pid, video=None, music=None)
+    assert "edit" not in store.get_project(pid), "the last key cleared takes the edit with it"
+
+    # A key this version does not read rides through only while a track or
+    # the music is still there to describe.
+    record = store.get_project(pid)
+    record["edit"] = {"version": 2, "video": {"keep": KEEP}, "captions": {"style": "bold"}}
+    store.save_project(record)
+    edit.set_edit(pid, narration=NARRATION)
+    assert store.get_project(pid)["edit"]["captions"] == {"style": "bold"}
+    edit.set_edit(pid, video=None, narration=None)
+    assert "edit" not in store.get_project(pid)
+
+
+def test_a_corrupt_stored_clip_list_refuses_a_cut_before_it_is_written(library):
+    """The read-back is built INSIDE the lock and before ``save_project``:
+    a hand-edited record whose music cannot be read refuses the call rather
+    than landing the cut and then raising on the way out with the write
+    already done."""
+    pid = _video()
+    record = store.get_project(pid)
+    record["edit"] = {"version": 2, "music": [{"id": "x"}]}
+    store.save_project(record)
+    before = (store.PROJECTS_DIR / pid / "project.json").read_bytes()
+
+    with pytest.raises(ValueError) as exc:
+        edit.set_edit(pid, video=KEEP)
+    assert "This project's music cannot be read" in str(exc.value)
+    assert (store.PROJECTS_DIR / pid / "project.json").read_bytes() == before, "the cut was not written"
+
+    # The same for a stored TRACK list this version cannot read...
+    record["edit"] = {"version": 2, "narration": {"keep": [[5.0, 1.0]]}}
+    store.save_project(record)
+    before = (store.PROJECTS_DIR / pid / "project.json").read_bytes()
+    with pytest.raises(ValueError) as exc:
+        edit.set_edit(pid, music=[CLIP_A])
+    assert "must end after it starts" in str(exc.value)
+    assert (store.PROJECTS_DIR / pid / "project.json").read_bytes() == before
+    # ... and replacing the unreadable list is still the way out.
+    edit.set_edit(pid, narration=NARRATION, music=[CLIP_A])
+    assert store.get_project(pid)["edit"] == {"version": 2, "narration": {"keep": NARRATION}, "music": [CLIP_A]}
+
+
+def test_a_music_only_edit_needs_no_extracted_audio(library):
+    """The clips are measured against the library, not the source; a track
+    list still needs the audio's length."""
+    pid = _video(audio_seconds=None)
+    stored, _ = edit.set_edit(pid, music=[CLIP_A])
+    assert stored == _payload(None, None, source=None, music=[_read_back(CLIP_A)])
+    with pytest.raises(edit.SourceLengthUnknown):
+        edit.set_edit(pid, video=KEEP)
+
+
+def test_clear_edit_removes_the_music_with_the_tracks(library):
+    pid = _video()
+    edit.set_edit(pid, video=KEEP, music=[CLIP_A])
+    cleared, had = edit.clear_edit(pid)
+    assert had and cleared == _payload(None, None) and "edit" not in store.get_project(pid)
+
+
+# the routes and the plan
+
+def test_put_stores_the_music_and_the_get_and_the_plan_carry_it(client, library):
+    pid = _video()
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": KEEP, "music": [CLIP_B, CLIP_A]})
+    assert r.status_code == 200, r.text
+    expected = _payload(KEEP, None, music=[_read_back(CLIP_A), _read_back(CLIP_B)])
+    assert r.json() == expected
+    assert _get(client, pid).json() == expected
+    assert _plan(client, pid)["edit"] == expected, "the plan's edit block carries the clips the lane draws"
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "music": [CLIP_A, CLIP_B]}
+    assert [row["detail"] for row in _edit_rows()] == [
+        "video: 2 ranges kept, 1.5 s removed; narration: whole; music: 2 clips",
+    ]
+    assert not any("sting" in row["detail"] or "12.5" in row["detail"] for row in _edit_rows()), "never a file or a position"
+
+
+def test_a_key_the_put_does_not_name_is_left_exactly_as_it_was(client, library):
+    """One rule for the two tracks and the music alike (trap 32): E3's
+    client sends its tracks and no ``music``, and E4b's lane sends ``music``
+    and no tracks - neither may drop what it did not send."""
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A]}).status_code == 200
+    assert store.get_project(pid)["edit"] == {"version": 2, "music": [CLIP_A]}, "a music-only body is allowed"
+
+    assert _put_tracks(client, pid, video=KEEP).status_code == 200
+    assert store.get_project(pid)["edit"]["music"] == [CLIP_A], "a per-track cut keeps it"
+    assert _put(client, pid, KEEP).status_code == 200
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "narration": {"keep": KEEP}, "music": [CLIP_A]}, (
+        "so does the version-1 body"
+    )
+    assert _get(client, pid).json()["music"] == [_read_back(CLIP_A)]
+
+    # And the other way round: a music-only commit keeps BOTH track lists,
+    # which is what E4b sends on every clip add, move, gain and fade change.
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B]}).status_code == 200
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": KEEP}, "music": [CLIP_B],
+    }, "the picture's cut survives a clip commit"
+
+    r = client.put(f"/api/projects/{pid}/edit", json={"narration": NARRATION, "music": None})
+    assert r.status_code == 200 and r.json()["music"] == []
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": NARRATION},
+    }, "null clears the music; the video list is not this body's business"
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A]}).status_code == 200
+    r = client.put(f"/api/projects/{pid}/edit", json={"narration": None, "music": []})
+    assert r.status_code == 200 and store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}}, "[] clears"
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": None})
+    assert r.status_code == 200 and "edit" not in store.get_project(pid), "the last key cleared takes the edit with it"
+
+    details = [row["detail"] for row in _edit_rows()]  # newest first
+    assert details[-1] == "video: whole; narration: whole; music: 1 clip"
+    assert details[0] == "video: whole; narration: whole", "no clips, no music part"
+
+
+def test_a_music_only_put_on_an_unedited_project_stores_nothing_when_it_clears(client, library):
+    """``{"music": []}`` where there is no music writes an edit that is no
+    edit - ``{"version": 2}`` - unless the empty merge removes the key."""
+    pid = _video()
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": []})
+    assert r.status_code == 200 and r.json() == _payload(None, None)
+    assert "edit" not in store.get_project(pid)
+    assert [row["detail"] for row in _edit_rows()] == ["video: whole; narration: whole"]
+    # And the GET agrees: a project that reads as one that never had an edit.
+    assert _get(client, pid).json() == _payload(None, None)
+
+
+def test_keep_beside_music_is_a_400_like_keep_beside_a_track(client, library):
+    pid = _video()
+    for body in ({"keep": KEEP, "music": [CLIP_A]}, {"keep": KEEP, "music": None}):
+        r = client.put(f"/api/projects/{pid}/edit", json=body)
+        assert r.status_code == 400 and "not both" in r.json()["detail"], body
+    assert "edit" not in store.get_project(pid)
+
+
+def test_a_clip_body_is_strict(client, library):
+    """``extra="forbid"`` and strict numbers on every clip; the JSON key is
+    ``in`` and nothing else; NaN reaches the validator and is its 400."""
+    pid = _video()
+    bad = [
+        {"music": [{**CLIP_A, "extra": 1}]},
+        {"music": [{k: v for k, v in CLIP_A.items() if k != "in"} | {"in_": 0.0}]},
+        {"music": [{k: v for k, v in CLIP_A.items() if k != "gain"}]},
+        {"music": [{**CLIP_A, "gain": True}]},
+        {"music": [{**CLIP_A, "at": "1"}]},
+        {"music": [{**CLIP_A, "id": 7}]},
+        {"music": "nope"},
+        {"music": [1]},
+    ]
+    for body in bad:
+        assert client.put(f"/api/projects/{pid}/edit", json=body).status_code == 422, body
+    nan = ('{"music": [{"id": "a", "file": "bed.mp3", "at": NaN, "in": 0, "out": 1, '
+           '"gain": 0.1, "fade_in": 0, "fade_out": 0}]}')
+    r = client.put(f"/api/projects/{pid}/edit", content=nan, headers={"content-type": "application/json"})
+    assert r.status_code == 400 and "at must be a finite number" in r.json()["detail"]
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [{**CLIP_A, "at": 0, "gain": 1}]}).status_code == 200, "ints are fine"
+    assert store.get_project(pid)["edit"]["music"] == [{**CLIP_A, "at": 0.0, "gain": 1.0}]
+
+
+def test_a_clip_naming_a_file_not_in_the_library_is_a_400_naming_the_clip(client, library):
+    pid = _video()
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": KEEP, "music": [CLIP_A, _clip(id="m3f9a1", file="x.mp3")]})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "music clip 2 (m3f9a1): file 'x.mp3' is not in the library."
+    assert "edit" not in store.get_project(pid), "nothing stored, the video list included"
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [_clip(out=31.0)]})
+    assert r.status_code == 400 and "runs past the end of 'bed.mp3'" in r.json()["detail"]
+
+
+def test_delete_clears_the_music_too(client, library):
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"video": KEEP, "music": [CLIP_A]}).status_code == 200
+    r = client.delete(f"/api/projects/{pid}/edit")
+    assert r.status_code == 200 and r.json() == _payload(None, None)
+    assert "edit" not in store.get_project(pid)
+    assert _get(client, pid).json()["music"] == []
+    assert [row["detail"] for row in _edit_rows()] == ["cleared", "video: 2 ranges kept, 1.5 s removed; narration: whole; music: 1 clip"]
+
+
+def test_a_file_that_left_the_library_is_reported_missing_by_the_get_and_the_plan(client, library, monkeypatch):
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
+    monkeypatch.setattr(music, "library", lambda: {"bed.mp3": 30.0})  # sting.wav has gone
+
+    gone = {**CLIP_A, "file_duration": None, "missing": True}
+    assert _get(client, pid).json()["music"] == [gone, _read_back(CLIP_B)]
+    assert _plan(client, pid)["edit"]["music"] == [gone, _read_back(CLIP_B)]
+    # Sending the list back as it is - the missing clip included - is refused
+    # (checked to exist at write time); dropping the clip is accepted.
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]})
+    assert r.status_code == 400 and "file 'sting.wav' is not in the library" in r.json()["detail"]
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B]}).status_code == 200
+    assert _get(client, pid).json()["music"] == [_read_back(CLIP_B)]

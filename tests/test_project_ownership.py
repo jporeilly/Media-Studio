@@ -71,6 +71,22 @@ PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
     ("POST", "/api/projects/{pid}/slides/{index}/ai/qa-fix"): {"criterion": "grammar", "issue": "x"},
 }
 
+# Routes that carry no ``{pid}`` ON PURPOSE and so are outside the sweep: the
+# music library (api/routers/music.py) is STUDIO-WIDE - shared by every account
+# like the voices and the studio settings (spec §12.3) - so every signed-in
+# user may list, upload and delete, and the audit row says who. They need a
+# session (401 signed out, held by tests/test_music_library.py) but have no
+# owner to check. Listed here so the decision is visible beside the table, and
+# so the guard below fails if one of them ever grows a project id without
+# joining the table.
+STUDIO_WIDE_ROUTES: set[tuple[str, str]] = {
+    ("GET", "/api/music"),
+    ("POST", "/api/music"),
+    ("GET", "/api/music/{name}"),
+    ("GET", "/api/music/{name}/peaks"),
+    ("DELETE", "/api/music/{name}"),
+}
+
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
@@ -272,6 +288,16 @@ def test_the_sweep_covers_every_project_scoped_route_the_app_has(routes):
         f"so nothing checks that they refuse another editor: {missing}"
     )
     assert not stale, f"PROJECT_SCOPED_ROUTES names routes the app no longer has: {stale}"
+
+
+def test_the_studio_wide_routes_are_live_and_carry_no_project(routes):
+    """The exclusion list must rot too: each route it names exists, and none
+    of them takes a project id (the moment one did, it would belong in the
+    table above, and the guard above would say so)."""
+    live = {(r.method, r.path) for r in routes}
+    missing = sorted(STUDIO_WIDE_ROUTES - live)
+    assert not missing, f"STUDIO_WIDE_ROUTES names routes the app does not have: {missing}"
+    assert not any("{pid}" in path for _, path in STUDIO_WIDE_ROUTES)
 
 
 def test_the_services_a_job_runs_never_re_check_ownership():

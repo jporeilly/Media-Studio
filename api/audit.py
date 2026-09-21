@@ -66,6 +66,12 @@ PROJECT_REVOICE = "project.revoice"
 # the times, which would say where every cut is, and never any text.
 PROJECT_EDIT = "project.edit"
 
+# The music library (``services.music``): studio-wide, so the row is what says
+# who put a file there or took it away. The detail carries the name and the
+# size, no more.
+MUSIC_UPLOAD = "music.upload"
+MUSIC_DELETE = "music.delete"
+
 # The slide editor.
 SLIDES_UPDATE = "slides.update"
 SLIDES_BULK_UPDATE = "slides.bulk_update"
@@ -95,13 +101,14 @@ ACTIONS: tuple[str, ...] = (
     SETTINGS_UPDATE, SETTINGS_PASSWORD_POLICY,
     PROJECT_IMPORT, PROJECT_DELETE, PROJECT_TRANSCRIBE, PROJECT_TRANSCRIPT_EDIT,
     PROJECT_TRANSCRIPT_TIMING, PROJECT_GENERATE, PROJECT_REVOICE, PROJECT_EDIT,
+    MUSIC_UPLOAD, MUSIC_DELETE,
     SLIDES_UPDATE, SLIDES_BULK_UPDATE, SLIDES_RENDER, SLIDES_UNDO, SLIDES_RESET,
     AI_NOTES, AI_ENHANCE, AI_QA, AI_TONE, AI_TRANSLATE, AI_PACING, AI_QA_DOC, AI_QA_FIX,
     JOB_CANCEL, SYSTEM_UPDATE, SYSTEM_RESTART, AUDIT_PURGE,
 )
 
 # What the action was done to (the ``entity`` column).
-ENTITIES: tuple[str, ...] = ("auth", "user", "settings", "project", "job", "system", "audit")
+ENTITIES: tuple[str, ...] = ("auth", "user", "settings", "project", "music", "job", "system", "audit")
 
 
 def audit(action: str, *, user: dict | None = None, username: str | None = None,

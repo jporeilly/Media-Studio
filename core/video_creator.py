@@ -438,6 +438,31 @@ def _stop(proc) -> None:
         pass
 
 
+def _run_until_done(cmd, log: Path, timeout: float, cancelled) -> tuple[str, "subprocess.Popen"]:
+    """Run one ffmpeg command with its stderr in ``log`` (a file, never a
+    pipe nobody reads: a chatty run would fill it and stall), polling it
+    every ``CUT_POLL_SECONDS`` until it exits, ``cancelled()`` answers True
+    or ``timeout`` seconds pass - and killing it on either of the last two.
+    Returns the outcome (``"finished"``, ``"cancelled"``, ``"timeout"``) and
+    the process, whose ``returncode`` the caller reads when it finished. The
+    one loop the picture cut and the music mix share."""
+    with open(log, "w", encoding="utf-8", errors="replace") as err:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+        deadline = _clock() + timeout
+        outcome = "finished"
+        while proc.poll() is None:
+            if cancelled():
+                outcome = "cancelled"
+                break
+            if _clock() >= deadline:
+                outcome = "timeout"
+                break
+            time.sleep(CUT_POLL_SECONDS)
+        if outcome != "finished":
+            _stop(proc)
+    return outcome, proc
+
+
 def cut_picture(
     source, keep, dst, video_bitrate: str = "",
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -527,20 +552,7 @@ def cut_picture(
         dst.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Cutting the picture: %d range(s), %.1fs kept, %.1fs of %s decoded",
                     len(keep), length, reach, source.name)
-        with open(log, "w", encoding="utf-8", errors="replace") as err:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
-            deadline = _clock() + timeout
-            outcome = "finished"
-            while proc.poll() is None:
-                if _cancelled():
-                    outcome = "cancelled"
-                    break
-                if _clock() >= deadline:
-                    outcome = "timeout"
-                    break
-                time.sleep(CUT_POLL_SECONDS)
-            if outcome != "finished":
-                _stop(proc)
+        outcome, proc = _run_until_done(cmd, log, timeout, _cancelled)
         if outcome == "cancelled":
             logger.info("Picture cut cancelled; ffmpeg stopped and the cut discarded")
             return False
@@ -562,6 +574,201 @@ def cut_picture(
         return True
     except Exception as e:
         logger.error("Error cutting the picture: %s", e)
+        return False
+    finally:
+        # No-ops after a successful publish; the cleanup on every other exit.
+        for leftover in (part, log):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+# The one step that makes any input two channels before it is mixed, at
+# UNITY: ``pan`` takes exactly the channels its mapping names and drops every
+# other one, present or not, so mono (FC alone) becomes L = R = M and stereo
+# passes through untouched - one string for both, with nothing probed
+# (traps 2, 30). ``aformat=channel_layouts=stereo`` is the trap it replaces:
+# its rematrix is power-preserving, so a mono narration arrived 3.01 dB down
+# (measured on ffmpeg 8.0.1 and on the bundled 7.1).
+#
+# The cost of one static mapping is a layout with MORE than two channels: a
+# 5.1 clip keeps FL, FR and FC and loses LFE, BL and BR, and its FC arrives
+# at unity where a standard down-mix would take it to 0.7071 (measured).
+# Mono and stereo are what the app makes and what music beds are, and they
+# are what the audition must agree with; a surround upload is the corner that
+# pays for it, and the library records its ``channels`` at upload, so this is
+# answerable later without a probe. See ``music_filtergraph``.
+UPMIX_STEREO = "pan=stereo|FL=FL+FC|FR=FR+FC"
+
+
+def music_filtergraph(clips, inputs) -> str:
+    """The one ffmpeg graph that lays music clips under a video's own audio
+    (the edit's music lane, spec §12.4). ``clips`` carry ``path, at, in, out,
+    gain, fade_in, fade_out`` - ``at`` in the OUTPUT's seconds, ``in``/``out``
+    in the file's, ``gain`` a LINEAR factor (trap 26: never the old pydub
+    "rough dB" formula); ``inputs`` is the ordered list of DISTINCT file
+    paths, input ``k`` being ``inputs[k - 1]`` (the video is input 0), so a
+    file used by several clips is decoded from one input.
+
+    Per clip, in order: the slice (``atrim``, re-timed from zero), the
+    up-mix to stereo (:data:`UPMIX_STEREO`), the level, a linear fade in and
+    out (``afade``'s default ``tri`` curve - the same ramp the audition's
+    ``GainNode`` plays, and a fade of 0 is left out), then the placement
+    (``adelay`` in whole milliseconds, one delay per stereo channel). The
+    clips are summed into the bed with ``normalize=0`` (trap 28: ``amix``
+    otherwise divides by the input count) and ``dropout_transition=0`` (no
+    ramp when one ends); a single clip is the bed. The voice, up-mixed the
+    same way, is mixed with the bed under ``duration=first`` - the output
+    ends where the voice does - and ``normalize=0`` again, so the
+    narration's level is untouched (trap 27: no ducking, and the voice never
+    fades).
+
+    **The up-mix is UNITY, and that is why it is ``pan`` and not
+    ``aformat``.** ffmpeg's default mono-to-stereo rematrix is
+    power-preserving - each output channel gets M/sqrt(2), i.e. -3.01 dB -
+    so a mono narration (the local kokoro path writes mono 24 kHz) came out
+    audibly quieter with music than without, from the up-mix alone and not
+    from ``amix``. ``pan=stereo|FL=FL+FC|FR=FR+FC`` takes exactly the
+    channels it names and drops every other one, so the one graph serves a
+    mono and a stereo voice with no probe (traps 2 and 30) and changes
+    neither: measured at 0.00 dB per channel against the source on
+    the dev ffmpeg 8.0.1 AND the bundled 7.1 essentials, where
+    ``aformat=channel_layouts=stereo`` measured -3.01 dB for mono. It is
+    also what the browser does (Web Audio up-mixes mono as L = R = M), so
+    E4b's audition and the render agree exactly (decision 4).
+
+    Raises ``ValueError`` for an empty clip list: there is no graph for no
+    music, and one written anyway names a ``[m1]`` that does not exist.
+    """
+    if not clips:
+        raise ValueError("A music graph needs at least one clip.")
+    paths = [str(path) for path in inputs]
+    chains = []
+    for k, clip in enumerate(clips, start=1):
+        index = paths.index(str(clip["path"])) + 1
+        start, end = float(clip["in"]), float(clip["out"])
+        fade_in, fade_out = float(clip.get("fade_in") or 0.0), float(clip.get("fade_out") or 0.0)
+        steps = [
+            f"[{index}:a]atrim=start={start:.3f}:end={end:.3f}",
+            "asetpts=PTS-STARTPTS",
+            UPMIX_STEREO,
+            f"volume={float(clip['gain']):.3f}",
+        ]
+        if fade_in > 0:
+            steps.append(f"afade=t=in:st={0:.3f}:d={fade_in:.3f}")
+        if fade_out > 0:
+            steps.append(f"afade=t=out:st={end - start - fade_out:.3f}:d={fade_out:.3f}")
+        ms = round(float(clip["at"]) * 1000)
+        steps.append(f"adelay={ms}|{ms}")
+        chains.append(",".join(steps) + f"[m{k}]")
+    if len(clips) > 1:
+        labels = "".join(f"[m{k}]" for k in range(1, len(clips) + 1))
+        chains.append(f"{labels}amix=inputs={len(clips)}:normalize=0:dropout_transition=0[bed]")
+        bed = "[bed]"
+    else:
+        bed = "[m1]"
+    chains.append(f"[0:a]{UPMIX_STEREO}[v]")
+    chains.append(f"[v]{bed}amix=inputs=2:duration=first:normalize=0[a]")
+    return ";".join(chains)
+
+
+def music_timeout(output_seconds: float) -> float:
+    """How long the music mix may take: 60 s plus twice the OUTPUT's length.
+    The work is decoding the clips and one AAC encode of the output's
+    length (the picture is copied): measured at 8.25 s for a 336 s output
+    under two five-minute MP3s on the bundled ffmpeg 7.1, so this is
+    generous by forty times."""
+    return 60 + 2 * float(output_seconds)
+
+
+def mix_music(
+    video_in, clips, video_out, cancel_check: Optional[Callable[[], bool]] = None,
+    output_seconds: Optional[float] = None,
+) -> bool:
+    """Lay ``clips`` (see ``music_filtergraph``) under ``video_in``'s audio,
+    writing ``video_out`` - which may be the same file: the output goes to
+    ``<video_out>.music.part.mp4`` and replaces it at the end. True when it
+    is there; False (and a log line) on any failure, never an exception -
+    the contract of ``cut_picture`` and ``replace_video_audio``.
+
+    One ffmpeg run over the muxed output, ``FFMPEG_PATH`` (never the bare
+    name, trap 3): the video stream COPIED (trap 29 - a re-encode here would
+    be the cut's 16 s again for nothing) and the audio re-encoded once as
+    192 kbit/s AAC, ``+faststart`` for the page's player. ``cancel_check``
+    is polled while ffmpeg runs and a cancel kills it, exactly as the
+    picture cut's is; the deadline is ``music_timeout(output_seconds)``,
+    or, when the caller does not know the output's length, the same rule
+    over the clips' furthest end. A cancelled, failed or stalled mix leaves
+    nothing behind and ``video_out`` as it was. Refuses up front, with no
+    ffmpeg started, when a clip's file is not on disk: the library's
+    verdict (``missing``) is the caller's to check first, and this is the
+    belt to it - never silence in a file's place (trap 25).
+    """
+    from utils.config import FFMPEG_PATH
+    from utils.helpers import replace_with_retry
+
+    video_in, video_out = Path(video_in), Path(video_out)
+    if not FFMPEG_PATH:
+        logger.error("Cannot mix the music: ffmpeg is not available")
+        return False
+    if not clips:
+        logger.error("Cannot mix the music: no clips")
+        return False
+    inputs: list[str] = []
+    for clip in clips:
+        path = str(clip["path"])
+        if not Path(path).is_file():
+            logger.error("Cannot mix the music: %s is missing", path)
+            return False
+        if path not in inputs:
+            inputs.append(path)
+
+    reach = max(float(clip["at"]) + float(clip["out"]) - float(clip["in"]) for clip in clips)
+    timeout = music_timeout(output_seconds if output_seconds else reach)
+    part = video_out.with_suffix(".music.part.mp4")
+    log = part.with_suffix(".log")
+    cmd = [FFMPEG_PATH, "-y", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(video_in)]
+    for path in inputs:
+        cmd += ["-i", path]
+    cmd += [
+        "-filter_complex", music_filtergraph(clips, inputs),
+        "-map", "0:v", "-map", "[a]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        str(part),
+    ]
+
+    def _cancelled() -> bool:
+        return bool(cancel_check and cancel_check())
+
+    try:
+        if _cancelled():
+            logger.info("Music mix cancelled before it started")
+            return False
+        video_out.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Mixing the music: %d clip(s) from %d file(s) under %s", len(clips), len(inputs), video_in.name)
+        outcome, proc = _run_until_done(cmd, log, timeout, _cancelled)
+        if outcome == "cancelled":
+            logger.info("Music mix cancelled; ffmpeg stopped and the mix discarded")
+            return False
+        if outcome == "timeout":
+            logger.error("Mixing the music took longer than %.0fs and was stopped", timeout)
+            return False
+        if proc.returncode != 0:
+            tail = log.read_text(encoding="utf-8", errors="replace")[-800:] if log.is_file() else ""
+            logger.error("ffmpeg failed to mix the music (exit %s): %s", proc.returncode, tail)
+            return False
+        if _cancelled():
+            logger.info("Music mix cancelled; the mix is discarded")
+            return False
+        if not part.is_file() or part.stat().st_size == 0:
+            logger.error("ffmpeg reported success but wrote no video")
+            return False
+        replace_with_retry(part, video_out)
+        logger.info("Music mixed: %s (%d clip(s))", video_out.name, len(clips))
+        return True
+    except Exception as e:
+        logger.error("Error mixing the music: %s", e)
         return False
     finally:
         # No-ops after a successful publish; the cleanup on every other exit.

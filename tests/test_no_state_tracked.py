@@ -39,6 +39,8 @@ def test_no_state_or_secret_files_are_tracked():
         ".env",                       # provider keys (utils/config.py)
         "assets/finished/video.mp4",  # rendered output (utils/config.py default)
         "assets/temp/audio.wav",
+        "assets/music/index.json",    # the music library (services/music.py)
+        "assets/music/bed.mp3",
         "bin/ffmpeg.exe",             # the stage-time overlay
         "boot.py",
     ],

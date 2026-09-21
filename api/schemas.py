@@ -150,15 +150,57 @@ class SegmentOverride(BaseModel):
 # A kept-ranges list, `[[start, end], ...]` in source seconds.
 Ranges = list[list[StrictFloat | StrictInt]]
 
+# A clip's number: strict so a boolean is not coerced to 1.0; an int is still
+# fine, as it is in ``Ranges`` (a JSON ``0`` is an int).
+Number = StrictFloat | StrictInt
+
+
+class MusicClipIn(BaseModel):
+    """One clip of ``EditIn.music`` (spec §12.2): a library file placed on the
+    OUTPUT axis. ``id`` is the client's own handle (``^[a-z0-9_-]{1,32}$``,
+    unique in the list); ``file`` a name in the library; ``at`` where the
+    clip starts in output seconds; ``in`` / ``out`` the slice of the FILE in
+    its own seconds; ``gain`` a linear factor 0-1; ``fade_in`` / ``fade_out``
+    seconds of linear ramp. Exactly these eight keys: an unknown one is a
+    422 (``extra="forbid"``), and ``in`` - a Python keyword - is the field's
+    alias, so the JSON says ``in`` and nothing else. Every bound - the id,
+    the file's presence, the slice inside the file, the fades inside the
+    clip - is ``services.edit.validate_music``'s to refuse, with a 400 that
+    names the clip and the field.
+
+    The list is sent whole, as a track's is: ``EditIn.music`` replaces the
+    stored clips, and a body that does not name ``music`` leaves them alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    file: str
+    at: Number
+    in_: Number = Field(alias="in")
+    out: Number
+    gain: Number
+    fade_in: Number
+    fade_out: Number
+
 
 class EditIn(BaseModel):
     """PUT /api/projects/{pid}/edit: the kept ranges of the source, in source
-    seconds, one list per track - ``video`` and ``narration`` -, replacing
-    whatever was stored (the lists are small; a partial PATCH would buy
-    nothing). A track given as null or left out keeps everything. ``keep``
-    is the version-1 body and means BOTH tracks, for curl and any older
-    client; the route refuses it beside a per-track list, and an empty body,
-    with a 400.
+    seconds, one list per track - ``video`` and ``narration`` -, and the
+    music lane's clips.
+
+    **One rule for all three keys** (trap 32): a key the body does not name
+    is UNCHANGED - whatever is stored stays -, ``null`` clears it (a track
+    keeps everything again, the music is gone), and a list replaces it;
+    ``[]`` clears the music too, while an empty track list is a refusal. That
+    is what lets a cut send its tracks and no ``music`` without dropping the
+    clips, and a clip commit send ``music`` and no tracks without dropping
+    the picture's cut. The route tells "not named" from "null" by
+    ``model_fields_set``; a body that names nothing changes nothing.
+
+    ``keep`` is the version-1 body and means BOTH tracks, for curl and any
+    older client; the route refuses it beside ``video``, ``narration`` or
+    ``music`` with a 400.
 
     The numbers are strict so a boolean is not coerced to 1.0 (an int is still
     fine), and an unknown key is a 422 - ``extra="forbid"``, the lesson
@@ -166,7 +208,8 @@ class EditIn(BaseModel):
     silently. Everything else about a range - its order, an overlap, a bound
     past the source, NaN and infinity (which JSON lets through and a strict
     float accepts) - is ``services.edit.validate_keep``'s to refuse, with a
-    400 that names the track and the range.
+    400 that names the track and the range; and everything about a clip
+    beyond its shape is ``validate_music``'s.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -174,6 +217,7 @@ class EditIn(BaseModel):
     keep: Ranges | None = None
     video: Ranges | None = None
     narration: Ranges | None = None
+    music: list[MusicClipIn] | None = None
 
 
 class OffsetIn(BaseModel):

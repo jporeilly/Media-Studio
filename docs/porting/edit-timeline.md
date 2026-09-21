@@ -4,7 +4,9 @@ Read-only survey, 2026-09-16, plus measurements taken that day on the real 5m41s
 source (`data/projects/6d808448772c/finished.mp4`). **E1 — the model and the render —, E2
 — the gesture — and E3 — tracks — are built (2026-09-16, 2026-09-17 and 2026-09-18; E1 and E2
 released together as 0.7.0, E3 released as 0.8.0 on 2026-09-18, alone and ahead of E4, beside
-the narration transcript download; §7, §11); E4 and E5 are not.** This is the answer to
+the narration transcript download; §7, §11); E4a — the music library, the model and the
+render pass — is built too (2026-09-21) and is UNRELEASED, the version still 0.8.0 until E4b
+lands (§7, §12); E4b, the lane itself, and E5 are not.** This is the answer to
 "build something like Camtasia": a multi-track timeline on which the picture, the original
 audio and the narration can be cut together — or, since E3, one track at a time. The survey
 is written against the code as it stands at
@@ -946,9 +948,12 @@ pins (E3 brings snapping to the *drag*).
 
 **E4 — the music lane.** Asked for by the owner on 2026-09-16 — *"I should be able to add
 music tracks over the top — another channel like Camtasia"* — and moved here out of §9's
-v2 list (§9 keeps mixing and ducking the *original* audio). **Designed in §12 (2026-09-21,
-not built)**; the sketch below stands as its outline — a second lane on the same timeline,
-which fits the per-track shape E3 gave the edit.
+v2 list (§9 keeps mixing and ducking the *original* audio). **Designed in §12 (2026-09-21).
+Its backend half — E4a: the library, the model and the render pass — is DONE, 2026-09-21 and
+unreleased; the block after this sketch records it. E4b — the lane, the gestures, the
+inspector and the audition — is not built.** The sketch below stands as the outline of the
+whole phase — a second lane on the same timeline, which fits the per-track shape E3 gave
+the edit.
 
 - **The model.** `edit.version` 2 gains `"music": [{file, at, in, out, gain, fade_in,
   fade_out}]` — `file` a name in the music **library**, `at` where the clip starts in
@@ -965,13 +970,18 @@ which fits the per-track shape E3 gave the edit.
   (`docs/porting/generation-options.md` §4), surveyed 2026-09-14 and never built: today
   `assets/music/` does not exist and nothing serves it. The library API (filenames
   validated like `_PID_RE`, audited) is the prerequisite, and it is the same work 2b needs
-  for the generate path, so it is built once, for both.
+  for the generate path, so it is built once, for both. *Built in E4a* (`services/music.py`,
+  `api/routers/music.py`, five studio-wide routes, §12.3): the directory exists, it is
+  served, and 2b can use it as it stands.
 - **The render** generalises the one-file pydub overlay in `replace_video_audio`
   (`core/video_creator.py:327-342` at `4f39ae1`; the function gained the `video_duration`
   lines above it in E1) — one file, looped to the narration's length, at a flat volume
   from Studio settings; the only music support there is — to clips placed at `at`, sliced
   `in`–`out`, faded, and summed under the master before the mux. `AudioMixer` is still not
-  the starting point (§1.3).
+  the starting point (§1.3). *As designed in §12 and built in E4a:* it does not generalise
+  that overlay, it leaves it alone — it is the generate path's and is not on this one — and
+  lays the clips in a **second ffmpeg pass after the mux**, which is what keeps
+  `_revoice_video` untouched and the standalone narration track voice-only (§12.4).
 - **The audition** schedules a music `AudioBuffer` at `at` exactly as `schedule()` places
   the sentence clips, on the same Web Audio clock, with the clip's gain and fades applied
   there; the library file is fetched and decoded once, like a sentence clip.
@@ -987,6 +997,122 @@ final shape: `music` joins version 2 *additively*, a missing key meaning no musi
 no bump of its own). It needs E2's timeline-second drawing and transport to be placed and heard
 at all. E3 is built (2026-09-18), and its `set_edit` merges into the stored edit, so a `music`
 key survives a cut (§11.1's *As built*).
+
+**E4a — the music library, the model and the render pass, no UI.** **DONE**, 2026-09-21,
+built over `24f9cd3` on top of 0.8.0 and **not released**: the version stays 0.8.0, and 0.9.0
+ships E4a and E4b together (§12.8, decision 8). Designed in **§12** and built to it, with each
+place the build differed corrected in place there under *As built*. **The library**
+(`services/music.py` and `api/routers/music.py`, both new): `assets/music/` beside
+`assets/finished`, an `index.json` read and written under one module lock, and five routes
+that are **studio-wide** and carry no `{pid}` — `GET /api/music` (the index, sorted by name);
+`POST /api/music` (multipart; the six extensions of §12.3, a 100 MB cap read one byte past so
+an oversize body is never buffered whole, the file decoded once to prove it is audio and to
+measure it, its 125 ms peaks cached as `<name>.peaks.json`; 400 not audio or a name the
+library cannot store, 409 the name exists, 413 too big); `GET /api/music/{name}` (the file,
+its media type from the extension, `Cache-Control: private, max-age=86400` — the name is
+immutable); `GET /api/music/{name}/peaks`; and `DELETE /api/music/{name}` (409 naming the
+projects while any project's edit has a clip on the file, 404 when there is nothing of that
+name). Names are unique **case-insensitively** and looked up **exactly**; the file, its peaks
+and the index are each written to a `.part` and published with `replace_with_retry` (trap 10);
+`MUSIC_UPLOAD` / `MUSIC_DELETE` in `api/audit.py` carry the name and the size and nothing
+else, and `ENTITIES` gains `"music"` because `tests/test_audit.py` walks every `audit(...)`
+call site and checks both. **The model** (`services/edit.py`, `api/schemas.py`,
+`api/routers/edit.py`): `edit.music`, a list of at most `MAX_CLIPS` = 200 objects with exactly
+`CLIP_KEYS`, validated by `validate_music` against the library's `{name: duration}` with every
+refusal naming the clip by index and id and the field; `stored_music`, which reads a clip
+whose file has left the library back as `missing: true` rather than as an error (trap 25) and
+a list that does not validate in SHAPE as an UNREADABLE-style `ValueError`; `Applied.music`;
+`payload(video, narration, source_duration, music)` carrying each clip with its
+`file_duration` and `missing` onto `GET` / `PUT` / `DELETE /{pid}/edit` and into the plan's
+`edit` block; the audit summary gaining "; music: 2 clips"; `MusicClipIn` and `EditIn.music`
+in the schema (`extra="forbid"`, `in` an alias, strict numbers); and `PUT /edit` reading **one
+rule for all three keys** (§12.6's *As built*). **The render** (`core/video_creator.py`,
+`services/revoice.py`): `music_filtergraph`, `music_timeout`, `mix_music`, and
+`_run_until_done` — the Popen/poll/kill loop lifted out of `cut_picture` and shared rather
+than copied. The clips are laid under the muxed output in one more ffmpeg pass with the
+picture copied, the voice up-mixed at **unity** (`UPMIX_STEREO`), `normalize=0` on both mixes
+and `duration=first`; a clip whose file is missing refuses the job before it does any work;
+`music_rendered` goes on the record for the page, and the stamps describe the file that is on
+disk. **Shared, not copied:** the strip's 125 ms bucket arithmetic is now
+`waveform.peaks_from_samples` / `peaks_payload`, which `compute_peaks` itself calls, so the
+library's peaks and the strip's cannot drift. **`frontend/` is untouched** — the lane is E4b —
+and `frontend/dist` stays fingerprint-consistent.
+
+Seven things the build changed about the design in §12, each corrected in place there under
+*As built*: the up-mix is `pan=stereo|FL=FL+FC|FR=FR+FC`, not §12.4's `aformat`; `PUT /edit`
+has one rule for every key in place of §12.6's asymmetry, which **reverses trap 32**; the
+library is case-insensitively unique and exactly looked up; the mux's stamps go on **before**
+the music pass, not after it; the decode seam runs `FFMPEG_PATH` itself rather than pydub,
+which would have run ffprobe; `_run_until_done` is shared with the picture cut; and the bucket
+arithmetic moved into `services/waveform.py`. Traps **33** and **34** are what the round
+earned.
+
+**The Reviewer's two MAJORs, and what closed them.** Its verdict was CHANGES REQUIRED, and
+neither MAJOR was findable by reading. **(1) A delete with a differently-cased name defeated
+the in-use guard.** Windows matches filenames without regard to case and the index did not,
+so `DELETE /api/music/BED.mp3` against a library holding `bed.mp3` passed the "no row, but the
+file is there" escape hatch (`Path.is_file()` is true for either spelling), compared
+`"BED.mp3"` against clips that all say `bed.mp3`, found no reference, unlinked the file and
+its peaks **by path**, and kept the index row — a 204, a referenced file deleted, and a
+phantom row behind it: `GET /api/music` went on listing `bed.mp3` while
+`GET /api/music/bed.mp3` answered 404, the plan and `GET /edit` went on reporting the clip as
+healthy while the render refused it as missing, `validate_music` went on accepting new clips
+against the dead name, and the name itself was stuck — a re-upload a 409 and a delete an
+in-use 409. Closed at both ends: an upload now collides under
+`str.casefold` with an indexed name, an on-disk name or one mid-upload, so the index can never
+hold two names Windows cannot tell apart (on Linux too, so the platforms behave alike); and
+every lookup — `get_path`, `peaks`, `remove`, `references` — requires the exact on-disk
+spelling, read from `os.listdir(MUSIC_DIR)` rather than inferred from `Path.is_file()`. The
+escape hatch stays for the interrupted-upload case and fires only on an exactly-spelled
+on-disk name. **(2) The music pass took a mono narration down 3.01 dB** — the design's own
+defect, since §12.4 named the up-mix that does it; §12.4's *As built* records the measurements
+and the fix.
+
+**Proven by the Reviewer** (harnesses in the scratchpad, none committed): the filtergraph over
+**4,000** random clip lists plus eight hand-built edge cases — chain count, every `[mK]`
+label, `adelay` in whole milliseconds and equal to `round(at × 1000)`, the input index equal
+to the position in the DISTINCT-file list, `normalize=0` on every `amix`, exactly one
+`duration=first`, no `afade` with `d=0`, every number at 3 dp, no `dB` anywhere — **0
+problems**; **nine real renders** on the real binary (one clip at 0; fades; fades filling the
+clip; three clips over two files; a clip running past the voice's end; the 0.1 s minimum;
+gain 0; **20 clips over 2 files**; a sub-millisecond `at`), every one 2 channels, the output
+the voice's length, **60 video frames in = 60 out** by framemd5, and each clip audible only in
+its own window; `normalize=0` shown to be load-bearing (stripped, the voice drops to ×0.354);
+the 200-clip worst case measured at **15.9 s and 132 MB** peak ffmpeg RSS on a 340 s output,
+against its own 740 s deadline; **4,000** fuzzed clip dicts giving **3,818** refusals, every
+one a `ValueError` naming the clip; `_run_until_done` reconstructed from `24f9cd3` and run
+beside both callers over **eight** terminal cases — exit 0, a cancel while running, the
+deadline, a non-zero exit, exit 0 with no output, a cancel landing between ffmpeg's exit and
+the publish, a cancel before it starts, and `Popen` raising — with return value, kill, poll
+count, destination bytes and leftovers identical in every column; the traversal set (`..`,
+`%5C`, `%00`, a trailing dot) refused and the decoy outside the directory never served;
+`references` over **300** projects in **163 ms**; and **13 planted mutants**, of which 9 died
+— the four survivors are closed by the fix round's tests (the deadline sized by the OUTPUT,
+the index's module lock under ten concurrent uploads, the index's own `.part` publish) or
+recorded as harmless (a redundant `missing` branch).
+
+**Measured by the supervisor.** Before the build: the bundled ffmpeg 7.1 essentials lists all
+seven filters §12.4 names, and §12.4's graph over the corpus re-voiced output (336 s, 71 MB)
+with two 300 s stereo MP3s cost **8.25 s** on it and 8.0 s on the dev 8.0.1, exit 0, the
+output still 5:35.96 and the picture copied — which is where `music_timeout = 60 + 2 ×
+output` comes from, generous by forty times. After the fix round: the up-mix on both binaries
+(the table in §12.4's *As built*), and live, on a real render of the mono project
+`c5c8a50e6c3c`, the voice within **0.03 dB per channel** of the standalone narration in a
+music-free window with the music **19.4 dB** above the floor in its own. The packaged app is
+not in that record, and neither is a browser — there is nothing to look at until E4b.
+
+**Tests:** `tests/test_music_library.py` (new, **40**), `tests/test_music_render.py` (new,
+**23**), `tests/test_edit.py` (**143**, from 90), `tests/test_waveform.py` (+1: the two peak
+paths agree on the same samples, mono and stereo), `tests/test_project_ownership.py` (the five
+routes in a new `STUDIO_WIDE_ROUTES` *exclusion* list, itself guarded so a route that ever
+grew a `{pid}` fails the sweep), `tests/test_no_state_tracked.py` (`assets/music/` stays
+git-ignored) — the full backend suite **906** (from **786**; **891** at the first build,
+before the fix round), ruff clean; nothing under `frontend/` changed, so vitest is untouched.
+**Deliberately left — E4b, which is the rest of E4:** the Music lane and the per-lane CSS a
+fourth lane needs, the add / move / trim / remove gestures, `cutMusic` and the ripple through
+the clips, the Library modal, the inspector, the audition's music buffers and the eye that
+mutes them, the render summary's "mixes 2 music clips", and the release of both halves as
+0.9.0. Per-range input seeking (E1's second note) is still left, too.
 
 Budget E1 as phase-3a-sized and E2 as larger than E1: the drawing change touches every
 lane and the transport, and it is where the first-open-at-zero-scale class of bug lives.
@@ -1407,17 +1533,25 @@ dev backend — the packaged app is not in the record (§7).
 
 ---
 
-## 12. E4 — the music lane (designed 2026-09-21, not built)
+## 12. E4 — the music lane (designed 2026-09-21; E4a built 2026-09-21, E4b not built)
 
-Written against the tree at `dd818d0` (0.8.0 plus two clock fixes). The owner's words,
-2026-09-16, mid-E1: *"I should be able to add music tracks over the top — another channel
-like Camtasia"*; and their own Camtasia project, shown on the 17th, has exactly that: Track 3
-holds *"Amarent — The Man from Hyde Park — Ambient Mix"* laid twice along the timeline under
-the picture and the narration. Scoped 2026-09-21 at *"scope E4"*. This is the third track,
-and it is different in kind from the two E3 gave locks to: the picture and the narration are
-**material with an edit**, ranges of one source; music is **clips placed on the output** —
-Camtasia clips, with a file, a position, an in and an out. The one-list shape does not hold
-it, and §7's sketch already said so: version 2 gains a `music` list, additively.
+Written against the tree at `dd818d0` (0.8.0 plus two clock fixes); **E4a — the library, the
+model and the render pass — was built the same day**, over `24f9cd3`, through all three gates
+and a fix round after the Reviewer's two MAJORs (§7's E4a block records what shipped and the
+proofs), and is **unreleased**: the version stays 0.8.0 until E4b lands. **E4b — the lane, the
+gestures, the inspector and the audition — is not built.** Where the build differed from the
+design below, the section says so in place under *As built*; the two that matter most to
+anyone reading this before E4b are §12.4's up-mix and §12.6's one rule for every key.
+
+The owner's words, 2026-09-16, mid-E1: *"I should be able to add music tracks over the top —
+another channel like Camtasia"*; and their own Camtasia project, shown on the 17th, has
+exactly that: Track 3 holds *"Amarent — The Man from Hyde Park — Ambient Mix"* laid twice
+along the timeline under the picture and the narration. Scoped 2026-09-21 at *"scope E4"*.
+This is the third track, and it is different in kind from the two E3 gave locks to: the
+picture and the narration are **material with an edit**, ranges of one source; music is
+**clips placed on the output** — Camtasia clips, with a file, a position, an in and an out.
+The one-list shape does not hold it, and §7's sketch already said so: version 2 gains a
+`music` list, additively.
 
 ### 12.1 What exists, and what does not
 
@@ -1449,7 +1583,9 @@ it, and §7's sketch already said so: version 2 gains a `music` list, additively
   a `duration`, a `GainNode`, and ramps for the fades.
 - **ffmpeg, not ffprobe** (traps 2, 3): a music file's length must come from decoding it
   once at upload (pydub finds the bundled ffmpeg through the PATH prepend,
-  `utils/config.py:70-71`), never from a probe.
+  `utils/config.py:70-71`), never from a probe. *As built:* right about the decode and wrong
+  about pydub, which runs **ffprobe** for anything not named `.wav` — the seam runs
+  `FFMPEG_PATH` itself, for the reason set out in §12.3's *As built*.
 
 ### 12.2 The model — clips on the output axis
 
@@ -1513,7 +1649,27 @@ survives reinstall as the projects do) plus an index the routes read instead of 
   from the decoded samples — pull the bucket arithmetic out of `services/waveform.py` into a
   helper both callers use, never a second copy) and appends to `assets/music/index.json`:
   `{name, size, duration, sample_rate, channels, uploaded_at, uploaded_by}`. Audited as
-  `MUSIC_UPLOAD` (name and size, no more).
+  `MUSIC_UPLOAD` (name and size, no more). *As built:* everything above holds except the
+  decoder. **It is not pydub.** `AudioSegment.from_file` takes its `_from_safe_wav` shortcut
+  only when the *filename ends in `.wav`*; for anything else it calls `mediainfo_json`, which
+  runs **ffprobe** — and `get_prober_name` merely warns and returns the bare `"ffprobe"` when
+  the binary is absent, so the call raises. The decisive detail is that the upload decodes
+  `<name>.part`, whose extension is never `.wav`, so pydub would have taken the ffprobe path
+  *even for a WAV upload*; its `AudioSegment.converter` is the bare `"ffmpeg"` as well (trap
+  3). So `services/music.py::decode_audio` is the seam and it runs the resolved `FFMPEG_PATH`
+  itself — one process, `-vn` for cover art and `-map_metadata -1`, into a scratch WAV under
+  `TEMP_DIR` that the stdlib `wave` module reads and that is always removed — with a 600 s
+  timeout and the three-attempt retry on "permission denied" that
+  `core.audio_mixer._load_audio_with_retry` exists for. It answers `duration`, `sample_rate`,
+  `channels` and one int16 sample per frame, mixed down by the strip's own rule (per frame,
+  the louder channel, sign kept), so a stereo file's peaks here are the ones `compute_peaks`
+  would draw for it. The peaks helper the bullet asks for is two functions, not one —
+  `waveform.peaks_from_samples(samples, sample_rate)` and `waveform.peaks_payload(peaks,
+  duration, sample_rate)`, with `compute_peaks` refactored onto both — because the library
+  needs the response shape as well as the numbers. And a refusal names **the upload**, not the
+  scratch file: `decode_audio` takes a `display_name`, and the ffmpeg tail is reduced to its
+  first path-free line with the `[png @ 0x…]` prefix stripped, so the 400 reads `'fake.mp3' is
+  not an audio file this app can decode (chunk too big)` and carries no server path.
 - `GET /api/music` — the index, sorted by name.
 - `GET /api/music/{name}` — the file, `FileResponse`, served for the audition; the name is
   immutable so `Cache-Control: private, max-age=86400` is right (unlike the rewritten
@@ -1528,6 +1684,34 @@ survives reinstall as the projects do) plus an index the routes read instead of 
 - **Where the packaged app puts it**: `<install>\app\assets\music`, next to `finished` —
   kept across reinstalls, deleted with nothing (a project's delete never touches the
   library). The data-dir move (§ NEXT in memory) carries it along when it happens.
+
+***As built* — a name is unique CASE-INSENSITIVELY and looked up EXACTLY.** The section says
+"unique" and means it on a file system that is case-sensitive; Windows' is not, and the index
+was. `DELETE /api/music/BED.mp3` against a library holding `bed.mp3` therefore walked straight
+through the guard this section exists to be: `"BED.mp3" not in files` was true, `path.is_file()`
+was true (it *is* `bed.mp3`), so the rowless-file escape hatch passed; `references("BED.mp3")`
+compared a string no clip stores and found nothing; the file and its peaks were unlinked **by
+path**; and the row survived because the name it is keyed by is the other spelling — 204, a
+referenced file deleted, and a phantom row (the Reviewer's MAJOR 1, §7). So: an upload collides
+under `str.casefold` with an indexed name, an on-disk name **or** one mid-upload (its `.part`),
+on every platform, so the index can never hold two names Windows cannot tell apart and the two
+platforms behave alike; and `get_path`, `peaks`, `remove`, `references`, `library` and
+`duration_of` are all **exact** — the indexed name is THE name, a request matching only by case
+is a `MusicNotFound` (404), and the on-disk check is membership of `os.listdir(MUSIC_DIR)`,
+which reports the spelling a file was created with, never `Path.is_file()`, which answers a
+different question. The escape hatch stays — a file on disk without a row, from an interrupted
+upload or an index that could not be read, must be removable so a name never gets stuck — but
+it fires only on an exactly-spelled on-disk name. **And `_path_for` creates the directory
+before it resolves.** Two `Path.resolve()` calls around a directory that is springing into
+existence disagree on Windows — the second answers in the `\\?\` extended-length form — so
+`path.parent != base` for a perfectly ordinary name: 108 of 150 concurrent first uploads into
+an `assets/music` that did not exist yet, each a **500** from `POST /api/music`, which caught
+`TooLarge`, `MusicExists`, `BadName` and `NotAudio` but not `MusicNotFound` (the Reviewer's
+MINOR 1). The directory is created first, the path resolved once, and the "directly inside"
+check compares `os.path.normcase(os.path.abspath(...))`; the upload route catches
+`MusicNotFound` as a 400 for belt; and a ten-thread test uploading ten names into a library
+directory that does not exist yet pins both that and the module lock (without the lock, 8 of
+10 uploads fail and the index keeps 2 rows).
 
 ### 12.4 The render — one more pass, and `_revoice_video` still untouched
 
@@ -1567,6 +1751,69 @@ into other editors, and music baked into it would be a regression of that promis
 Cost: decoding two five-minute tracks and re-muxing a 341 s output, measured before the
 build (§12.8 asks for the number); expected a handful of seconds. The Render line says
 "… and mixes 2 music clips under the narration".
+
+***As built* — the up-mix above is wrong, and it is `pan`, not `aformat`.** Step 2 names
+`aformat=channel_layouts=stereo` for the clips and for the voice. ffmpeg's default mono→stereo
+rematrix is **power-preserving** — each output channel gets M/√2 — so a **mono** narration came
+out **3.01 dB quieter** with music under it than without, from the up-mix alone and not from
+`amix` (`normalize=0` was doing its job: stripped, the voice drops to ×0.354 instead), and this
+section's own claim that "the narration's level is untouched" was false for it. That is not a
+hypothetical configuration: the local Kokoro generator writes mono at 24 kHz
+(`core/kokoro_tts_generator.py:439`), the mux sets no `-ac` and the TTS master forces no
+channel count, and `data/projects/c5c8a50e6c3c/welcome_preview_revoiced.mp4` on this machine is
+one — so it is the **free/local iteration path**, the one the owner uses before an ElevenLabs
+final, that was hit (the Reviewer's MAJOR 2). The graph now uses one constant,
+`UPMIX_STEREO = "pan=stereo|FL=FL+FC|FR=FR+FC"`, for the voice **and** for every clip: `pan`
+copies the channels it names and silently drops the ones the input does not have, so one string
+serves a mono and a stereo input alike with nothing probed (traps 2 and 30), which is what the
+alternatives could not do — `pan=stereo|c0=c0|c1=c0` collapses a stereo R onto L, and
+`aresample=rematrix_volume=1.414214` or a `volume=1.414214` after the `aformat` fixes mono by
+making stereo **+3 dB**. Measured per channel against the source on the dev ffmpeg 8.0.1 **and**
+on the bundled 7.1 essentials:
+
+| voice graph | mono in | stereo in | then `amix` with a stereo bed |
+|---|---|---|---|
+| `aformat=channel_layouts=stereo` (as designed) | −3.01 dB | 0.00 | — |
+| `pan=stereo\|FL=FL+FC\|FR=FR+FC` (as built) | 0.00 | 0.00 | 0.00 |
+
+Proven live on a real render of the mono project: in a window with no music under it the voice
+is within **0.03 dB per channel** of the standalone narration, and in a window that has music
+the music sits **19.4 dB** above the floor. It matters for E4b as much as here — Web Audio's
+mono→stereo up-mix is **unity** (L = R = M), so with `pan` the audition and the render agree
+exactly, which is what decision 4 promises and what `aformat` would have broken by 3 dB on
+every mono project.
+
+***As built* — the stamps go on BEFORE the pass, not after it.** Step 3 stamps once the mix has
+run. As built the mux's stamps — `revoiced_at`, `edit_rendered_at` when either track removed
+anything, and `music_rendered` **popped** — are written as soon as `_revoice_video` has produced
+the file and before `mix_music` is called, and the success path stamps again: a new
+`revoiced_at` and `edit_rendered_at` (the bytes changed once more, and that timestamp is the
+page's cache token) and `music_rendered = N`. The pass rewrites `<stem>_revoiced.mp4` **in
+place** and can be cancelled or fail, which was not possible before E4a — the only cancel point,
+the picture cut, ran before `_revoice_video` touched that file — so stamping only afterwards
+left a record claiming the *previous* render's `music_rendered` over bytes that no longer
+carried it, with the cache token unchanged although the file had changed (the Reviewer's
+MINOR 2, proven for the cancelled path and the failed one). A cancelled or failed mix now leaves
+a record that truthfully describes the voice-only render on disk.
+
+***As built* — the rest of the pass.** `mix_music` and `cut_picture` share one loop:
+`_run_until_done(cmd, log, timeout, cancelled)`, the `Popen` / poll / kill body lifted out of
+the cut, stderr to a file rather than a pipe nobody reads, answering `"finished"` /
+`"cancelled"` / `"timeout"` and the process. The Reviewer reconstructed `24f9cd3`'s loop
+verbatim and ran both callers against the same scripted fake `Popen` over eight terminal cases,
+with return value, kill, poll count, destination bytes and leftovers identical in every column,
+so the extraction is behaviour-preserving (§7). `music_timeout(output_seconds) = 60 + 2 ×
+output_seconds` as written, sized by the OUTPUT and handed `applied.output_duration` — the cut
+picture's length, not the source's; when the caller does not know it (the source's length is
+unknown) the same rule is applied to the clips' furthest end. The unit test pins
+`music_timeout(3600) == 7260` and the deadline test separates the two candidate rules far enough
+to tell them apart, because a one-hour output with a single 15 s sting is 7260 s against 90 s
+and the wrong rule would kill a legitimate render. `music_filtergraph([], …)` **raises
+`ValueError`** rather than emitting a graph that names an `[m1]` which does not exist; the fade-in
+start prints at 3 dp like every other number; the pass writes `<stem>.music.part.mp4` beside the
+output (`with_suffix` replaces the extension) with its log beside that, and publishes with
+`replace_with_retry`; and the job reports **0.95**, not 0.9 — the mux has already reported up to
+0.925, and a progress bar must not step backwards.
 
 ### 12.5 The lane, the gestures, the audition
 
@@ -1624,30 +1871,108 @@ build (§12.8 asks for the number); expected a handful of seconds. The Render li
 | `GET /api/music`, `POST /api/music`, `GET /api/music/{name}`, `GET /api/music/{name}/peaks`, `DELETE /api/music/{name}` | new (§12.3). |
 | `POST /{pid}/revoice` | unchanged — the render IS the re-voice job, now with a music pass after the mux. |
 
+***As built* — one rule for every key, not two.** The asymmetry in the first row did not survive
+§12.5. As designed the tracks read absent as "whole" while the music read absent as "unchanged",
+so a music-only `PUT` **removed both track lists** — and §12.5's own copy says a clip commit is
+"one `PUT /edit` with the new `music` list", which means E4b would have discarded the picture's
+cut on every add, move, trim, gain change and fade change (the Reviewer's MINOR 4, proven).
+Worse in the other direction: `{"video": null, "narration": null}` with music stored was refused
+("at least one track"), so the only way back to whole tracks was a `DELETE` — which clears the
+music too, and a `DELETE` is exactly what E3's client sends when the last cut is undone
+(`NarrationTimeline.tsx:1209-1217`), so undoing a cut would have wiped the lane. So the rule is
+now one rule: **absent = unchanged, `null` = cleared, a list = set**, for `video`, `narration`
+and `music` alike, with `[]` clearing the music (no clips is no music) while an empty *track*
+list stays E1's refusal. `{}` is a **200 no-op** — nothing written, nothing forgotten, no audit
+row, the current edit returned, the shape `clear_edit`'s no-op already had — where the design
+and E3 both made it a 400. After the merge, when nothing but `version` would remain, the `edit`
+key is **removed** from the record, so `{"music": []}` on an unedited project no longer stores
+an edit that is no edit (the Reviewer's MINOR 3) and no `project.edit` "cleared" row is written
+for a project that was never edited; unknown keys ride through only while a track or the music
+is still there. A version-1 `keep` is converted to two tracks **on write**, so "absent" cannot
+drop a cut this call never saw; `keep` beside `video`, `narration` or `music` is still a 400;
+and `DELETE /edit` is unchanged — everything gone, music included. The signature is
+`set_edit(pid, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED)` — one module sentinel for
+all three, because `None` already means something different for each — with the route mapping
+each key by `body.model_fields_set`, and it returns `(payload, changed)` so the route leaves a
+no-op out of the audit log exactly as `clear_edit` already did. Every list is validated before
+the first write: the given lists before the lock, and the **merged edit's read-back** inside it
+and before `save_project`, so a stored clip list this version cannot read refuses the call
+instead of landing the cut and then raising on the way out with the write already done (the
+Reviewer's NIT 1). E3's client is untouched by all of this: it always sends both track keys,
+possibly `null`, and never `music`. **Trap 32 below is reversed by this and is rewritten there.**
+
 ### 12.7 Traps this phase adds
+
+*(E4a proved traps 24–30 in the parenthetical after each; 31 is E4b's, and 32 is reversed by
+the build. 33 and 34 are what the round earned.)*
 
 24. **`at` is output seconds, so the Music lane obeys the locks like a track**: a cut with
     it unlocked must move and trim the clips (`cutMusic`), and the server accepts whatever
     valid list the client sends — it does not re-derive clips from the picture's cut.
+    *(The server half is proven: whatever valid list arrives is what is stored, sorted by
+    `at` and otherwise untouched. `cutMusic` is E4b's and does not exist.)*
 25. **A missing library file is a refusal, never silence**: the clip is marked, the audition
     skips it, the render refuses. And a library delete is refused while any project refers
-    to the file.
+    to the file. *(Proven at three depths — `stored_music` flags it, `services/revoice.py`
+    refuses the job **before any work** (no `mix_music` call, no `_revoice_video`, no scratch
+    directory, nothing stamped) for a clip flagged `missing` and for a file that left the disk
+    after the index was read, and `mix_music` returns False before starting ffmpeg as the
+    belt to both. The delete half was the one that failed — the Reviewer's MAJOR 1; see
+    §12.3's As-built note.)*
 26. **Gain is a linear factor everywhere** — `volume=`, `GainNode.gain`, the slider. The
     pydub "rough dB" formula in `replace_video_audio` is not the model and is not on this
-    path.
+    path. *(Proven: no `dB` anywhere in 4,000 fuzzed graphs, and `replace_video_audio` is
+    untouched by the change.)*
 27. **No ducking; the voice never fades.** The bed's level is constant; fades are the
-    music's own; the narration master is never opened by the music pass.
+    music's own; the narration master is never opened by the music pass. *(The half about
+    ducking and fades held — the head and the tail of the voice measure unfaded, nothing in
+    the graph touches `[0:a]` but the up-mix, and the standalone narration track is never
+    opened. The half about the level FAILED on a mono voice, by 3.01 dB, until trap 33 was
+    found: see §12.4's As-built note.)*
 28. **`amix` normalises by default** — `normalize=0` on both mixes, or the voice drops
-    by 1/N. Stereo before mixing.
+    by 1/N. Stereo before mixing. *(Proven load-bearing: with `normalize=0` stripped the
+    voice drops to ×0.354, and the mutant that removes it from both mixes dies on three
+    graph tests.)*
 29. **The second pass copies the video** (`-c:v copy`); a re-encode here would be E1's
-    16 s again for nothing.
+    16 s again for nothing. *(Proven: 60 video frames in and 60 out, framemd5-counted, on
+    each of nine real renders; the mutant that swaps in `libx264` dies on the command test.)*
 30. **The upload decodes; the render decodes; nothing probes.** Length, sample rate and
-    channels come from the decode at upload and are recorded in the index.
+    channels come from the decode at upload and are recorded in the index. *(Proven: exactly
+    one decode per upload — of `<name>.part` — the peaks cached so `peaks()` decodes again
+    only if the cache has gone, and no `ffprobe` and no bare `"ffmpeg"` anywhere in the
+    change. It is also the trap that chose the decoder, since pydub would have run ffprobe:
+    see §12.3's As-built note.)*
 31. **Decoded music is big in the browser**: one decode per file, cached; never one per
-    clip.
-32. **`music` absent in a PUT body means unchanged**, unlike a track key — the asymmetry is
-    deliberate (the E3 client and every `curl` of E1's shape keep working) and is written
-    in the schema's docstring.
+    clip. *(E4b's; nothing in E4a decodes in a browser.)*
+32. **Every key of a `PUT /edit` body reads the same way: absent means unchanged.**
+    *(Written here as an asymmetry — `music` unchanged, a track key whole — and **reversed by
+    the build**, because the asymmetry silently dropped the other half of the edit in both
+    directions: see §12.6's As-built note. The trap itself survives and is stronger for being
+    symmetrical — a `PUT` never means "and clear whatever I did not name", so a cut may send
+    its tracks and keep the clips and a clip commit may send the clips and keep the cut. It is
+    written into `EditIn`'s and `set_edit`'s docstrings and pinned by the mutant that reverses
+    it, which kills four `test_edit.py` tests.)*
+33. **The default stereo up-mix is not unity for mono.** ffmpeg's 1→2 rematrix is
+    power-preserving: `aformat=channel_layouts=stereo`, a plain `-ac 2` and `aresample` all
+    hand each output channel M/√2 — **−3.01 dB** — with no error, no warning, and nothing a
+    test that reads the filtergraph string can see. Only a per-channel measurement on a real
+    render finds it. Anything that must not change a level up-mixes with
+    `pan=stereo|FL=FL+FC|FR=FR+FC`, which copies the channels it names and drops the ones the
+    input does not have, so one graph serves mono and stereo with nothing probed (traps 2,
+    30). The reusable rule: **a format conversion is not a no-op**, and the browser's rule is
+    not ffmpeg's — Web Audio up-mixes mono as L = R = M, at unity, so a render that used
+    `aformat` and an audition that used Web Audio would disagree by 3 dB on every mono
+    project.
+34. **A Windows filename check is not a name check.** `Path.is_file()`, `Path.exists()` and
+    an `open()` that succeeds all answer "a file the OS resolves to this name is there", not
+    "a file spelled this way is there": on Windows `BED.mp3` finds `bed.mp3`. Any guard that
+    keys a case-SENSITIVE dict beside a check like that has a hole one keystroke wide — here
+    it deleted a file a project's clip still named and left the row behind. Where the name IS
+    the key (a library, a cache, an index), make it unique under `str.casefold` on **every**
+    platform so the platforms behave alike, and read the on-disk spelling from
+    `os.listdir` when an exact answer is what is wanted. (Windows also strips a trailing dot
+    and a trailing space from a name; this library never reaches that only because the
+    extension check refuses those names first.)
 
 ### 12.8 Decisions for the owner before the build
 
@@ -1665,10 +1990,23 @@ build (§12.8 asks for the number); expected a handful of seconds. The Render li
 7. **No looping**: a bed longer than the file is two clips.
 8. **Two builds, each through the three gates**: **E4a** — the library, the model, the render
    pass (verifiable with `curl` and a real render, the E1 way); **E4b** — the lane, the
-   gestures, the inspector, the audition. Release **0.9.0** when E4b lands.
+   gestures, the inspector, the audition. Release **0.9.0** when E4b lands. *(Taken with the
+   rest on 2026-09-21 — "go with your proposals, start E4a". **E4a was built that day**,
+   through Developer → Reviewer → Documentation with a fix round after the Reviewer's two
+   MAJORs, and is unreleased: the version stays 0.8.0, and §7's E4a block records what
+   shipped. E4b is next.)*
 9. Measured before the build, not guessed: the second pass's cost on the 341 s corpus with
    two five-minute clips (the bundled ffmpeg 7.1), and the presence of every filter named in
-   §12.4 in that binary's `-filters`.
+   §12.4 in that binary's `-filters`. *(Both measured 2026-09-21, before a line was written.
+   The bundled 7.1 essentials lists all seven — `adelay afade aformat amix asetpts atrim
+   volume` — and §12.4's graph over the corpus re-voiced output (336 s, 71 MB) with two 300 s
+   stereo MP3s, clips at 12.5 s and 200 s, gain 0.15, fades 1 s / 2 s, cost **8.25 s** on it
+   and 8.0 s on the dev 8.0.1: exit 0, the output's length unchanged at 5:35.96 under
+   `duration=first`, the picture copied. `music_timeout = 60 + 2 × output` comes from that
+   number and is generous by about forty times. The Reviewer then measured the worst case the
+   model permits — 200 clips placed at 330 s on a 340 s output, since `adelay` could have made
+   a late clip expensive — at **15.9 s and 132 MB** peak ffmpeg RSS against that rule's own
+   740 s deadline, so the 200-clip cap needs no second thought.)*
 
 ### Critical files (E4)
 
@@ -1685,3 +2023,14 @@ build (§12.8 asks for the number); expected a handful of seconds. The Render li
 | `frontend/src/components/project/NarrationTimeline.tsx`, `MusicLibrary.tsx` (new) | the lane, the gestures, the modal, the audition's music buffers |
 | `frontend/src/styles/theme.css` | per-lane rules for four lanes; the clip block |
 | `tests/test_music_library.py`, `tests/test_music_render.py` (new), `tests/test_edit.py`, `tests/test_revoice.py`, `tests/test_project_ownership.py` (exclusion), `tests/test_audit.py` | the guards |
+
+*As built (E4a):* every row above `frontend/src/lib/edit.ts` is built; the three `frontend/`
+rows are E4b's and nothing under `frontend/` changed. Two of the guards needed no edit:
+`tests/test_audit.py` already sweeps every `audit(...)` call site for a registered action and
+entity — which is *why* `api/audit.py`'s `ENTITIES` gains `"music"` — and the render pass's
+tests went into `tests/test_music_render.py` rather than `tests/test_revoice.py`.
+`tests/test_waveform.py` joins the list (+1: the two peak paths agree on the same samples,
+mono and stereo) and so does `tests/test_no_state_tracked.py`, which now asserts that
+`assets/music/` stays git-ignored. Two files the table did not name are a line each:
+`api/routers/edit.py` (the PUT's key mapping and the audit summary's music clause) and
+`services/narration.py` (the plan's `edit` block handed `applied.music`).

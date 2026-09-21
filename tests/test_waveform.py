@@ -203,6 +203,36 @@ def test_reading_in_chunks_gives_the_same_peaks_as_reading_it_whole(monkeypatch)
     assert whole["peaks"] == expected
 
 
+def test_peaks_from_samples_gives_the_strips_own_numbers_for_the_same_frames():
+    """The music library draws a clip's waveform from samples it has just
+    decoded, through ``peaks_from_samples``; the strip reads its file in
+    chunks through ``compute_peaks``. One bucket rule, two readers: the
+    numbers must not differ - mono, or stereo mixed down by the strip's own
+    rule (the louder channel per frame, sign kept)."""
+    pid = _video(with_audio=False)
+    rng = np.random.default_rng(3)
+    mono = rng.integers(-32768, 32767, size=4000, dtype=np.int64).astype("<i2")
+    path = _wav(waveform.audio_path(pid), mono, rate=10)
+    strip = waveform.compute_peaks(path)
+    mine = waveform.peaks_from_samples(mono, 10)
+    assert mine == strip["peaks"] and len(mine) == strip["buckets"] == 3200, "400 s at 8 a second"
+    assert waveform.peaks_payload(mine, 400.0, 10) == strip, "and the same response shape"
+
+    left = rng.integers(-32768, 32767, size=1000, dtype=np.int64).astype("<i2")
+    right = rng.integers(-32768, 32767, size=1000, dtype=np.int64).astype("<i2")
+    interleaved = np.empty(2000, dtype="<i2")
+    interleaved[0::2] = left
+    interleaved[1::2] = right
+    path = _wav(waveform.audio_path(pid), interleaved, rate=1, channels=2)
+    frames = np.stack([left, right], axis=1)
+    louder = frames[np.arange(1000), np.abs(frames.astype(np.int32)).argmax(axis=1)]
+    assert waveform.peaks_from_samples(louder, 1) == waveform.compute_peaks(path)["peaks"]
+
+    assert waveform.peaks_from_samples([], 1000) == [] and waveform.peaks_from_samples(mono, 0) == []
+    assert waveform.bucket_count(10.0, bucket_seconds=0.01) == 1000, "the bucket width is a parameter, 125 ms by default"
+    assert waveform.BUCKET_SECONDS == 0.125
+
+
 def test_a_single_bucket_wider_than_a_chunk_is_still_read(monkeypatch):
     """The other side of that loop: when one bucket does not fit in a chunk it
     is read whole rather than the loop spinning on an empty range."""

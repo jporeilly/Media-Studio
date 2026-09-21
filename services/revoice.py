@@ -16,13 +16,56 @@ PROJECTED into the output's seconds - so the engine sees a transcript in a
 shorter recording and does what it always does. One job kind, one code path,
 and nothing in ``_revoice_video`` changes. With no edit, or one that keeps
 everything, the path is exactly the one above, byte for byte.
+
+**The music lane is a second ffmpeg pass AFTER the mux** (spec §12.4): once
+``_revoice_video`` has written ``<stem>_revoiced.mp4``, the edit's clips are
+laid under its audio in place (``core.video_creator.mix_music`` - the video
+stream copied, and the voice's level untouched, because the pass up-mixes it
+to stereo at unity rather than through ffmpeg's power-preserving rematrix,
+which took a mono narration down 3.01 dB). That is the one shape that leaves
+``_revoice_video`` and the mux exactly as they are and keeps the standalone
+narration track voice-only: it is downloaded to be laid into other editors,
+and music baked into it would break that promise.
+
+**The record is stamped for the file that is on disk.** The mux's stamps are
+written as soon as ``_revoice_video`` has produced the file, before the music
+pass runs; a cancel or a failure in the pass then leaves a record that
+truthfully describes the voice-only render it left behind, rather than the
+previous render's ``music_rendered`` over bytes that no longer carry it. A
+mix that succeeds stamps again - the bytes changed once more, and the page's
+cache token with them.
 """
 
 import shutil
 from datetime import datetime, timezone
 
 from services import edit, jobs, narration, waveform
+from services import music as music_library
 from services import projects as store
+
+MISSING_MUSIC = "music file '{name}' is missing — remove the clip or upload the file again"
+
+
+def _music_clips(clips: list) -> list[dict]:
+    """The edit's clips as ``mix_music`` takes them - each with its library
+    file's PATH - or ``ValueError`` naming the first file that is not there.
+    A clip the library reported ``missing`` is refused outright, and every
+    other file is resolved now, before the job does any work, so the render
+    never finds a file gone halfway through (trap 25: a refusal, never
+    silence in the file's place)."""
+    resolved = []
+    for clip in clips:
+        if clip.get("missing"):
+            raise ValueError(MISSING_MUSIC.format(name=clip["file"]))
+        try:
+            path = music_library.get_path(clip["file"])
+        except music_library.MusicNotFound:
+            raise ValueError(MISSING_MUSIC.format(name=clip["file"])) from None
+        resolved.append({
+            "path": str(path), "at": clip["at"], "in": clip["in"], "out": clip["out"],
+            "gain": clip["gain"], "fade_in": clip["fade_in"], "fade_out": clip["fade_out"],
+        })
+    return resolved
 
 
 def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, provider=None) -> dict:
@@ -39,13 +82,24 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     per-sentence adjustments (``services.narration``) travelling with it, and
     the edit (``services.edit``) applied to it as a projection -, cuts the
     picture first when the edit removes anything, runs the carried-over
-    ``_revoice_video`` (keeps the frames, swaps the audio), records
+    ``_revoice_video`` (keeps the frames, swaps the audio), lays the edit's
+    music clips under the result when there are any, records
     ``revoiced_video`` on the project, and returns
     ``{"video", "language", "failed_sentences"}`` - or ``{"cancelled": True}``
-    when the job was cancelled while the picture was being cut. Raises
-    ``RuntimeError`` if the re-voice produced no file, and ``ValueError`` when
-    every sentence is muted (or cut away) - which would otherwise fail inside
-    the job as a bare "Re-voice failed".
+    when the job was cancelled while the picture was being cut or the music
+    mixed. Raises ``RuntimeError`` if the re-voice produced no file or the
+    music could not be mixed, and ``ValueError`` when every sentence is muted
+    (or cut away) - which would otherwise fail inside the job as a bare
+    "Re-voice failed" - or when a clip's music file has left the library
+    (refused before any work; never rendered as silence).
+
+    **A cancel during the music pass leaves the re-voiced file without
+    music on disk** - ``_revoice_video`` has already rewritten
+    ``<stem>_revoiced.mp4`` in place by then - and the record describes
+    exactly that: the voice-only render, stamped with a fresh ``revoiced_at``
+    (the page's cache token: the bytes DID change) and no ``music_rendered``.
+    The same holds for a mix that fails. The next render replaces the file; a
+    cancel is not a rollback.
     """
     record = store.get_project(pid)
     if not record:
@@ -80,6 +134,11 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     source_video = store.PROJECTS_DIR / pid / record["source_filename"]
     if not source_video.is_file():
         raise ValueError("The project's source video is missing.")
+
+    # The music, refused BEFORE any work when a clip's file has gone (the E1
+    # rule for an unreadable edit, applied here: never silence in its place),
+    # and every file resolved to its path now.
+    music_clips = _music_clips(applied.music)
 
     def _report(fraction: float, message: str = "") -> None:
         if progress:
@@ -202,6 +261,12 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     # job's result and closing message the way the AI loops report theirs.
     failed = int(getattr(processor, "failed_sentences", 0) or 0)
 
+    # Stamped HERE, for the file the mux has just written, and BEFORE the
+    # music pass: the pass rewrites that file in place and can be cancelled or
+    # fail, and a record carrying the previous render's stamps over bytes that
+    # no longer match them is the one thing this must not leave behind. The
+    # music's own stamps go on below, once the mix has succeeded.
+    #
     # Saved onto the record as it is NOW, not the copy read when the job
     # started: the transcript on it carries the user's per-sentence
     # adjustments, and writing back a copy from minutes ago would revert any
@@ -222,12 +287,16 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     # applied an edit says so beside the stamp - and a whole-source run clears
     # it, as ``narration_audio`` below is cleared, so the record never claims
     # an edit that the file on disk does not carry. Stamped whenever EITHER
-    # track removed anything: a narration-only edit leaves the picture whole
-    # but the output still differs from an unedited render.
+    # track removed anything - a narration-only edit leaves the picture whole
+    # but the output still differs from an unedited render. The music's clips
+    # are the third reason, and they are stamped after the pass has run.
     if applied.cut or applied.projected:
         current["edit_rendered_at"] = current["revoiced_at"]
     else:
         current.pop("edit_rendered_at", None)
+    # Popped for the file as it stands: voice only until the pass below says
+    # otherwise, so the record never claims music the file does not have.
+    current.pop("music_rendered", None)
     # The narration on its own, for editing the video elsewhere: same length as
     # the picture and starting at the same zero, so it drops straight onto a
     # timeline beside the original. Recorded only when it is really there - the
@@ -247,6 +316,33 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         # are missing from a narration that has every one of them.
         current.pop("revoice_failed_sentences", None)
     store.save_project(current)
+
+    # The music, as a second pass over the muxed output and in place: the
+    # picture copied, the voice's level untouched, the standalone narration
+    # track (voice only) not opened. The one step besides the cut that looks
+    # at the cancel flag - a mix of a long output can run for seconds - and a
+    # cancel here leaves the voice-only file the record above describes.
+    if music_clips:
+        from core import video_creator
+
+        count = len(music_clips)
+        _report(0.95, f"Mixing {count} music clip{'' if count == 1 else 's'}…")
+        mixed = video_creator.mix_music(
+            out, music_clips, out, cancel_check=jobs.cancel_requested_here,
+            output_seconds=applied.output_duration,
+        )
+        if not mixed:
+            if jobs.cancel_requested_here():
+                return {"cancelled": True}
+            raise RuntimeError("The music could not be mixed; the server log has the reason.")
+        # The file changed again, so its stamp does too (the page's cache
+        # token is that timestamp), and the edit stamp with it - the output
+        # differs from an unedited render whether or not a track was cut.
+        current["revoiced_at"] = datetime.now(timezone.utc).isoformat()
+        current["edit_rendered_at"] = current["revoiced_at"]
+        # How many clips this file carries, for the page.
+        current["music_rendered"] = len(music_clips)
+        store.save_project(current)
     if failed:
         _report(1.0, f"Re-voiced - {failed} sentence{'' if failed == 1 else 's'} could not be synthesised")
     return {"video": out.name, "language": language or None, "failed_sentences": failed}

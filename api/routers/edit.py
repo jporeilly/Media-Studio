@@ -1,14 +1,16 @@
-"""The edit: which ranges of a video's one source are kept, per track
-(porting vertical 6: E1 the model and the render, E2 the timeline gesture,
-E3 one list per track - video and narration).
+"""The edit: which ranges of a video's one source are kept, per track, and
+the music clips placed on the output (porting vertical 6: E1 the model and
+the render, E2 the timeline gesture, E3 one list per track - video and
+narration -, E4 the music lane).
 
 Three routes, thin over ``services.edit``, which owns the validation, the
 projection and the locking:
 
 - ``GET /api/projects/{pid}/edit`` - each track's kept ranges (``null`` means
-  everything), the source's length and the output's;
-- ``PUT /api/projects/{pid}/edit`` - replace the lists;
-- ``DELETE /api/projects/{pid}/edit`` - back to keep-everything.
+  everything), the music clips, the source's length and the output's;
+- ``PUT /api/projects/{pid}/edit`` - set the keys the body names, leave the
+  ones it does not (one rule for the two tracks and the music alike);
+- ``DELETE /api/projects/{pid}/edit`` - back to keep-everything, no music.
 
 The GET is a read and is allowed while a job holds the project. The PUT and
 the DELETE write the record, so they take ``jobs.require_idle`` (a 409) like
@@ -47,7 +49,8 @@ def writable(pid: str, user: dict) -> dict:
 
 def _summary(stored: dict) -> str:
     """The audit detail, per track: how many ranges and how much was removed,
-    or "whole" - never the times, which would say where every cut is."""
+    or "whole" - never the times, which would say where every cut is - and,
+    when clips are stored, how many; never their files or positions."""
     parts = []
     for track in edit.TRACKS:
         held = stored[track]
@@ -57,6 +60,9 @@ def _summary(stored: dict) -> str:
         count = len(held["keep"])
         removed = max(0.0, (stored["source_duration"] or 0.0) - held["output_duration"])
         parts.append(f"{track}: {count} range{'' if count == 1 else 's'} kept, {removed:.1f} s removed")
+    clips = len(stored.get("music") or [])
+    if clips:
+        parts.append(f"music: {clips} clip{'' if clips == 1 else 's'}")
     return "; ".join(parts)
 
 
@@ -65,8 +71,11 @@ def get_edit(pid: str, user: dict = Depends(current_user)):
     """The project's edit: for each of ``video`` and ``narration``, ``keep``
     is the list of kept ``[start, end]`` ranges in source seconds, or
     ``null`` when that track keeps the whole source, with that track's
-    ``output_duration``; ``source_duration`` is the extracted audio's length
-    (``null`` until the video has been transcribed) and the top-level
+    ``output_duration``; ``music`` the clips, each with its file's
+    ``file_duration`` and ``missing`` (the file has left the library - the
+    render will refuse until the clip is removed or the file uploaded
+    again); ``source_duration`` is the extracted audio's length (``null``
+    until the video has been transcribed) and the top-level
     ``output_duration`` what a render would be - the picture's - (``null``
     while neither is known). A version-1 edit answers in this shape, both
     tracks alike.
@@ -83,37 +92,60 @@ def get_edit(pid: str, user: dict = Depends(current_user)):
 
 @router.put("/{pid}/edit")
 def put_edit(pid: str, body: EditIn, user: dict = Depends(current_user)):
-    """Replace the edit: ``video`` and ``narration``, each a list of ordered,
-    non-overlapping ranges within the source in source seconds, or null (left
-    out) to keep that track whole - or ``keep``, the version-1 body, which
-    means both. Returns the edit as stored.
+    """Replace the edit. **One rule for every key**: a key the body does not
+    name is left exactly as it was stored, ``null`` clears it - a track back
+    to whole, the music gone - and a list replaces it. ``video`` and
+    ``narration`` take ordered, non-overlapping ranges within the source in
+    source seconds; ``music`` takes the lane's clips (``[]`` clears them
+    too); ``keep`` is the version-1 body and means BOTH tracks. Returns the
+    edit as stored.
+
+    So a cut sends its track lists and no ``music`` and never drops the
+    clips, and a clip commit sends ``music`` and no tracks and never drops
+    the picture's cut. A body naming nothing at all (``{}``) is a 200 that
+    changes nothing and records nothing, like a ``DELETE`` with nothing to
+    clear.
 
     Answers: 200 the stored edit, 400 a bad list (the message names the track
-    and the range), no track at all, ``keep`` beside a per-track list, or a
-    deck/PDF, 404 no such project, 409 a job holds the project or the video
-    has no extracted audio yet (the ranges are checked against its length,
-    and transcribing is what extracts it).
+    and the range, or the clip and the field - a clip naming a file that is
+    not in the library included), ``keep`` beside a per-track list or
+    ``music``, a stored edit this version cannot read, or a deck/PDF, 404 no
+    such project, 409 a job holds the project or a track list was sent for a
+    video with no extracted audio yet (the ranges are checked against its
+    length, and transcribing is what extracts it).
     """
     writable(pid, user)
-    if body.keep is not None and (body.video is not None or body.narration is not None):
-        raise HTTPException(status_code=400, detail="Send either keep (both tracks) or video / narration, not both.")
-    video, narration_keep = (body.keep, body.keep) if body.keep is not None else (body.video, body.narration)
+    named = body.model_fields_set
+    if body.keep is not None and named & {"video", "narration", "music"}:
+        raise HTTPException(status_code=400, detail="Send either keep (both tracks) or video / narration / music, not both.")
+    # A key the body did not name is UNCHANGED; one it named as null is a
+    # clear. ``keep`` names both tracks at once, for curl and E1's shape.
+    if body.keep is not None:
+        video = narration_keep = body.keep
+    else:
+        video = body.video if "video" in named else edit.UNCHANGED
+        narration_keep = body.narration if "narration" in named else edit.UNCHANGED
+    music = edit.UNCHANGED
+    if "music" in named:
+        music = None if body.music is None else [clip.model_dump(by_alias=True) for clip in body.music]
     try:
-        stored = edit.set_edit(pid, video=video, narration=narration_keep)
+        stored, changed = edit.set_edit(pid, video=video, narration=narration_keep, music=music)
     except edit.ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except edit.SourceLengthUnknown as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    audit(PROJECT_EDIT, user=user, entity="project", entity_id=pid, detail=_summary(stored))
+    if changed:
+        audit(PROJECT_EDIT, user=user, entity="project", entity_id=pid, detail=_summary(stored))
     return stored
 
 
 @router.delete("/{pid}/edit")
 def delete_edit(pid: str, user: dict = Depends(current_user)):
-    """Back to keep-everything. Returns the edit as it now stands (both
-    tracks' ``keep`` null). Idempotent, and a project that had no edit is left as it is and
+    """Back to keep-everything: the tracks whole and the music gone. Returns
+    the edit as it now stands (both tracks' ``keep`` null, ``music`` empty).
+    Idempotent, and a project that had no edit is left as it is and
     records nothing - there was nothing to clear. Answers: 200, 400 a
     deck/PDF, 404 no such project, 409 busy."""
     writable(pid, user)

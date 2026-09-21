@@ -19,6 +19,12 @@ entries, no visual gain.
 
 The file is read in chunks. A two-hour recording is 115 MB of PCM and must
 never be loaded whole to produce ~58 kB of JSON.
+
+The bucket arithmetic itself - how many buckets, where their edges fall, the
+max-pool and the scaling to a byte - lives once, in :func:`peaks_from_samples`
+and the helpers under it, because the music library (``services.music``) draws
+the same strip inside a clip from samples it has just decoded, and a second
+copy of the rule would be free to drift from this one (spec §12.3).
 """
 
 import json
@@ -37,6 +43,7 @@ logger = get_logger("WAVEFORM")
 # payload nobody can use: 341 s -> 2728 buckets (~11 kB of JSON), and anything
 # past ~25 minutes caps at 12000 (~58 kB).
 BUCKETS_PER_SECOND = 8
+BUCKET_SECONDS = 1 / BUCKETS_PER_SECOND
 MIN_BUCKETS = 800
 MAX_BUCKETS = 12000
 
@@ -78,10 +85,52 @@ def _cache_path(pid: str) -> Path:
     return store.PROJECTS_DIR / pid / CACHE_NAME
 
 
-def bucket_count(duration: float) -> int:
+def bucket_count(duration: float, bucket_seconds: float = BUCKET_SECONDS) -> int:
     """How many buckets a clip of ``duration`` seconds is drawn with."""
-    want = round(duration * BUCKETS_PER_SECOND)
+    want = round(duration / bucket_seconds)
     return max(MIN_BUCKETS, min(MAX_BUCKETS, int(want)))
+
+
+def _bucket_edges(frames: int, buckets: int) -> np.ndarray:
+    """Frame index where each bucket starts, plus the end: ``buckets + 1``
+    edges over ``frames`` frames. Strictly increasing as long as there are at
+    least as many frames as buckets, which every caller guarantees."""
+    return np.linspace(0, frames, buckets + 1).astype(np.int64)
+
+
+def _scaled(peaks: np.ndarray, full_scale: float) -> list[int]:
+    """Raw per-bucket maxima as bytes, 0-255 of full scale."""
+    return np.clip(peaks * 255.0 / full_scale, 0, 255).astype(np.uint8).tolist()
+
+
+def peaks_payload(peaks: list[int], duration: float, sample_rate: int) -> dict:
+    """The response shape: the peaks with the scale they were drawn at, so a
+    client can line them up with anything else drawn in seconds. One builder
+    for the strip's cache and the music library's."""
+    buckets = len(peaks)
+    return {
+        "buckets": buckets,
+        "bucket_seconds": duration / buckets if buckets else 0.0,
+        "duration": duration,
+        "sample_rate": int(sample_rate),
+        "peaks": peaks,
+    }
+
+
+def peaks_from_samples(samples, sample_rate: int, bucket_seconds: float = BUCKET_SECONDS) -> list[int]:
+    """The peaks of an in-memory clip: ``samples`` is one 16-bit value per
+    frame (mono, already mixed down), and the answer is exactly what
+    :func:`compute_peaks` gives the same frames from a file - the same bucket
+    count, the same edges, the loudest sample in each bucket scaled to a byte.
+    For a clip already decoded into memory; the strip's own file is read in
+    chunks by ``compute_peaks`` because it can be two hours long."""
+    magnitudes = np.abs(np.asarray(samples).astype(np.int32))
+    frames = int(magnitudes.size)
+    if frames == 0 or not sample_rate:
+        return []
+    buckets = min(bucket_count(frames / sample_rate, bucket_seconds), frames)
+    edges = _bucket_edges(frames, buckets)
+    return _scaled(np.maximum.reduceat(magnitudes, edges[:-1]), _FULL_SCALE[2])
 
 
 def _samples(raw: bytes, width: int, channels: int) -> np.ndarray:
@@ -191,7 +240,7 @@ def compute_peaks(path: Path) -> dict:
         # looks like it means. A clip this short is a test fixture, not a
         # recording, but it must not crash.
         buckets = min(bucket_count(duration), frames)
-        edges = np.linspace(0, frames, buckets + 1).astype(np.int64)
+        edges = _bucket_edges(frames, buckets)
 
         peaks = np.zeros(buckets, dtype=np.int64)
         first = 0
@@ -214,14 +263,7 @@ def compute_peaks(path: Path) -> dict:
             peaks[first:last] = np.maximum.reduceat(magnitudes, offsets)
             first = last
 
-    scaled = np.clip(peaks * 255.0 / _FULL_SCALE[width], 0, 255)
-    return {
-        "buckets": int(buckets),
-        "bucket_seconds": duration / buckets if buckets else 0.0,
-        "duration": duration,
-        "sample_rate": int(rate),
-        "peaks": scaled.astype(np.uint8).tolist(),
-    }
+    return peaks_payload(_scaled(peaks, _FULL_SCALE[width]), duration, rate)
 
 
 def duration_for(pid: str) -> float | None:

@@ -43,6 +43,23 @@ lands once it has. The spec is ``docs/porting/edit-timeline.md``.
 frame. With no ``audio.wav`` an edit cannot be measured, so it cannot be stored
 (``SourceLengthUnknown``, a 409 at the route) and it is not applied.
 
+**The music lane is different in kind** (E4, spec §12): the picture and the
+narration are material with an edit - ranges of the one source - while
+music is CLIPS placed on the output::
+
+    "music": [{"id": "m3f9a1", "file": "bed.mp3", "at": 12.5, "in": 0.0,
+               "out": 95.25, "gain": 0.15, "fade_in": 1.0, "fade_out": 2.0}]
+
+``file`` names a library file (``services.music``), ``at`` is where the clip
+starts in OUTPUT seconds (the picture's axis, so a cut before it moves it
+with the picture when the lane is unlocked - trap 24), ``in``/``out`` the
+slice of the FILE used, ``gain`` a linear factor (trap 26), the fades
+seconds of linear ramp. The list joins version 2 additively - absent is no
+music - and is validated against the library's recorded lengths, never
+against the source. A file that has gone since the clip was placed is
+reported ``missing`` on read and refused by the render (trap 25), never
+rendered as silence.
+
 The arithmetic here is pure and is exercised to exhaustion by
 ``tests/test_edit.py``; the two store functions at the bottom take
 ``services.projects.project_lock`` around their read-modify-write, exactly as
@@ -50,10 +67,13 @@ every other writer of the outer ``project.json`` does.
 """
 
 import math
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 # Aliased because ``narration`` is the name of a TRACK below, and the
-# functions here take it as an argument.
+# functions here take it as an argument; ``music`` likewise is the name of
+# the lane's list.
+from services import music as music_service
 from services import narration as sentences_service
 from services import projects as store
 from services import waveform
@@ -290,10 +310,183 @@ def project_transcript(transcript, keep) -> list[dict]:
     return projected
 
 
+# -- the music lane ------------------------------------------------------------
+
+# A clip's keys, exactly (spec §12.2): the id the client minted, the library
+# file, where it starts on the output, the slice of the file, the level and
+# the two fades. Nothing else is stored on a clip - ``missing`` and
+# ``file_duration`` are derived on read.
+CLIP_KEYS = ("id", "file", "at", "in", "out", "gain", "fade_in", "fade_out")
+_CLIP_NUMBERS = ("at", "in", "out", "gain", "fade_in", "fade_out")
+
+# Client-minted, so the selection, the undo stack and the inspector have a
+# handle that survives re-ordering; the server checks it and never renumbers.
+_CLIP_ID_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+
+# A bound on abuse, not on use: a bed and a few stings is a handful.
+MAX_CLIPS = 200
+
+# A clip shorter than this is a click, not music.
+MIN_CLIP_SECONDS = 0.1
+
+# ``set_edit``'s "leave this key exactly as it is" - one sentinel for all
+# three of ``video``, ``narration`` and ``music``, because ``None`` already
+# means something for each of them (a track becomes whole, the music is
+# cleared). The route maps a key the body did not name to this, by
+# ``model_fields_set``: absent = unchanged, null = cleared, a list = set.
+UNCHANGED = object()
+
+
+def _clip_number(clip: dict, key: str, label: str) -> float:
+    """One of a clip's numbers, checked and rounded like a range's bound:
+    bools, NaN, infinity and an integer too large for a float are refused."""
+    value = clip.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label}: {key} must be a number.")
+    try:
+        number = float(value)
+    except OverflowError:
+        raise ValueError(f"{label}: {key} must be a finite number.") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{label}: {key} must be a finite number.")
+    return round(number, PRECISION) + 0.0
+
+
+def _check_music(clips, library: dict, *, flag_missing: bool) -> list[dict]:
+    """The clips as they will be stored, sorted by ``at`` (stable), or
+    ``ValueError`` naming the clip by position and id and the field.
+    ``library`` is ``{name: duration}``. A file not in it is a refusal when
+    storing (``flag_missing`` False) and merely unbounded when reading back
+    (True: the clip is kept and :func:`stored_music` marks it missing)."""
+    if isinstance(clips, (str, bytes, dict)) or not isinstance(clips, (list, tuple)):
+        raise ValueError("The music must be a list of clips.")
+    if len(clips) > MAX_CLIPS:
+        raise ValueError(f"The music is limited to {MAX_CLIPS} clips; this edit has {len(clips)}.")
+
+    checked: list[dict] = []
+    seen: dict[str, int] = {}
+    for position, clip in enumerate(clips, start=1):
+        if not isinstance(clip, dict):
+            raise ValueError(f"music clip {position} must be an object with {', '.join(CLIP_KEYS)}.")
+        ident = clip.get("id")
+        label = f"music clip {position}" + (f" ({ident})" if isinstance(ident, str) and _CLIP_ID_RE.fullmatch(ident) else "")
+        keys = set(clip)
+        if keys != set(CLIP_KEYS):
+            missing = [key for key in CLIP_KEYS if key not in keys]
+            extra = sorted(keys - set(CLIP_KEYS))
+            raise ValueError(
+                f"{label}: " + " and ".join(
+                    part for part in (
+                        f"missing {', '.join(missing)}" if missing else "",
+                        f"unknown {', '.join(extra)}" if extra else "",
+                    ) if part
+                ) + f"; a clip has exactly {', '.join(CLIP_KEYS)}."
+            )
+        if not isinstance(ident, str) or not _CLIP_ID_RE.fullmatch(ident):
+            raise ValueError(f"{label}: id must be 1-32 characters of a-z, 0-9, _ or -.")
+        if ident in seen:
+            raise ValueError(f"{label}: id '{ident}' is already used by music clip {seen[ident]}.")
+        seen[ident] = position
+        name = clip.get("file")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{label}: file must be the name of a library file.")
+        duration = library.get(name)
+        if duration is None and not flag_missing:
+            raise ValueError(f"{label}: file '{name}' is not in the library.")
+
+        numbers = {key: _clip_number(clip, key, label) for key in _CLIP_NUMBERS}
+        at, start, end, gain, fade_in, fade_out = (numbers[key] for key in _CLIP_NUMBERS)
+        length = round(end - start, PRECISION)
+        if at < 0:
+            raise ValueError(f"{label}: at ({at:.3f}) starts before 0.")
+        if start < 0:
+            raise ValueError(f"{label}: in ({start:.3f}) starts before 0.")
+        if end <= start:
+            raise ValueError(f"{label}: out ({end:.3f}) must be after in ({start:.3f}).")
+        if length < MIN_CLIP_SECONDS - EPSILON:
+            raise ValueError(f"{label}: the clip ({length:.3f} s from in to out) is shorter than {MIN_CLIP_SECONDS} s.")
+        if duration is not None and end > round(float(duration), PRECISION) + EPSILON:
+            raise ValueError(
+                f"{label}: out ({end:.3f}) runs past the end of '{name}', which is {float(duration):.3f} s long."
+            )
+        if not 0 <= gain <= 1:
+            raise ValueError(f"{label}: gain ({gain:.3f}) must be between 0 and 1.")
+        if fade_in < 0 or fade_out < 0:
+            raise ValueError(f"{label}: fade_in and fade_out must be 0 s or more.")
+        if fade_in + fade_out > length + EPSILON:
+            raise ValueError(
+                f"{label}: fade_in + fade_out ({fade_in + fade_out:.3f} s) is longer than the clip ({length:.3f} s)."
+            )
+        checked.append({
+            "id": ident, "file": name, "at": at, "in": start, "out": end,
+            "gain": gain, "fade_in": fade_in, "fade_out": fade_out,
+        })
+    checked.sort(key=lambda clip: clip["at"])  # stable: equal starts keep their order
+    return checked
+
+
+def validate_music(clips, library: dict) -> list[dict]:
+    """The clips as they will be stored, or ``ValueError`` naming the one
+    that is wrong: a list of at most :data:`MAX_CLIPS` objects with exactly
+    :data:`CLIP_KEYS`; ``id`` matching ``^[a-z0-9_-]{1,32}$`` and unique;
+    ``file`` in ``library`` (``{name: duration}``); the numbers finite, not
+    bool, rounded to :data:`PRECISION`; ``at >= 0``; ``0 <= in < out <=``
+    the file's length with ``out - in >= MIN_CLIP_SECONDS``; ``0 <= gain <=
+    1``; the fades ``>= 0`` and together no longer than the clip. Sorted by
+    ``at``. Overlapping clips are allowed and sum (two beds cross-fading by
+    hand is the ordinary use)."""
+    return _check_music(clips, library, flag_missing=False)
+
+
+def _annotated(clip: dict, library: dict) -> dict:
+    """A stored clip as it is read back: with the library's length for its
+    file and whether the file has gone (``missing``), which the plan's
+    ``edit`` block carries to the lane and the render refuses on."""
+    duration = library.get(clip["file"])
+    return {
+        **clip,
+        "file_duration": None if duration is None else round(float(duration), PRECISION),
+        "missing": duration is None,
+    }
+
+
+def stored_music(record: dict, library: dict | None = None) -> list[dict]:
+    """The record's music clips as read back - each with ``file_duration``
+    and ``missing`` - or ``[]`` when the edit has none. ``library`` is
+    ``{name: duration}``; ``None`` reads the library's index, and only when
+    there are clips to check against it, so a project without music never
+    touches the library.
+
+    A list that does not validate in SHAPE is a ``ValueError`` naming the
+    clip, as an unreadable track list is (E1's rule: never a silent
+    keep-everything). A file that is no longer in the library is NOT an
+    error here (trap 25): the clip comes back with ``missing: True`` - the
+    lane draws it hatched, the audition skips it, the render refuses - and
+    its ``in``/``out`` cannot be bounded, so they are not."""
+    held = record.get("edit")
+    if held is None:
+        return []
+    if not isinstance(held, dict):
+        raise ValueError(UNREADABLE)
+    clips = held.get("music")
+    if clips is None:
+        return []
+    if library is None:
+        library = music_service.library()
+    try:
+        checked = _check_music(clips, library, flag_missing=True)
+    except ValueError as exc:
+        raise ValueError(
+            f"This project's music cannot be read ({exc}); clear the edit and place the clips again."
+        ) from None
+    return [_annotated(clip, library) for clip in checked]
+
+
 # -- the record --------------------------------------------------------------
 
 # The two lists the record may carry (spec §11.1), in the order the payload
-# and the audit name them. E4's ``music`` joins the same version additively.
+# and the audit name them. E4's ``music`` joins the same version additively
+# and is not a track: it has no kept list, and ``stored_music`` reads it.
 TRACKS = ("video", "narration")
 
 UNREADABLE = (
@@ -374,7 +567,9 @@ class Applied:
     projected (``projected``: the narration list removes something); the
     sentences in the coordinates the render will use; how long the output is
     - the picture's length, which is what the render's ``-shortest`` mux
-    bounds everything to - and the narration track's own length beside it."""
+    bounds everything to - and the narration track's own length beside it;
+    and ``music``, the clips as :func:`stored_music` reads them (each with
+    ``file_duration`` and ``missing``), ``[]`` when there are none."""
 
     video: list[list[float]] | None
     narration: list[list[float]] | None
@@ -383,6 +578,7 @@ class Applied:
     sentences: list
     output_duration: float | None
     narration_duration: float | None
+    music: list = field(default_factory=list)
 
     @property
     def keep(self) -> list[list[float]] | None:
@@ -390,9 +586,14 @@ class Applied:
         return self.video
 
 
-def apply(record: dict, transcript, source_duration) -> Applied:
+def apply(record: dict, transcript, source_duration, library: dict | None = None) -> Applied:
     """The edit applied to ``transcript`` - THE function both the audition plan
     and the render call, so the two cannot disagree.
+
+    ``library`` is the music library as ``{name: duration}`` for
+    :func:`stored_music`; ``None`` (every real caller) reads the index, and
+    only when the record has clips. The music rides along on ``music`` and
+    changes nothing else here: it is placed on the output the tracks make.
 
     Two lists, one axis (spec §11.2, trap 18): the NARRATION list decides
     where a sentence lands and which sentences are dropped, the VIDEO list
@@ -412,9 +613,10 @@ def apply(record: dict, transcript, source_duration) -> Applied:
     ``SourceLengthUnknown`` rather than applied on trust or silently ignored.
     """
     video, narration = stored_tracks(record, source_duration)
+    music = stored_music(record, library)
     length = None if source_duration is None else round(float(source_duration), PRECISION)
     if video is None and narration is None:
-        return Applied(None, None, False, False, transcript, length, length)
+        return Applied(None, None, False, False, transcript, length, length, music)
     if source_duration is None:
         raise SourceLengthUnknown(
             "This project has an edit but its extracted audio is missing, so the edit cannot be "
@@ -427,6 +629,7 @@ def apply(record: dict, transcript, source_duration) -> Applied:
         project_transcript(transcript, narration) if projected else transcript,
         output_duration(video) if cut else length,
         output_duration(narration) if projected else length,
+        music,
     )
 
 
@@ -437,19 +640,26 @@ def _track_payload(keep, length) -> dict:
     return {"keep": keep, "output_duration": output_duration(keep) if keep else length}
 
 
-def payload(video, narration, source_duration) -> dict:
+def payload(video, narration, source_duration, music=()) -> dict:
     """The shape the routes answer with, and what the audition plan embeds as
     ``edit``: one block per track - its kept ranges in SOURCE seconds
-    (``None`` = everything) and its output's length -, the source's length to
-    :data:`PRECISION` (``None`` before transcription) and the output's, which
-    is THE PICTURE's. The lengths are rounded so a client working in the
-    reported coordinate space can send its last range's end straight back."""
+    (``None`` = everything) and its output's length -, the music clips as
+    read back (each with ``file_duration`` and ``missing``; ``[]`` when there
+    are none), the source's length to :data:`PRECISION` (``None`` before
+    transcription) and the output's, which is THE PICTURE's. The lengths are
+    rounded so a client working in the reported coordinate space can send its
+    last range's end straight back. ``music`` is what :func:`stored_music`
+    returns; a clip without the two derived keys is given them."""
     length = None if source_duration is None else round(float(source_duration), PRECISION)
     picture = _track_payload(video, length)
     return {
         "version": VERSION,
         "video": picture,
         "narration": _track_payload(narration, length),
+        "music": [
+            {**clip, "file_duration": clip.get("file_duration"), "missing": bool(clip.get("missing"))}
+            for clip in music
+        ],
         "source_duration": length,
         "output_duration": picture["output_duration"],
     }
@@ -457,43 +667,76 @@ def payload(video, narration, source_duration) -> dict:
 
 def describe(record: dict) -> dict:
     """``GET /{pid}/edit``: each track's stored ranges (``None`` =
-    everything), the source's length when it is known, and the output's. A
-    version-1 record answers in the version-2 shape, cut together. Reads only."""
+    everything), the music clips, the source's length when it is known, and
+    the output's. A version-1 record answers in the version-2 shape, cut
+    together. Reads only."""
     source_duration = waveform.duration_for(record["id"])
     video, narration = stored_tracks(record, source_duration)
-    return payload(video, narration, source_duration)
+    return payload(video, narration, source_duration, stored_music(record))
 
 
-def set_edit(pid: str, video=None, narration=None) -> dict:
-    """Store the given lists as the project's edit, replacing any previous
-    lists - a version-1 record included, which is rewritten in this shape.
+def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) -> tuple[dict, bool]:
+    """Store the given lists as the project's edit, and answer with the edit
+    as it now stands and whether anything was given to change.
+
+    **One rule for all three keys**: :data:`UNCHANGED` (the default, and what
+    the route passes for a key the body did not name) leaves that key exactly
+    as it is; ``None`` clears it - a track back to whole, the music gone -;
+    a list is validated and stored. ``[]`` clears the music too (no clips is
+    no music) while an empty track list is a refusal (E1's rule: keep at
+    least one range). So a cut sends its tracks and no ``music`` and never
+    drops the clips, and a clip commit sends ``music`` and no tracks and
+    never drops the picture's cut.
 
     MERGED into the stored edit rather than written from scratch: the
-    version and the two tracks are this function's to write (a track given
-    as ``None`` is REMOVED - it keeps everything - and a version-1 ``keep``
-    never survives under version 2), and every other key rides through
-    untouched, as ``stored_tracks`` promises on read - E4's ``music`` must not
-    be dropped by the first cut after it lands. Both tracks ``None`` is
-    refused, because an edit with no track is not an edit. Each list is
-    validated BEFORE the lock and before the first write, so a refused list
-    leaves the project exactly as it was. Raises ``ValueError``
-    for a bad list (naming the track and the range), no track at all, or a
-    deck; ``SourceLengthUnknown`` when the project has no extracted audio
-    (nothing to measure against); ``ProjectNotFound`` for a project that is
-    gone. The record is re-read inside ``services.projects.project_lock``
-    immediately before it is written - the same lock the transcript Save and
-    the narration editor take - so neither of them is overwritten with a
-    stale copy.
+    version, the two tracks and the music are this function's to write, and
+    every other key rides through untouched, as ``stored_tracks`` promises on
+    read. A version-1 record is read as both tracks cut together (§11.1) and
+    rewritten in the version-2 shape here, so that cut survives a call that
+    names neither track. When the merge leaves nothing but the version - no
+    track list and no music - the ``edit`` key is REMOVED, as ``clear_edit``
+    removes it, so a record never carries an edit that is no edit.
+
+    A call that names nothing at all is a NO-OP: nothing is written, nothing
+    is forgotten, and the answer is the edit as it stands with ``False``
+    beside it, so the route leaves it out of the audit log exactly as it
+    leaves out a ``DELETE`` that had nothing to clear.
+
+    Every list is validated BEFORE the first write - the given lists before
+    the lock, the merged edit inside it and before ``save_project`` - so a
+    refused list, and a stored one this version cannot read, leave the
+    project exactly as it was. Raises ``ValueError`` for a bad list (naming
+    the track and the range, or the clip and the field), an unreadable stored
+    edit, or a deck; ``SourceLengthUnknown`` when a TRACK list is given and
+    the project has no extracted audio (nothing to measure it against - the
+    music is measured against the library, so a music-only call needs none);
+    ``ProjectNotFound`` for a project that is gone. The record is re-read
+    inside ``services.projects.project_lock`` immediately before it is
+    written - the same lock the transcript Save and the narration editor
+    take - so neither of them is overwritten with a stale copy.
     """
-    if video is None and narration is None:
-        raise ValueError("Give at least one track to cut - video, narration or both.")
+    given = {name: value for name, value in zip(TRACKS, (video, narration)) if value is not UNCHANGED}
+    if not given and music is UNCHANGED:
+        record = store.get_project(pid)
+        if record is None:
+            raise ProjectNotFound("Project not found.")
+        if record.get("kind") not in sentences_service.NARRATION_KINDS:
+            raise ValueError("Only video projects can be cut.")
+        return describe(record), False
     source_duration = waveform.duration_for(pid)
-    if source_duration is None:
+    if source_duration is None and any(keep is not None for keep in given.values()):
         raise SourceLengthUnknown(waveform.NO_AUDIO_MESSAGE)
     checked = {
         name: _track_keep(name, keep, source_duration)
-        for name, keep in zip(TRACKS, (video, narration)) if keep is not None
+        for name, keep in given.items() if keep is not None
     }
+    library = None
+    clips = UNCHANGED
+    if music is None or (not isinstance(music, (str, bytes, dict)) and hasattr(music, "__len__") and len(music) == 0):
+        clips = None
+    elif music is not UNCHANGED:
+        library = music_service.library()
+        clips = validate_music(music, library)
 
     with store.project_lock(pid):
         record = store.get_project(pid)
@@ -503,27 +746,51 @@ def set_edit(pid: str, video=None, narration=None) -> dict:
             raise ValueError("Only video projects can be cut.")
         held = record.get("edit")
         merged = dict(held) if isinstance(held, dict) else {}
+        if merged.get("version") == 1 and "keep" in merged:
+            # Version 1 means both tracks cut together (``stored_tracks``);
+            # written back in this shape here, so a call that leaves a track
+            # alone keeps that cut rather than dropping a list it never saw.
+            together = merged.pop("keep")
+            merged["video"] = {"keep": together}
+            merged["narration"] = {"keep": together}
         merged["version"] = VERSION
-        merged.pop("keep", None)
+        merged.pop("keep", None)  # never under version 2: it could mean two things
         for name in TRACKS:
             if name in checked:
                 merged[name] = {"keep": checked[name]}
-            else:
+            elif name in given:  # given as None: the track keeps everything again
                 merged.pop(name, None)
-        record["edit"] = merged
+        if clips is None:
+            merged.pop("music", None)
+        elif clips is not UNCHANGED:
+            merged["music"] = clips
+        # What the merged edit READS BACK as, before anything is written: a
+        # stored list this version cannot read (a hand-edited record, a
+        # foreign one) refuses the call instead of landing the cut and then
+        # raising on the way out with the write already done.
+        held_video, held_narration = stored_tracks({"edit": merged}, source_duration)
+        held_music = stored_music({"edit": merged}, library)
+        if any(key in merged for key in (*TRACKS, "music")):
+            record["edit"] = merged
+        else:
+            # Nothing left to describe: the record reads as one that never
+            # had an edit, as it does after ``clear_edit``.
+            record.pop("edit", None)
         store.save_project(record)
     # The edit decides which sentences are spoken, and the speaking rate is
     # measured from three of those - so the memoised rate no longer describes
-    # this project. Outside the lock: it guards a different thing.
+    # this project. Outside the lock: it guards a different thing. (A change
+    # to the music alone moves no sentence; forgetting is still harmless.)
     sentences_service.forget_baseline(pid)
-    return payload(checked.get("video"), checked.get("narration"), source_duration)
+    return payload(held_video, held_narration, source_duration, held_music), True
 
 
 def clear_edit(pid: str) -> tuple[dict, bool]:
-    """Back to keep-everything: the key is removed, not written empty, so the
-    record reads exactly as one that never had an edit. Returns the payload
-    and whether there was an edit to clear, so the route can leave a no-op
-    out of the audit log; nothing is written or forgotten for a no-op."""
+    """Back to keep-everything: the key is removed, not written empty - the
+    music with it, since it is "back to no edit" - so the record reads exactly
+    as one that never had an edit. Returns the payload and whether there was
+    an edit to clear, so the route can leave a no-op out of the audit log;
+    nothing is written or forgotten for a no-op."""
     with store.project_lock(pid):
         record = store.get_project(pid)
         if record is None:
