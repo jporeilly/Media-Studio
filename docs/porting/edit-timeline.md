@@ -946,8 +946,9 @@ pins (E3 brings snapping to the *drag*).
 
 **E4 — the music lane.** Asked for by the owner on 2026-09-16 — *"I should be able to add
 music tracks over the top — another channel like Camtasia"* — and moved here out of §9's
-v2 list (§9 keeps mixing and ducking the *original* audio). Sketched to the model rather
-than designed: a second lane on the same timeline, which must fit the one-list shape above.
+v2 list (§9 keeps mixing and ducking the *original* audio). **Designed in §12 (2026-09-21,
+not built)**; the sketch below stands as its outline — a second lane on the same timeline,
+which fits the per-track shape E3 gave the edit.
 
 - **The model.** `edit.version` 2 gains `"music": [{file, at, in, out, gain, fade_in,
   fade_out}]` — `file` a name in the music **library**, `at` where the clip starts in
@@ -1403,3 +1404,284 @@ joins, marquee, drag with snapping, the operation stack), each through Developer
 Documentation, rendered in the packaged app before it is believed. *As built:* in that order,
 both halves through all three gates; the live check was the supervisor's, on Vite against the
 dev backend — the packaged app is not in the record (§7).
+
+---
+
+## 12. E4 — the music lane (designed 2026-09-21, not built)
+
+Written against the tree at `dd818d0` (0.8.0 plus two clock fixes). The owner's words,
+2026-09-16, mid-E1: *"I should be able to add music tracks over the top — another channel
+like Camtasia"*; and their own Camtasia project, shown on the 17th, has exactly that: Track 3
+holds *"Amarent — The Man from Hyde Park — Ambient Mix"* laid twice along the timeline under
+the picture and the narration. Scoped 2026-09-21 at *"scope E4"*. This is the third track,
+and it is different in kind from the two E3 gave locks to: the picture and the narration are
+**material with an edit**, ranges of one source; music is **clips placed on the output** —
+Camtasia clips, with a file, a position, an in and an out. The one-list shape does not hold
+it, and §7's sketch already said so: version 2 gains a `music` list, additively.
+
+### 12.1 What exists, and what does not
+
+- **The re-voice has never mixed music.** `replace_video_audio` (`core/video_creator.py:300-357`)
+  can overlay ONE file looped to the narration's length at a "rough dB" level
+  (`20 × volume − 20`), but `_revoice_video` hands it `background_music_paths[0]`, and
+  `services/revoice.py` constructs the processor with no music at all — so `bg_music` is
+  `None` on every re-voice a video project has ever had. The generate path mixes a playlist
+  through moviepy (`_apply_background_music`, `:1010-1070`: concatenated, looped or trimmed,
+  a linear volume factor, one fade in and out). Neither is a lane, neither is placed, and
+  E4 replaces neither: the re-voice gains its own music step (§12.4) and the generate path
+  keeps the playlist it has.
+- **There is no library.** `services/styles.py:15` names `MUSIC_DIR = assets/music`; nothing
+  creates it, nothing serves it, and `api/app.py:79`'s `/assets` mount is the FRONTEND's
+  hashed chunks, not the repo's `assets/` — a music file must be served by a route. Vertical 2b
+  (`docs/porting/generation-options.md` §4) surveyed this and was never built; E4 builds it,
+  once, for both paths.
+- **The edit is ready for it.** `stored_tracks` reads version 2 and lets a key it does not
+  know ride through; `set_edit` merges rather than rewrites (E3's Reviewer, NIT 7), so a cut
+  made after a music clip lands does not drop the clip. `TRACKS = ("video", "narration")` is
+  the picture's and the narration's business only.
+- **The timeline draws three lanes** with the lane count baked into the CSS
+  (`.os-tl-headers` rows `repeat(3, …)`, `.os-tl-selection.no-video` / `.no-narration`,
+  `.os-tl-join.picture`, the `.os-tl-pieces.*` tops — `theme.css:424-517`). A fourth lane
+  means those become per-lane rules, not a fourth copy of each.
+- **The audition schedules one-shot buffers on one clock** (`scheduleFrom`,
+  `NarrationTimeline.tsx:715-728`): a `Map<index, AudioBuffer>` of decoded sentence clips
+  and `node.start(when, offset)`. A music clip is the same node with three more things —
+  a `duration`, a `GainNode`, and ramps for the fades.
+- **ffmpeg, not ffprobe** (traps 2, 3): a music file's length must come from decoding it
+  once at upload (pydub finds the bundled ffmpeg through the PATH prepend,
+  `utils/config.py:70-71`), never from a probe.
+
+### 12.2 The model — clips on the output axis
+
+```json
+"edit": { "version": 2,
+          "video":     { "keep": [[0.0, 47.3], [52.3, 341.008]] },
+          "narration": { "keep": [[0.0, 341.008]] },
+          "music": [ { "id": "m3f9a1", "file": "Amarent - The Man from Hyde Park.mp3",
+                       "at": 12.5, "in": 0.0, "out": 95.25,
+                       "gain": 0.15, "fade_in": 1.0, "fade_out": 2.0 } ] }
+```
+
+- `music` is a list of clips, ordered by `at`; absent or empty means no music. Version stays
+  **2** — additive, as §7 promised; `stored_tracks` is unchanged and a new `stored_music`
+  reads the list beside it.
+- `id`: client-minted (`^[a-z0-9_-]{1,32}$`, unique in the list) — the selection, the undo
+  stack and the inspector need a handle that survives re-ordering; the server validates
+  uniqueness and never renumbers.
+- `file`: a name in the library (§12.3), sanitised exactly as the library sanitises on
+  upload, and **checked to exist at write time**. At read time a file that has since gone
+  is reported as `missing: true` on the clip — the plan's `edit` block carries it, the lane
+  draws the clip hatched with a warning, the audition skips it, and the render **refuses**
+  ("music file X is missing — remove the clip or upload the file again"), never renders
+  silence in its place (the E1 rule for an unreadable edit, applied here).
+- `at` ≥ 0 in **OUTPUT seconds** — the picture's axis, the one the ruler shows. That is
+  what makes the lane behave as Camtasia's does under a cut (§12.5): with the Music lane
+  unlocked, a ripple delete before a clip moves it earlier with the picture, and one
+  through a clip trims it; locked, the clip stays at its time.
+- `in` / `out` in the FILE's seconds: `0 ≤ in < out ≤ file duration` (the library's
+  recorded length), `out − in ≥ 0.1`. The clip's length on the timeline is `out − in`;
+  there is no stretching, no looping (a second lap is a second clip — Camtasia's model, and
+  the owner's own Track 3 shows two copies).
+- `gain` in **[0, 1], a linear factor** applied by the render's `volume=` filter and the
+  audition's `GainNode` alike — never the old pydub "rough dB" formula (trap 26). The
+  default for a new clip is the studio's `music_volume` (`services/studio_settings.py:73`,
+  0.15 today: −16.5 dB), which is exactly the "one static lower level under the voice" the
+  owner ruled on ([[feedback_audio_ducking]]). **No ducking**: the level is constant across
+  the clip whether the narrator speaks or not.
+- `fade_in` / `fade_out` ≥ 0 seconds, together at most the clip's length; **linear** ramps
+  (ffmpeg's `afade` default curve `tri` and the browser's `linearRampToValueAtTime` are the
+  same shape, so the audition and the render agree). Music may fade; **the voice never
+  does** ([[feedback_video_audio]]) — nothing here touches the narration master.
+- At most 200 clips; overlapping clips are allowed and sum (two beds cross-fading by hand
+  is the ordinary use). Validation names the clip by index and field, as `validate_keep`
+  names a range.
+
+### 12.3 The library — vertical 2b, built once
+
+`assets/music/` (`MUSIC_DIR`; inside the install tree beside `assets/finished`, where it
+survives reinstall as the projects do) plus an index the routes read instead of decoding:
+
+- `POST /api/music` — multipart upload (the `UploadFile` pattern of `import_upload`,
+  `api/routers/projects.py`); accepted by extension `mp3 wav m4a aac ogg flac`, then **decoded
+  once** with pydub (`AudioSegment.from_file`) to prove it is audio and to measure it — a file
+  that will not decode is a 400, not a stored surprise; written to `.part` and published with
+  `replace_with_retry` (trap 10); size cap 100 MB; the name sanitised with
+  `utils.helpers.sanitize_filename` and **unique — an existing name is a 409** ("rename the
+  file or delete the old one"), because a clip refers to a file by name and a silent
+  replacement would change every project that uses it. On upload the server also computes
+  and caches the file's **peaks** (`<name>.peaks.json`, the waveform module's 125 ms buckets
+  from the decoded samples — pull the bucket arithmetic out of `services/waveform.py` into a
+  helper both callers use, never a second copy) and appends to `assets/music/index.json`:
+  `{name, size, duration, sample_rate, channels, uploaded_at, uploaded_by}`. Audited as
+  `MUSIC_UPLOAD` (name and size, no more).
+- `GET /api/music` — the index, sorted by name.
+- `GET /api/music/{name}` — the file, `FileResponse`, served for the audition; the name is
+  immutable so `Cache-Control: private, max-age=86400` is right (unlike the rewritten
+  outputs). `GET /api/music/{name}/peaks` — the cached peaks.
+- `DELETE /api/music/{name}` — **refused with a 409 naming the projects** while any project's
+  edit refers to the file (a scan of the store's records; a few files, milliseconds); else
+  removes the file, its peaks and its index row; audited `MUSIC_DELETE`.
+- The library is **studio-wide** — shared by every account, like the voices and the studio
+  settings; every signed-in user may list, upload and delete (the audit row says who).
+  Routes live in a new `api/routers/music.py`; they are not project-scoped, so they join the
+  ownership sweep's *exclusion* list with a comment, not its table.
+- **Where the packaged app puts it**: `<install>\app\assets\music`, next to `finished` —
+  kept across reinstalls, deleted with nothing (a project's delete never touches the
+  library). The data-dir move (§ NEXT in memory) carries it along when it happens.
+
+### 12.4 The render — one more pass, and `_revoice_video` still untouched
+
+E1 put the picture cut BEFORE the re-voice; E4 puts the music AFTER it, as a second ffmpeg
+pass over the muxed output — the one shape that leaves `_revoice_video` and the mux exactly
+as they are and keeps the standalone narration track voice-only (it is downloaded to be laid
+into other editors, and music baked into it would be a regression of that promise):
+
+1. `services/revoice.py` reads the clips (`edit.stored_music`), refuses a missing file
+   (§12.2), and after `_revoice_video` has written `<stem>_revoiced.mp4` calls
+2. **New `core/video_creator.py::mix_music(video_in, clips, video_out, cancel_check)`** —
+   one ffmpeg run, `FFMPEG_PATH`:
+   ```
+   -i revoiced.mp4  -i fileA.mp3  -i fileB.mp3 …
+   -filter_complex "
+     [1:a]atrim=start=IN:end=OUT,asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo,
+          volume=GAIN,afade=t=in:st=0:d=FI,afade=t=out:st=LEN-FO:d=FO,adelay=AT|AT[m1];
+     … one chain per clip, the same input reused for every clip of the same file …
+     [m1][m2]…amix=inputs=N:normalize=0:dropout_transition=0[bed];
+     [0:a]aformat=channel_layouts=stereo[v]; [v][bed]amix=inputs=2:duration=first:normalize=0[a]"
+   -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k -y out.part.mp4
+   ```
+   `normalize=0` on both mixes (trap 29 — `amix`'s default divides by the input count and
+   would halve the voice); `duration=first` ends the bed at the picture; `aformat` to stereo
+   before any mix (the TTS master is mono, most music is stereo); **`-c:v copy`** — the
+   picture is not touched (a few seconds, not a re-encode); `.part` + `replace_with_retry`;
+   the cancel flag polled and the process killed as `cut_picture` does; timeout
+   `60 + 2 × output length` (the work is decoding the music, bound by the output's length).
+   Every filter named here is in ffmpeg 7.1 essentials' core set (trap 17 says: check
+   `-filters` on the bundled binary before relying on it — the Developer does, in a test that
+   reads the real binary's filter list when it is present).
+3. `edit_rendered_at` is stamped when the clips exist (the output differs from an unedited
+   render), as it is for a cut; the record gains `music_rendered: N` for the page.
+4. The legacy one-file overlay in `replace_video_audio` is left alone — it is the generate
+   path's and it is not on this path.
+
+Cost: decoding two five-minute tracks and re-muxing a 341 s output, measured before the
+build (§12.8 asks for the number); expected a handful of seconds. The Render line says
+"… and mixes 2 music clips under the narration".
+
+### 12.5 The lane, the gestures, the audition
+
+- **A fourth lane, Music**, under Narration, with E3's lock and channel-name button (the
+  channel selection locks the other two). The headers grid, the selection band, the join
+  markers and the pieces layers become per-lane rules (§12.1's last bullet). Clips are
+  Camtasia's: dark rounded blocks with the file's name, the file's **waveform inside** from
+  the cached peaks sliced `in…out` (pooled as the audio lane's is), the fades drawn as
+  triangles at the ends, a hatch and a warning when the file is missing.
+- **Add music**: a button on the Music header opens a **Library** modal (the `Modal`
+  primitive): the index as a table (name, length, size, who, when), **Upload** (a file input,
+  progress, the 409 on a duplicate shown by name), **Delete** (the 409 naming projects
+  shown), and **Add at playhead** — which places a clip at the playhead, `in = 0`,
+  `out = min(file length, output − at)`, gain = the studio's `music_volume`, the default
+  fades of decision 2, and commits it (one `PUT /edit` with the new `music` list; the
+  drawing, as always, is the refetched plan).
+- **Move**: drag a clip along the lane — `at` changes, snapping to the playhead, the
+  picture's joins, 0, the picture's end and other clips' ends (the E3 machinery,
+  `snap`). **Trim**: drag a clip's left or right edge (an 8 px zone) — `in` or `out`
+  changes, the clip's length with it; never past the file's length, never below 0.1 s.
+  **Remove**: select a clip and press Delete / Backspace (Camtasia's "delete selected
+  media"; with a clip selected these keys act on the clip, not on the range selection —
+  the clip selection wins while it exists, Escape clears it first). Every commit is one
+  `PUT`, on release (trap 8), with the whole `music` list.
+- **A cut with the Music lane unlocked** applies E3's ripple to the clips: `cutMusic(clips,
+  a, b)` — a clip wholly after `[a, b]` moves earlier by `b − a`; one that spans the cut
+  is **split into two** (the part before keeps its `at`, the part after starts at `a` with
+  `in` advanced by the cut's overlap) — the two pieces are what Camtasia leaves too; one
+  wholly inside is removed. Locked, the clips are untouched (trap 19). The same helper
+  serves `S` (a split of the Music lane at the playhead makes two clips).
+- **Inspector**: with a clip selected, a row under the strip — the file, `at`, `in`/`out`,
+  a **gain** slider 0–1 (default marked), **fade in** / **fade out** seconds — each a
+  commit on change (blur/Enter or slider release), like the List's boxes.
+- **The audition** fetches each distinct file once (`GET /api/music/{name}` → `api.blob` →
+  `decodeAudioData`, cached in a `Map<name, AudioBuffer>` beside the sentence buffers) and
+  schedules every clip in `scheduleFrom` on the same clock: `source.start(ctxStart +
+  max(0, at − from), in + max(0, from − at), out − in − max(0, from − at))` through a
+  `GainNode` whose value follows the clip's fades with linear ramps (decision 4). A clip
+  whose file is missing is skipped. **The eye on the Music header gets its job**: it mutes
+  the music in the audition only ("hear the voice alone"), never in the render. Decoded
+  music is PCM — a five-minute stereo file is about 100 MB in memory — so the audition
+  decodes a file once and the copy line says a long library is expensive to audition.
+- **Undo**: the operation stack's edit entries hold `video`, `narration` AND `music`; a
+  clip's move, trim, gain, fades, add and remove are edit operations, and E3's lock covers
+  them.
+- **Render summary**: "Cuts 1 range of the picture (5.0 s removed), mixes 2 music clips under
+  the narration and re-voices — about 30 s …".
+
+### 12.6 API changes
+
+| Route | Change |
+|---|---|
+| `PUT /{pid}/edit` | body gains `"music": [clip, …] \| null`; **absent means unchanged** (E3's client sends no `music`, and a cut must not clear the music), `null` or `[]` clears. The tracks keep E3's rule (absent = whole). Validated before the lock; a clip naming a file not in the library is a 400 naming the clip. The audit summary gains "music: 2 clips". |
+| `GET` / `DELETE /{pid}/edit`, the plan's `edit` block | carry `music` with each clip's `file_duration` and `missing`. `DELETE` clears the music too (it is "back to no edit"). |
+| `GET /api/music`, `POST /api/music`, `GET /api/music/{name}`, `GET /api/music/{name}/peaks`, `DELETE /api/music/{name}` | new (§12.3). |
+| `POST /{pid}/revoice` | unchanged — the render IS the re-voice job, now with a music pass after the mux. |
+
+### 12.7 Traps this phase adds
+
+24. **`at` is output seconds, so the Music lane obeys the locks like a track**: a cut with
+    it unlocked must move and trim the clips (`cutMusic`), and the server accepts whatever
+    valid list the client sends — it does not re-derive clips from the picture's cut.
+25. **A missing library file is a refusal, never silence**: the clip is marked, the audition
+    skips it, the render refuses. And a library delete is refused while any project refers
+    to the file.
+26. **Gain is a linear factor everywhere** — `volume=`, `GainNode.gain`, the slider. The
+    pydub "rough dB" formula in `replace_video_audio` is not the model and is not on this
+    path.
+27. **No ducking; the voice never fades.** The bed's level is constant; fades are the
+    music's own; the narration master is never opened by the music pass.
+28. **`amix` normalises by default** — `normalize=0` on both mixes, or the voice drops
+    by 1/N. Stereo before mixing.
+29. **The second pass copies the video** (`-c:v copy`); a re-encode here would be E1's
+    16 s again for nothing.
+30. **The upload decodes; the render decodes; nothing probes.** Length, sample rate and
+    channels come from the decode at upload and are recorded in the index.
+31. **Decoded music is big in the browser**: one decode per file, cached; never one per
+    clip.
+32. **`music` absent in a PUT body means unchanged**, unlike a track key — the asymmetry is
+    deliberate (the E3 client and every `curl` of E1's shape keep working) and is written
+    in the schema's docstring.
+
+### 12.8 Decisions for the owner before the build
+
+1. **Music clips live on the output axis and the Music lane obeys the locks** — a cut with
+   the lane unlocked moves, trims or splits clips as Camtasia does; locked, they stay.
+2. **Defaults for a new clip**: gain = the studio's `music_volume` (0.15), **fade in 1 s,
+   fade out 2 s** (Camtasia adds no fade by default; a bed under narration nearly always
+   wants one — the owner's rule allows it). Changeable per clip.
+3. **The library is studio-wide**, an upload of an existing name is refused (rename), a
+   delete is refused while referenced.
+4. **Fades are linear** in both the render and the audition (the shapes agree exactly).
+5. **The render is a second ffmpeg pass with the video copied**; `_revoice_video` stays
+   untouched; the downloadable narration track stays voice-only.
+6. **The eye mutes the music in the audition only.**
+7. **No looping**: a bed longer than the file is two clips.
+8. **Two builds, each through the three gates**: **E4a** — the library, the model, the render
+   pass (verifiable with `curl` and a real render, the E1 way); **E4b** — the lane, the
+   gestures, the inspector, the audition. Release **0.9.0** when E4b lands.
+9. Measured before the build, not guessed: the second pass's cost on the 341 s corpus with
+   two five-minute clips (the bundled ffmpeg 7.1), and the presence of every filter named in
+   §12.4 in that binary's `-filters`.
+
+### Critical files (E4)
+
+| File | Role |
+|---|---|
+| `services/music.py` (new) | the library: index, upload (decode + peaks + publish), delete with the reference check |
+| `api/routers/music.py` (new) | the five routes; `api/audit.py` `MUSIC_UPLOAD` / `MUSIC_DELETE` |
+| `services/edit.py` | `stored_music`, clip validation, `set_edit(..., music=UNCHANGED)`, `payload` with `music` |
+| `services/waveform.py` | the bucket arithmetic pulled into a helper the library's peaks share |
+| `core/video_creator.py` | `mix_music`, `music_filtergraph`, `music_timeout` |
+| `services/revoice.py` | the music pass after the mux; the missing-file refusal |
+| `api/schemas.py` | `MusicClipIn`, `EditIn.music` |
+| `frontend/src/lib/edit.ts` | `cutMusic`, `splitMusicAt`, `clipBounds`, the inspector's rules |
+| `frontend/src/components/project/NarrationTimeline.tsx`, `MusicLibrary.tsx` (new) | the lane, the gestures, the modal, the audition's music buffers |
+| `frontend/src/styles/theme.css` | per-lane rules for four lanes; the clip block |
+| `tests/test_music_library.py`, `tests/test_music_render.py` (new), `tests/test_edit.py`, `tests/test_revoice.py`, `tests/test_project_ownership.py` (exclusion), `tests/test_audit.py` | the guards |
