@@ -309,6 +309,42 @@ def test_a_file_that_does_not_decode_is_refused_and_leaves_nothing_behind(decode
     assert music.add_file("noise.mp3", b"real", "u")["name"] == "noise.mp3"
 
 
+def test_a_file_wider_than_stereo_is_refused_and_leaves_nothing_behind(decodes, monkeypatch):
+    """A surround upload decodes as audio and is still refused: the render's
+    one static up-mix (``UPMIX_STEREO``) keeps FL, FR and FC and would lose
+    LFE, BL and BR at every render, silently. Refused once, here, where the
+    decode already knows the channel count - and the peaks are never drawn
+    for it, so it costs one decode and nothing is left behind."""
+    monkeypatch.setattr(
+        music, "decode_audio",
+        lambda path, display_name=None: music.Decoded(2.5, RATE, 6, SIGNAL),
+    )
+    with pytest.raises(music.TooManyChannels) as exc:
+        music.add_file("score.flac", b"surround", "u")
+    assert "'score.flac' has 6 channels" in str(exc.value) and "mono or stereo" in str(exc.value)
+    assert sorted(p.name for p in music.MUSIC_DIR.iterdir()) == [], "no part, no file, no peaks, no index"
+    assert music.list_files() == []
+    # Stereo is the widest that IS taken, and the name is free for it.
+    monkeypatch.setattr(
+        music, "decode_audio",
+        lambda path, display_name=None: music.Decoded(2.5, RATE, music.MAX_CHANNELS, SIGNAL),
+    )
+    assert music.add_file("score.flac", b"stereo", "u")["channels"] == 2
+
+
+def test_the_upload_route_answers_400_for_a_surround_file_and_records_nothing(client, monkeypatch):
+    monkeypatch.setattr(
+        music, "decode_audio",
+        lambda path, display_name=None: music.Decoded(2.5, RATE, 6, SIGNAL),
+    )
+    before = len(_rows("music.upload"))
+    r = _upload(client, "score.flac", b"surround")
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"].startswith("'score.flac' has 6 channels")
+    assert client.get("/api/music").json()["files"] == []
+    assert len(_rows("music.upload")) == before, "a refusal is not an upload"
+
+
 def test_an_unreadable_index_reads_as_empty_rather_than_failing_every_route(decodes):
     music.add_file("bed.mp3", b"x", "u")
     (music.MUSIC_DIR / music.INDEX_NAME).write_text("{ not json", encoding="utf-8")
@@ -660,6 +696,35 @@ def test_a_real_file_decodes_through_ffmpeg_alone_and_agrees_with_the_strip(tmp_
     mine = waveform.peaks_from_samples(decoded.samples, decoded.sample_rate)
     assert mine == strip["peaks"] and len(mine) == strip["buckets"] == 800
     assert max(mine) == 233, "30000/32768 of full scale, from the negative channel"
+    assert not list((tmp_path / "temp").glob("music-decode-*")), "the scratch WAV is removed"
+
+
+def test_a_real_51_file_is_refused_by_the_upload(client, tmp_path):
+    """End to end on the real binary: a genuine 5.1 file - six channels
+    ffmpeg itself wrote - is decoded, counted and refused, with nothing left
+    in the library and nothing in the scratch directory."""
+    ffmpeg = _real_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("no ffmpeg on this machine")
+    surround = tmp_path / "score.flac"
+    made = subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "sine=frequency=220:sample_rate=48000:duration=1",
+         "-af", "aformat=channel_layouts=5.1", "-c:a", "flac", str(surround)],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
+    )
+    if made.returncode != 0 or not surround.is_file():
+        pytest.skip(f"this ffmpeg cannot write a 5.1 flac: {made.stderr[-200:]}")
+
+    assert music.decode_audio(surround).channels == 6, "the fixture really is surround"
+    r = _upload(client, "score.flac", surround.read_bytes(), media_type="audio/flac")
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == (
+        "'score.flac' has 6 channels; music must be mono or stereo "
+        "(this is a narration studio, not a surround mixer) - convert it and upload it again."
+    )
+    assert client.get("/api/music").json()["files"] == []
+    assert sorted(p.name for p in music.MUSIC_DIR.iterdir()) == []
     assert not list((tmp_path / "temp").glob("music-decode-*")), "the scratch WAV is removed"
 
 

@@ -593,12 +593,13 @@ def cut_picture(
 # (measured on ffmpeg 8.0.1 and on the bundled 7.1).
 #
 # The cost of one static mapping is a layout with MORE than two channels: a
-# 5.1 clip keeps FL, FR and FC and loses LFE, BL and BR, and its FC arrives
-# at unity where a standard down-mix would take it to 0.7071 (measured).
-# Mono and stereo are what the app makes and what music beds are, and they
-# are what the audition must agree with; a surround upload is the corner that
-# pays for it, and the library records its ``channels`` at upload, so this is
-# answerable later without a probe. See ``music_filtergraph``.
+# 5.1 clip would keep FL, FR and FC and lose LFE, BL and BR, with its FC at
+# unity where a standard down-mix takes it to 0.7071 (measured). Mono and
+# stereo are what the app makes, what a music bed is, and what the browser's
+# audition agrees with - so rather than fold a surround file badly here, the
+# library refuses one at upload (``services.music.MAX_CHANNELS``), at the one
+# place that decodes it. Every clip that reaches this graph is mono or
+# stereo. See ``music_filtergraph``.
 UPMIX_STEREO = "pan=stereo|FL=FL+FC|FR=FR+FC"
 
 

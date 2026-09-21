@@ -66,7 +66,8 @@ def upload_music(file: UploadFile = File(...), user: dict = Depends(current_user
     FastAPI runs this on its thread pool and the body is read from the
     spooled upload directly.
 
-    Answers: 200 the entry, 400 not audio or a name the library cannot store,
+    Answers: 200 the entry, 400 not audio, wider than stereo, or a name the
+    library cannot store,
     409 a file of that name is already there - matched case-insensitively, so
     ``BED.mp3`` beside ``bed.mp3`` is refused on every platform (rename it,
     or delete the old one: a clip refers to a file by name, so nothing is
@@ -89,7 +90,7 @@ def upload_music(file: UploadFile = File(...), user: dict = Depends(current_user
         raise HTTPException(status_code=413, detail=str(exc))
     except music.MusicExists as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    except (music.BadName, music.NotAudio, music.MusicNotFound) as exc:
+    except (music.BadName, music.NotAudio, music.TooManyChannels, music.MusicNotFound) as exc:
         # ``MusicNotFound`` from an upload means the name would not resolve
         # inside the library directory - a 400 about the name, never a 500.
         raise HTTPException(status_code=400, detail=str(exc))

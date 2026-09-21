@@ -1957,9 +1957,19 @@ the build. 33 and 34 are what the round earned.)*
     hand each output channel M/√2 — **−3.01 dB** — with no error, no warning, and nothing a
     test that reads the filtergraph string can see. Only a per-channel measurement on a real
     render finds it. Anything that must not change a level up-mixes with
-    `pan=stereo|FL=FL+FC|FR=FR+FC`, which copies the channels it names and drops the ones the
-    input does not have, so one graph serves mono and stereo with nothing probed (traps 2,
-    30). The reusable rule: **a format conversion is not a no-op**, and the browser's rule is
+    `pan=stereo|FL=FL+FC|FR=FR+FC`, which takes exactly the channels it names and drops every
+    other one, so one graph serves mono and stereo with nothing probed (traps 2,
+    30). *(Re-review, 2026-09-21: `pan` drops the channels the input **does** have and the
+    mapping does not name, not only the ones it lacks — a 5.1 clip keeps FL, FR and FC, loses
+    LFE, BL and BR, and arrives with its centre at unity where a standard fold takes it to
+    0.7071, all measured. One static mapping cannot give mono its unity and a surround layout
+    a correct fold, and the choice between them is not close: the app makes mono and stereo,
+    a music bed is mono or stereo, and the audition's rule is the browser's. So the library
+    refuses an upload wider than stereo — `services.music.MAX_CHANNELS`, the owner's call on
+    the day: "this isn't a HiFi app" — and every clip that reaches the graph is mono or
+    stereo. The comments that had claimed `pan` only drops absent channels were corrected
+    before the commit; a claim about audio that no measurement backs is the same defect as
+    the one this trap records.)* The reusable rule: **a format conversion is not a no-op**, and the browser's rule is
     not ffmpeg's — Web Audio up-mixes mono as L = R = M, at unity, so a render that used
     `aformat` and an audition that used Web Audio would disagree by 3 dB on every mono
     project.

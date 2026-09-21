@@ -30,6 +30,11 @@ that is EXACTLY the one asked for - ``Path.is_file()`` is true for
 ``BED.mp3`` when ``bed.mp3`` is there, and deleting by path on that evidence
 removed a file a project's clip still named, leaving its index row behind.)
 
+**Mono or stereo, and nothing wider** (:data:`MAX_CHANNELS`). The render lays
+every clip under the voice through one static up-mix that cannot also fold a
+surround layout correctly, so a file with more channels than that is refused
+at upload rather than losing half of itself, quietly, at every render.
+
 **Decoded once, at upload, and never probed** (traps 2 and 30). The file is
 decoded through :func:`decode_audio` - the one seam - to prove it is audio and
 to measure it: its length, sample rate and channel count go into the index and
@@ -89,6 +94,16 @@ MEDIA_TYPES = {
 # route.
 MAX_MUSIC_BYTES = 100 * 1024 * 1024
 
+# Mono or stereo, and nothing wider. The render lays every clip under the voice
+# through ONE static up-mix (``core.video_creator.UPMIX_STEREO``, a ``pan`` that
+# takes FL, FR and FC), which is unity for mono and transparent for stereo - the
+# two layouts the app itself makes and the two the browser's audition agrees
+# with. It cannot also fold a surround layout correctly: a 5.1 clip would keep
+# FL, FR and FC, lose LFE, BL and BR, and arrive with its centre 3 dB hot. A
+# narration app is not a surround mixer, so the file is refused here, at the one
+# place that decodes it, rather than quietly losing half of it at every render.
+MAX_CHANNELS = 2
+
 # The name as stored, extension included.
 MAX_NAME_CHARS = 120
 
@@ -133,6 +148,11 @@ class BadName(ValueError):
 
 class NotAudio(ValueError):
     """The upload did not decode as audio (400)."""
+
+
+class TooManyChannels(ValueError):
+    """The upload decodes as audio, but as more channels than the app mixes
+    (400). See :data:`MAX_CHANNELS`."""
 
 
 class TooLarge(ValueError):
@@ -457,8 +477,10 @@ def add_file(name: str, data: bytes, uploaded_by: str) -> dict:
     Refuses a bad name (``BadName``), a body over the cap (``TooLarge``), an
     existing name (``MusicExists`` - a name in the index, on disk, or being
     uploaded right now, matched CASE-INSENSITIVELY so the library never holds
-    two names Windows cannot tell apart) and anything that does not decode
-    (``NotAudio``).
+    two names Windows cannot tell apart), anything that does not decode
+    (``NotAudio``) and anything wider than stereo (``TooManyChannels``, see
+    :data:`MAX_CHANNELS` - checked from the decode, before the peaks are
+    drawn, so a surround file costs one decode and leaves nothing behind).
     The body is written to ``<name>.part`` under the lock, which reserves the
     name; the decode runs outside the lock; the peaks are cached; then the
     file is published and the index row written under the lock again. A
@@ -480,6 +502,11 @@ def add_file(name: str, data: bytes, uploaded_by: str) -> dict:
     published = False
     try:
         decoded = decode_audio(part, name)
+        if decoded.channels > MAX_CHANNELS:
+            raise TooManyChannels(
+                f"'{name}' has {decoded.channels} channels; music must be mono or stereo "
+                "(this is a narration studio, not a surround mixer) - convert it and upload it again."
+            )
         peaks = waveform.peaks_from_samples(decoded.samples, decoded.sample_rate)
         _write_json(peaks_path, waveform.peaks_payload(peaks, decoded.duration, decoded.sample_rate))
         entry = {
