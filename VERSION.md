@@ -1,6 +1,6 @@
 # Version
 
-**Current version:** 0.8.0
+**Current version:** 0.9.0
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
 assistant, generation options, transcription, re-voice, per-sentence narration adjustments
 on a transcript — phases 1 to 3b of the narration timeline, so an offset, a mute, a voice, a
@@ -13,10 +13,13 @@ selected on the strip with the playhead's green and red handles, Cut, undone, an
 Render as the re-voice with the picture cut first; E1 the model and the render and E2 the
 gesture in 0.7.0 (released 2026-09-17); E3 the tracks — lock a track and cut the others,
 split at the playhead into pieces, drag the narration — and the transcript download in 0.8.0
-(released 2026-09-18) —, studio settings,
+(released 2026-09-18); E4 the music lane — a studio-wide music library, clips placed on a
+fourth lane and moved, trimmed, levelled and faded there, auditioned in the browser and
+mixed under the voice by one more render pass — in 0.9.0 (released 2026-09-22) —, studio settings,
 accounts, project ownership and the audit log, self-update, the Windows desktop installer;
-see CHANGELOG.md). Still to come: the music library, the rest of the edit timeline (E4's
-music lane over the top; E5's trim handles, markers, J/K/L and snapping of cuts), and the
+see CHANGELOG.md). Still to come: the rest of the edit timeline (E5's trim
+handles, markers, J/K/L and snapping of cuts; E4c, so that a music file leaving the library
+leaves the editor usable rather than only the render honest), and the
 rest of the administration work — notifications,
 a branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
 Enterprise remains the shipping product until parity.
