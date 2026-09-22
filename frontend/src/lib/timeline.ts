@@ -19,7 +19,7 @@
  * delete, the ruler and the zoom scale — is in lib/edit.ts.
  */
 
-import type { Keep } from "./edit";
+import type { Keep, MusicClip } from "./edit";
 
 /** One sentence of `GET /api/projects/{pid}/narration/plan`. */
 export interface PlanSentence {
@@ -64,13 +64,17 @@ export interface EditTrack {
  * version 2 since E3): one list per track — `video` is the picture's axis
  * (the filmstrip, the waveform, the transport's seeks), `narration` the
  * sentences' — each in SOURCE seconds with `null` meaning everything; the
- * source's length from the WAV header, `null` before transcription; and the
- * output's, which is the PICTURE's.
+ * music lane's clips, each as `stored_music` reads it back (with the
+ * library's `file_duration` and whether the file has gone); the source's
+ * length from the WAV header, `null` before transcription; and the output's,
+ * which is the PICTURE's.
  */
 export interface EditPayload {
   version: number;
   video: EditTrack;
   narration: EditTrack;
+  /** E4: the clips on the output axis, `[]` when there are none. A backend before E4a sends no key at all. */
+  music?: MusicClip[];
   source_duration: number | null;
   output_duration: number | null;
 }
@@ -123,6 +127,32 @@ const EPSILON = 1e-4;
  * voice are all the plan's answers.
  */
 export const narrationPlanKey = (projectId: string) => ["narration-plan", projectId];
+
+/** `GET /api/music`: the studio-wide library, which only the library modal fetches. */
+export const musicLibraryKey = ["music-library"];
+
+/**
+ * Every query a change to the LIBRARY makes stale — an upload, or a delete.
+ *
+ * The library is its own query, but a clip's `missing` is the SERVER's answer,
+ * computed against that same library, and it reaches the strip only through
+ * the narration plan (`plan.data.edit.music`). Invalidating the library alone
+ * left the Music lane's banner insisting the lane was frozen after the user
+ * had taken the banner's OTHER way out and put the file back under its name:
+ * every one of its four claims was then false, and its red "Remove the N stuck
+ * clips" button was still armed over clips whose file had come back — pressing
+ * it removed them. Nothing else would have refetched: `refetchOnWindowFocus`
+ * is off and `staleTime` is 15 s (main.tsx), so closing the modal is not a
+ * refetch.
+ *
+ * The plan key is a PREFIX, so every (provider, voice, speed) variant goes;
+ * `["edit", projectId]` is the page's own copy of the edit (`ProjectDetail`),
+ * which the Render line reads. Those are the same two keys a successful commit
+ * invalidates — one list, so the two paths cannot drift.
+ */
+export function libraryChangeKeys(projectId: string): string[][] {
+  return [musicLibraryKey, narrationPlanKey(projectId), ["edit", projectId]];
+}
 
 // ── seconds ↔ pixels ────────────────────────────────────────────────────────
 

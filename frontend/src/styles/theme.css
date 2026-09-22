@@ -377,8 +377,9 @@ p { margin: 0 0 8px; }
   .os-qa-row .os-qa-issue { grid-column: 1 / -1; }
 }
 
-/* ── The narration timeline, in Camtasia's shape: a canvas, a transport, then a ruler, track headers and three lanes -
-   a filmstrip, the waveform of the original audio and one block per sentence - on ONE horizontal time scale, with
+/* ── The narration timeline, in Camtasia's shape: a canvas, a transport, then a ruler, track headers and four lanes -
+   a filmstrip, the waveform of the original audio, one block per sentence and (E4) the music clips - on ONE
+   horizontal time scale, with
    a playhead over them whose head carries the green in / red out handles. Everything inside .os-tl-body is
    positioned in pixels computed from seconds (lib/timeline.ts, lib/edit.ts), so the CSS stacks the lanes and
    colours them. The panel is DARK in both app themes, as Camtasia's is whatever the app looks like, so its tokens
@@ -387,7 +388,7 @@ p { margin: 0 0 8px; }
 .os-tl { display: grid; gap: 10px; }
 .os-tl-panel {
   --tl-bg: #1b1b1b; --tl-row: #252525; --tl-header: #202020; --tl-line: #0e0e0e; --tl-text: #d4d4d4; --tl-muted: #8f8f8f;
-  --tl-audio: #9fb8a4; --tl-select: rgba(59, 130, 246, 0.26); --tl-select-edge: #60a5fa; --tl-in: #22c55e; --tl-out: #ef4444;
+  --tl-audio: #9fb8a4; --tl-music: #a78bfa; --tl-select: rgba(59, 130, 246, 0.26); --tl-select-edge: #60a5fa; --tl-in: #22c55e; --tl-out: #ef4444;
   --tl-playhead: #f5f5f5; --tl-join: #f59e0b; --tl-hover: rgba(255, 255, 255, 0.09); --tl-ruler-h: 28px; --tl-lane-h: 68px;
   display: grid; background: var(--tl-bg); color: var(--tl-text); border-radius: var(--radius-sm); overflow: hidden;
   box-shadow: inset 0 0 0 1px #000; color-scheme: dark;
@@ -412,29 +413,44 @@ p { margin: 0 0 8px; }
 .os-tl-play { width: 38px; height: 38px; border-radius: 50%; background: rgba(255, 255, 255, 0.12); }
 .os-tl-play:hover:not(:disabled) { background: rgba(255, 255, 255, 0.22); }
 .os-tl-zoom-icon { color: var(--tl-muted); margin-left: 4px; }
-/* The zoom slider: a thin track with a round thumb, styled so both themes get the same dark control. */
-.os-tl-zoom { -webkit-appearance: none; appearance: none; width: 120px; height: 14px; margin: 0 2px; background: transparent; cursor: pointer; }
-.os-tl-zoom::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: #4a4a4a; }
-.os-tl-zoom::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border: 0; border-radius: 50%; background: #d4d4d4; }
-.os-tl-zoom::-moz-range-track { height: 3px; border-radius: 2px; background: #4a4a4a; }
-.os-tl-zoom::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #d4d4d4; }
-.os-tl-zoom:disabled { opacity: 0.35; cursor: default; }
+/* The panel's slider: a thin track with a round thumb, styled so both themes get the same dark control. Named
+   for what it IS, because two controls wear it — the toolbar's zoom and the inspector's music level — and a
+   level that borrowed a class called "zoom" tied one control's look to the other's name. Each keeps its own
+   class for its own width and for anything only it needs. */
+.os-tl-range { -webkit-appearance: none; appearance: none; height: 14px; margin: 0 2px; background: transparent; cursor: pointer; }
+.os-tl-range::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: #4a4a4a; }
+.os-tl-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border: 0; border-radius: 50%; background: #d4d4d4; }
+.os-tl-range::-moz-range-track { height: 3px; border-radius: 2px; background: #4a4a4a; }
+.os-tl-range::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #d4d4d4; }
+.os-tl-range:disabled { opacity: 0.35; cursor: default; }
+.os-tl-zoom { width: 120px; }
+.os-tl-level { width: 110px; }
 /* Headers beside the strip: a two-column grid, the headers never scroll. Row heights match the lanes exactly. */
 .os-tl-tracks { display: grid; grid-template-columns: 125px minmax(0, 1fr); }
-.os-tl-headers { display: grid; grid-template-rows: var(--tl-ruler-h) repeat(3, var(--tl-lane-h)); background: var(--tl-header); border-right: 1px solid var(--tl-line); }
-.os-tl-header { display: flex; align-items: center; gap: 7px; padding: 0 10px; font-size: 12px; border-bottom: 1px solid var(--tl-line); color: var(--tl-text); min-width: 0; }
+.os-tl-headers { display: grid; grid-template-rows: var(--tl-ruler-h) repeat(4, var(--tl-lane-h)); background: var(--tl-header); border-right: 1px solid var(--tl-line); }
+/* The header WRAPS rather than squeezing its name to an ellipsis: the Music header carries three buttons beside
+   its name (the library, the eye, the lock) and the row is 68px tall, so on a narrow column they drop to a
+   second line instead of leaving "Music" as three dots. */
+.os-tl-header { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; padding: 0 10px; font-size: 12px; border-bottom: 1px solid var(--tl-line); color: var(--tl-text); min-width: 0; }
 .os-tl-header svg { color: var(--tl-muted); flex-shrink: 0; }
 .os-tl-header > span { display: grid; min-width: 0; line-height: 1.2; }
 .os-tl-header small { font-size: 10px; color: var(--tl-muted); white-space: nowrap; }
 /* Camtasia's track header: the name selects the channel (the other track locks), the lock at the right toggles
    one track. A locked header dims; the selected channel's name carries the brand colour. */
-.os-tl-track-name { flex: 1 1 auto; min-width: 0; padding: 2px 4px; margin: 0 -4px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.os-tl-track-name { flex: 1 1 auto; min-width: 3.4em; padding: 2px 4px; margin: 0 -4px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .os-tl-track-name:hover { background: var(--tl-hover); }
 .os-tl-header.selected .os-tl-track-name { color: var(--brand); font-weight: 600; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 60%, transparent); }
 .os-tl-header.locked { color: var(--tl-muted); }
-.os-tl-lock { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin-left: auto; border: 0; border-radius: 4px; background: transparent; color: var(--tl-muted); cursor: pointer; flex-shrink: 0; }
-.os-tl-lock:hover { background: var(--tl-hover); color: var(--tl-text); }
+/* A small square header button. Named for what it IS, because three of them are not locks: the Music header
+   carries the library and the eye beside its lock, and while all three wore `os-tl-lock` a rule below had to
+   undo the locked header's amber on the two that never meant "locked" — the same coupling-by-a-name A4 was
+   raised about, one file away. `os-tl-lock` now carries only what being a LOCK means. */
+.os-tl-tool { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin-left: auto; border: 0; border-radius: 4px; background: transparent; color: var(--tl-muted); cursor: pointer; flex-shrink: 0; }
+.os-tl-tool:hover { background: var(--tl-hover); color: var(--tl-text); }
 .os-tl-header.locked .os-tl-lock { color: var(--tl-join); }
+/* The Music header carries three of them (the library, the eye, the lock), so they are grouped at the right. */
+.os-tl-header-tools { display: flex; align-items: center; gap: 1px; margin-left: auto; flex-shrink: 0; }
+.os-tl-header-tools .os-tl-tool { margin-left: 0; width: 20px; }
 .os-tl-scroll { overflow-x: auto; overflow-y: hidden; background: var(--tl-bg); }
 .os-tl-body { position: relative; cursor: crosshair; user-select: none; }
 /* The ruler: labels at the top of each major tick, marks at the bottom; the in/out handles and times float over it. */
@@ -500,21 +516,74 @@ p { margin: 0 0 8px; }
 .os-tl-ghost.drag { border-color: color-mix(in srgb, var(--brand) 70%, transparent); }
 /* On the CULPRIT, where its clip really ends — the pipeline never re-sorts, so this is the moment the overrun costs. */
 .os-tl-overrun { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--warn); pointer-events: none; }
+
+/* ── The Music lane (E4): Camtasia's clips. A block per clip carrying the file's name, its waveform (the cached
+   peaks sliced in…out and pooled as the audio lane's are), a triangle at each end for the fades, and an 8px trim
+   zone at each edge. Violet, so a clip is never mistaken for a narration block (brand blue) or the original
+   audio (pale green). A missing file is hatched in the bad colour: it is silent in the audition and the render
+   refuses on it. ── */
+.os-tl-music { position: relative; height: var(--tl-lane-h); background: var(--tl-row); border-bottom: 1px solid var(--tl-line); touch-action: none; }
+.os-tl-music.locked { opacity: 0.55; }
+.os-tl-music.locked .os-tl-clip { cursor: default; }
+.os-tl-clip {
+  position: absolute; top: 8px; bottom: 8px; border: 0; border-radius: 4px; padding: 0; overflow: hidden;
+  text-align: left; font: inherit; font-size: 11px; line-height: 1.3; color: var(--tl-text); cursor: grab;
+  background: color-mix(in srgb, var(--tl-music) 26%, transparent); box-shadow: inset 0 0 0 1px var(--tl-music);
+  touch-action: none; will-change: transform;
+}
+.os-tl-clip:hover { background: color-mix(in srgb, var(--tl-music) 38%, transparent); }
+.os-tl-clip:active { cursor: grabbing; }
+.os-tl-clip.selected { background: color-mix(in srgb, var(--tl-music) 52%, transparent); box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 3px var(--tl-music); }
+.os-tl-clip.missing { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--bad) 34%, transparent) 0 6px, transparent 6px 14px); box-shadow: inset 0 0 0 1px var(--bad); }
+/* The waveform fills the block, behind the name; drawn in bucket units and stretched, as the audio lane's is. */
+.os-tl-clip-wave { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+.os-tl-clip-wave path { fill: var(--tl-music); opacity: 0.55; }
+/* The fades: the attenuated corner at each end, so a ramp is visible at a glance and its length is its width. */
+.os-tl-clip-fade { position: absolute; top: 0; bottom: 0; background: rgba(0, 0, 0, 0.45); pointer-events: none; }
+.os-tl-clip-fade.in { left: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
+.os-tl-clip-fade.out { right: 0; clip-path: polygon(0 0, 100% 0, 100% 100%); }
+.os-tl-clip-name { position: relative; display: block; padding: 2px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75); pointer-events: none; }
+.os-tl-clip.missing .os-tl-clip-name { color: #fca5a5; }
+/* The trim zones are the CURSOR only: the pointer-down bubbles to the clip, which asks lib/edit.ts which end it has.
+   A third of the clip at most, matching `clipAt`'s own cap, so a narrow clip keeps a body to grab and the
+   ew-resize cursor never promises a trim where the hit test answers "body". */
+.os-tl-clip-edge { position: absolute; top: 0; bottom: 0; width: min(8px, 33%); cursor: ew-resize; }
+.os-tl-clip-edge.in { left: 0; }
+.os-tl-clip-edge.out { right: 0; }
+.os-tl-music.locked .os-tl-clip-edge { cursor: default; }
+/* The dragged clip's time, painted through its ref while the pointer moves - never through state. */
+.os-tl-clip-label { position: absolute; top: 0; left: 0; z-index: 3; padding: 1px 4px; border-radius: 3px; background: rgba(76, 29, 149, 0.92); color: #fff; font-size: 10px; line-height: 1.2; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; will-change: transform; }
+/* The clip inspector, under the strip: the file, where it sits, its level and its two fades. It sits OUTSIDE
+   .os-tl-panel, so it carries the panel's own tokens - the Remove button and the status line read them. */
+.os-tl-inspector {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 8px 10px; border-radius: var(--radius-sm);
+  background: #1b1b1b; color: #d4d4d4; box-shadow: inset 0 0 0 1px #000; color-scheme: dark;
+  --tl-text: #d4d4d4; --tl-muted: #8f8f8f; --tl-hover: rgba(255, 255, 255, 0.09);
+}
+.os-tl-clip-file { font-size: 12.5px; font-weight: 600; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.os-tl-inspector-field { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #8f8f8f; }
+.os-tl-inspector-field input[type="number"] { background: #252525; color: #d4d4d4; box-shadow: inset 0 0 0 1px #3a3a3a; }
+.os-tl-inspector-value { font-variant-numeric: tabular-nums; color: #d4d4d4; min-width: 34px; }
 /* Siblings of the lanes, not children of one, so they span all of them. The band is painted through its ref while
    a handle is dragged; the join marker shows a closed cut (Camtasia shows nothing there, and nothing is how a
    mistake goes unnoticed); the playhead is moved by a transform written straight to the DOM each animation frame
    (a setState per frame would re-render fifteen hundred blocks sixty times a second). */
-.os-tl-selection { position: absolute; top: 0; bottom: 0; left: 0; z-index: 2; background: var(--tl-select); box-shadow: inset 1px 0 0 var(--tl-select-edge), inset -1px 0 0 var(--tl-select-edge); pointer-events: none; }
-/* The band skips a locked lane: below the Video and Audio lanes when the video is locked, above the Narration
-   lane when the narration is; with both locked it has no height and only the ruler's handles show it. */
-.os-tl-selection.no-video { top: calc(var(--tl-ruler-h) + 2 * var(--tl-lane-h)); }
-.os-tl-selection.no-narration { bottom: var(--tl-lane-h); }
+/* The band is ONE ROW per lane (plus the ruler's), stacked in the lanes' own order, and a locked lane's row is
+   simply not drawn. One rectangle with `top` and `bottom` offsets could only skip lanes at the ENDS: with
+   Narration locked and Music unlocked - two of the eight lock combinations - it painted "this cut applies here"
+   over a locked lane, an E3 regression the fourth lane brought back. It also spelled every offset as a
+   `calc(n * var(--tl-lane-h))`, which a fifth lane would break again; a row carries no arithmetic at all. */
+.os-tl-selection { position: absolute; top: 0; bottom: 0; left: 0; z-index: 2; display: flex; flex-direction: column; pointer-events: none; }
+.os-tl-selection-row { flex: 0 0 var(--tl-ruler-h); background: var(--tl-select); box-shadow: inset 1px 0 0 var(--tl-select-edge), inset -1px 0 0 var(--tl-select-edge); }
+.os-tl-selection-row.lane { flex-basis: var(--tl-lane-h); }
+.os-tl-selection-row.locked { background: none; box-shadow: none; }
 .os-tl-join { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; z-index: 3; background: var(--tl-join); opacity: 0.85; cursor: help; }
 .os-tl-join::before { content: ""; position: absolute; top: 0; left: -4px; width: 10px; height: 6px; background: inherit; clip-path: polygon(0 0, 100% 0, 50% 100%); }
 .os-tl-join.split { background: var(--tl-muted); opacity: 0.7; }
 /* The video's joins span the ruler, the Video and the Audio lanes (the picture's axis); the narration's sit
-   inside its own lane, on top of its pieces and under its blocks. */
-.os-tl-join.picture { bottom: var(--tl-lane-h); }
+   inside its own lane, on top of its pieces and under its blocks. The two lanes below - Narration and Music -
+   have their own boundaries, so the picture's marker stops above them. */
+.os-tl-join.picture { bottom: calc(2 * var(--tl-lane-h)); }
 .os-tl-join.lane { z-index: auto; }
 .os-tl-playhead { position: absolute; top: 0; bottom: 0; left: 0; width: 1px; z-index: 4; background: var(--tl-playhead); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); pointer-events: none; will-change: transform; }
 /* The head in the ruler: a red tip on the line, grabbable, with the current time beside it as Camtasia prints it. */

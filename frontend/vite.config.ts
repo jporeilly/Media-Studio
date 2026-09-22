@@ -63,10 +63,15 @@ export default defineConfig({
       },
     },
   },
-  // Unit tests cover the pure helpers (formatting, dates); the browser walk is Playwright's job.
+  // Unit tests cover the pure helpers (formatting, dates) and — since E4b — a handful of SSR RENDERS of the
+  // real components (`*.test.tsx`), for the things only markup can prove: which lanes the selection band
+  // paints under each of the eight lock combinations, whether a banner is there at all, whether a button is
+  // disabled. That gap is why an E3 regression could be re-introduced with all 258 unit tests still green.
+  // `renderToStaticMarkup` needs no DOM, so the environment stays "node" and nothing was added to the
+  // dependencies; the browser WALK is still Playwright's job and the live check is still the owner's.
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     exclude: ["e2e/**", "node_modules/**", "dist/**"],
   },
 });

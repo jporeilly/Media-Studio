@@ -948,12 +948,15 @@ pins (E3 brings snapping to the *drag*).
 
 **E4 — the music lane.** Asked for by the owner on 2026-09-16 — *"I should be able to add
 music tracks over the top — another channel like Camtasia"* — and moved here out of §9's
-v2 list (§9 keeps mixing and ducking the *original* audio). **Designed in §12 (2026-09-21).
-Its backend half — E4a: the library, the model and the render pass — is DONE, 2026-09-21 and
-unreleased; the block after this sketch records it. E4b — the lane, the gestures, the
-inspector and the audition — is not built.** The sketch below stands as the outline of the
-whole phase — a second lane on the same timeline, which fits the per-track shape E3 gave
-the edit.
+v2 list (§9 keeps mixing and ducking the *original* audio). **Designed in §12 (2026-09-21) and
+BUILT, in both halves: E4a — the library, the model and the render pass — on 2026-09-21, and
+E4b — the lane, the gestures, the inspector and the audition — on 2026-09-22; the two blocks
+after this sketch record them. Both are unreleased: 0.9.0 ships them together.** E4 is therefore
+complete except **E4c**, the one question the build raised and did not answer — whether the
+server should keep an already-stored clip whose file has gone, so that only the render refuses
+and the lane stays editable (§12.5's *As built*; it is the owner's call). The sketch below stands
+as the outline of the whole phase — a second lane on the same timeline, which fits the per-track
+shape E3 gave the edit.
 
 - **The model.** `edit.version` 2 gains `"music": [{file, at, in, out, gain, fade_in,
   fade_out}]` — `file` a name in the music **library**, `at` where the clip starts in
@@ -984,7 +987,10 @@ the edit.
   `_revoice_video` untouched and the standalone narration track voice-only (§12.4).
 - **The audition** schedules a music `AudioBuffer` at `at` exactly as `schedule()` places
   the sentence clips, on the same Web Audio clock, with the clip's gain and fades applied
-  there; the library file is fetched and decoded once, like a sentence clip.
+  there; the library file is fetched and decoded once, like a sentence clip. *Built in E4b*
+  exactly so (§12.5): one `GainNode` per clip following `fadePoints`' linear ramps, one decode
+  per FILE cached by name beside the sentence buffers, and the eye a mute on the bus they all
+  share — never anything a payload carries.
 - **Two rules the owner set earlier bind it, and neither is a design question:** **no
   ducking** — the music sits at one static lower volume under the voice for the whole clip
   (dynamic ducking was rejected for the choppy playback it produced) — and **music may
@@ -1112,7 +1118,171 @@ before the fix round), ruff clean; nothing under `frontend/` changed, so vitest 
 fourth lane needs, the add / move / trim / remove gestures, `cutMusic` and the ripple through
 the clips, the Library modal, the inspector, the audition's music buffers and the eye that
 mutes them, the render summary's "mixes 2 music clips", and the release of both halves as
-0.9.0. Per-range input seeking (E1's second note) is still left, too.
+0.9.0. Per-range input seeking (E1's second note) is still left, too. *(All of that is the
+block below, built the next day; the release is the only item still open.)*
+
+**E4b — the Music lane: the gestures, the inspector and the audition.** **DONE**, 2026-09-22,
+built over `131f8c2` on top of E4a and **not released**: the version stays 0.8.0, and 0.9.0
+ships E4a and E4b together (§12.8, decision 8). It is **`frontend/` only** — not a line of
+`services/`, `api/`, `core/` or `tests/` changed, and the backend suite is **909** either side
+of it (E4a's 906 plus the three the stereo refusal added at `131f8c2`). Designed in **§12.5**
+and built to it, with each place the build differed corrected in place there under *As built*.
+
+**The lane and its CSS** (`theme.css`; `NarrationTimeline.tsx`, 2319 → 3209 lines): a fourth
+lane, Music, under Narration — `.os-tl-headers` on `repeat(4, …)`, `.os-tl-music`, and a clip
+as a violet block (`--tl-music`, so it is never mistaken for a narration block or the original
+audio) carrying the file's name, **the file's waveform inside it** (`clipPeaks` is
+`projectPeaks` over `[[in, out]]` of the cached peaks — the audio lane's own bucket rule, never
+a second one), a `clip-path` triangle at each end for the fades, and a `--bad` hatch with
+"— missing" after the name when the library has lost the file. The header carries the channel
+name, the library button, the eye and the lock; the **selection band became one row per lane**
+(§12.5's *As built*), and `.os-tl-join.picture` now stops above the two bottom lanes.
+**The library modal** (`MusicLibrary.tsx`, new, 248 lines): the index as a table — name,
+length, size, mono/stereo, who added it, when — **Upload** (a hidden file input and a status
+line, no percentage: `fetch` cannot report request-body progress), **Delete** behind the repo's
+`ConfirmDialog` naming the file, because the library is studio-wide and there is no undo, and
+**Add at playhead**, which hands the row back to the timeline for `newMusicClip` and one `PUT`.
+Every refusal is shown in the server's own sentence: the 409 that names the file, the 409 that
+names the projects, the 400 for a file that will not decode or is wider than stereo.
+**The gestures**: a clip drag moves `at` (`moveClip`, snapped by `snapClip` over
+`clipSnapTargets` — the playhead, the picture's joins, 0, the picture's end and the other
+clips' edges, Ctrl to drag freely — and clamped to `total − length`, `total` being the
+**audition's** length, `auditionLength(duration, timing.end)`, not the picture's; a clip with no
+room left at all stays where it is rather than moving); an edge drag trims
+(`trimClip`: the left edge moves `at` and `in` together so the audio stays under the pointer,
+the right moves `out`; never past the file, never under 0.1 s, the fades re-fitted);
+Delete/Backspace removes the selected clip and Escape clears the clip selection first. Pointer
+capture is taken **lazily**, on the first movement (E3's MAJOR), the drag is painted through
+refs (`paintClip` writes `transform` for a move, `left`/`width` for a trim — never a `setState`
+per frame), and the commit is one `PUT` **on release** (trap 8) under E3's `awaiting` lock.
+**The commit**: `editBody(op, committed, sourceDuration)` in `lib/edit.ts` builds every body —
+**always a `PUT`, never a `DELETE`** (E3 sent `DELETE /edit` when both tracks went back to
+whole, and since E4a a DELETE clears the music too, so that call would have wiped the lane on
+the undo of the last cut), and `music` only when the operation changes it, compared in the
+body's own terms by `sameMusic` so the read-back's `file_duration` and `missing` never look
+like a change. `editRefusal` writes what a refused commit says.
+**The inspector**: the row under the strip — the file, where the clip sits, a **linear** level
+slider with the studio's `music_volume` marked on it through a `<datalist>`, the two fades as
+number boxes, and Remove — each committing on a slider release, a blur or Enter, and each
+disabled while a commit is in flight or the lane is locked.
+**The audition**: every clip scheduled in `scheduleFrom` on the sentences' own clock
+(`clipPlayback` → `start(ctxStart + delay, offset, length)`) through its own `GainNode`
+following `fadePoints`' **linear** ramps into one music bus; one decode per FILE, lazily on the
+first Play and cached by name beside the sentence buffers (trap 31); a missing clip skipped;
+and the eye a mute on the bus — the audition only, never a payload.
+**Undo**: `EditState = TrackEdit & { music: MusicClip[] }`, so an add, a move, a trim, a level,
+a fade, a removal and a rippled cut are each one operation, fifty deep, and the undo of a
+ripple restores the stored BEFORE list rather than recomputing a lossy one.
+**The locks and the render line**: `Lane` / `LANES` / `laneLocks` (a 0.8.0 two-key stored value
+reads Music **unlocked**), `canCut`, and `renderSummary(video, narration, source_duration,
+music)` counting the clips the second pass will mix and saying that the render will refuse
+while a file is missing; `ProjectDetail.tsx` labels the button **Render** whenever there is
+music, because the job really does the extra pass.
+
+Five things the build changed about the design in §12.5, and six smaller ones, each corrected
+in place there under *As built*: the ripple applies only when the PICTURE's list changed and
+the scissors is disabled when Music is the only unlocked lane (the owner's ruling); a clip
+click does not seek (the owner's ruling); a missing file froze the whole lane, and the way out
+is a banner that removes every stuck clip in one commit (the deeper fix is **E4c**); the cut's
+bounds are rounded **once**, so a rippled clip lands on the join to the millisecond; and the
+selection band is one row per lane rather than one rectangle with offsets. The six smaller ones
+are `editBody`, the drag's ceiling, the third-of-a-clip edge zones, the 200-clip refusal on a
+cut or a split, the anchored fade envelope, and the confirmation before a library delete.
+
+**The Reviewer's verdict, and what the fix round changed.** CHANGES REQUIRED — one MAJOR, five
+MINORs, six NITs — with the arithmetic the strongest part of the change: `cutMusic`,
+`trimClip`, `newMusicClip`, `clipPeaks`, `clipPlayback` and `fadePoints` survived every sweep
+against independently-written references, and eleven of thirteen planted mutants died. **The
+MAJOR was not in the arithmetic**: the UI printed a remedy for a missing file that could not be
+carried out, and one missing clip froze every other gesture on the lane behind a 400 naming a
+clip the user had never touched (§12.5's *As built*, and trap 35). The five MINORs are all
+closed — the band per lane; the ripple keyed on the picture, which the owner then ruled on; the
+drag's ceiling; two surviving mutants killed by lifting the body-building into `editBody` and
+by two `?raw` assertions (no `exponentialRampToValueAtTime`, which throws on a target of 0 and
+would kill the audition outright, and the `awaiting` lock over clip commits) together with real
+tests for `snapClip`; and the confirmation before a studio-wide delete — as are five of the six
+NITs (the third-of-a-clip edge zones, the 200-clip cap on a cut, the scissors' tooltip now
+saying what Ctrl+X does with a clip selected, `togglePlay` waiting when every clip is missing,
+and a comment on the `LATE_LEAD` a mid-flight re-schedule costs). The sixth NIT — the clip
+click that seeked — went to the owner and came back as a ruling.
+
+**Proven by the Reviewer** (harnesses in the scratchpad, none committed): **6,000** random
+`cutMusic` cases against a reference written the other way round, plus **600**
+split-idempotence cases — 0 problems — and, on ~**700,000** sampled moments, what is *heard*
+after a cut equal to what was heard before it, shifted by the cut; **942** clip lists drawn
+from every gesture's bounds fed through the real `services.edit.validate_music`, **0 refused**;
+**20,000** audition cases (13,542 scheduled, 6,458 correctly skipped, **2,229 beginning
+mid-fade**), 0 problems, with the Web Audio automation timeline reconstructed from `fadePoints`
+and compared to `fadeLevel` at twelve instants each; **3,000** peak slices over **17,772** drawn
+columns, 0 problems; **nine** payload tests against the real FastAPI app proving the clips
+survive every path that used to send a `DELETE`; and an **SSR render of the real component**
+(10 tests) confirming five header rows in the lanes' order, the missing clip hatched and named,
+and a plan carrying no `music` key at all still drawing.
+
+**Verified live by the supervisor** (Vite against the dev backend, project `c5c8a50e6c3c`, two
+real library files): the geometry exact at 12.554 px/s, the fades drawn at exactly 1.0 s and
+2.0 s, move / trim / delete / add each committing once on release, a picture cut surviving
+every clip gesture, the ripple arithmetically right (a clip's `in` advanced by exactly the
+overlap the cut ate, the later clip moved by the cut's length, no invented fades), undo
+restoring a lossy ripple exactly and redo reapplying it, the library modal and its refusals,
+and the missing-file treatment end to end. Four findings, all fixed: the rippled clip a
+millisecond short of the join (§12.5's *As built*, re-proven after the fix with a zero gap);
+the summary reading "and … and"; a refusal shown in the server's internal wording alone; and
+the level slider wearing the zoom slider's class. **The packaged app is not in that record, and
+neither is the owner's own check** — UI behaviour is verified in the browser by the owner, not
+by the agents (`CLAUDE.md`).
+
+**A second fix round, from using the banner rather than reading it** (§12.5's *As built* has each
+in full). **One:** a change to the library now invalidates the **plan** and the **edit** as well as
+the library, through one shared list of keys (`lib/timeline.ts::libraryChangeKeys`) that the
+modal's upload and its delete both go through — before it, putting the missing file back under its
+name left the banner and its destructive button armed over clips whose file had already returned,
+and pressing it deleted them; `removeMissingClips` also guards itself now. That is **trap 37**.
+**Two:** a drag leaves a clip with no room left *exactly where it is*, instead of slamming it to 0
+and committing that. **Three:** the frozen-lane sentence a refusal leads with is gated on the
+server's detail really being about the library, so an unrelated 400 is no longer blamed on the
+missing clips. **Four:** the header's three small buttons wear `os-tl-tool` rather than borrowing
+`os-tl-lock` — the same lesson as the level slider the live check caught, one file away. The two
+rules the fix round made *named* rather than inline — `musicAfterCut` and `clipsAfterDelete` — are
+the reason the counts below moved: both are tables now, where each was a line the tests could only
+reach by a regex over the component.
+
+**Tests:** `frontend/src/lib/music.test.ts` (new, **99**) — `cutMusic` against the brute-force
+reference, the move, the trim and the add at their bounds, the hit test's edge zones,
+`snapClip`, the peaks slice, the audition's placement and its envelope, the body a commit
+sends, the refusal copy, `musicAfterCut` as a table over all eight lock combinations and
+`clipsAfterDelete` as a table of its own, the keys a library change invalidates, and the Render
+line's music clauses, plus the `?raw` assertions on the component's own source for the decisions
+no pure helper can hold — **24** of them now rather than three, in the one `describe` that holds
+them, with two more beside them on the library modal's source. Several of those 24 have been
+demoted on purpose: where a rule now has a name, the assertion pins only that the component
+*calls* it, and the rule itself is answered by a table.
+`frontend/src/components/project/NarrationTimeline.render.test.tsx` (new, **38**, 283 lines) is
+the other half: a server-side render of the real component through `renderToStaticMarkup`, which
+needs no DOM and no new dependency (`react-dom/server` ships with `react-dom`) and which is what
+pins the selection band across all eight lock combinations, the banner's presence and a button's
+disabled state — none of which a helper test can see. `frontend/vite.config.ts`'s `include` was
+widened to `.tsx` for it; the environment stays `node`. `edit.test.ts` is **byte-identical** to
+`131f8c2` at 76, which is what let the Reviewer prove no E3 assertion had been weakened.
+**321 vitest across 10 files** (from 184; 237 at the first build, 258 after the first fix round),
+`tsc --noEmit` and eslint clean but for the three `react-refresh`
+warnings that predate the phase, and the backend **909**, untouched. The Reviewer re-ran every
+gate itself rather than taking the Developer's word: 237 vitest, 909 backend in 451.90 s, and
+`tests/test_frontend_dist.py` + `test_version.py` green — the committed `dist` matching the
+committed source, down to `os-tl-music` really being inside the built chunk. `frontend/dist` is
+rebuilt again for the fix round's source.
+
+**Deliberately left:** **E4c**, the one question this build raised and could not answer inside
+its own scope — letting `validate_music` keep an already-stored clip whose file has gone, so
+the lane stays editable and only the render refuses (§12.5's *As built*; the owner's call); all
+of **E5** (trim handles on the pieces E3's split makes, markers, `J`/`K`/`L`, snapping of
+cuts); per-range input seeking (E1's second note), still; and **an interactive** component harness
+(`jsdom` + `@testing-library/react`), which the Reviewer raised as its own task. Half of what it
+raised has landed: the SSR harness above renders the real component and reads the **markup**, which
+is what caught the per-lane band and now guards it. The other half is untouched and the Reviewer's
+reason for it still stands — nothing short of a DOM reaches the **gestures and the effects**, which
+is where both of this project's shipped frontend defects have lived, and the SSR harness says so
+about itself.
 
 Budget E1 as phase-3a-sized and E2 as larger than E1: the drawing change touches every
 lane and the transport, and it is where the first-open-at-zero-scale class of bug lives.
@@ -1533,15 +1703,16 @@ dev backend — the packaged app is not in the record (§7).
 
 ---
 
-## 12. E4 — the music lane (designed 2026-09-21; E4a built 2026-09-21, E4b not built)
+## 12. E4 — the music lane (designed 2026-09-21; E4a built 2026-09-21, E4b 2026-09-22)
 
 Written against the tree at `dd818d0` (0.8.0 plus two clock fixes); **E4a — the library, the
-model and the render pass — was built the same day**, over `24f9cd3`, through all three gates
-and a fix round after the Reviewer's two MAJORs (§7's E4a block records what shipped and the
-proofs), and is **unreleased**: the version stays 0.8.0 until E4b lands. **E4b — the lane, the
-gestures, the inspector and the audition — is not built.** Where the build differed from the
-design below, the section says so in place under *As built*; the two that matter most to
-anyone reading this before E4b are §12.4's up-mix and §12.6's one rule for every key.
+model and the render pass — was built the same day**, over `24f9cd3`, and **E4b — the lane,
+the gestures, the inspector and the audition — the day after**, over `131f8c2`. Each went
+through all three gates and a fix round after the Reviewer's findings (§7's two blocks record
+what shipped and the proofs), and both are **unreleased**: the version stays 0.8.0 until 0.9.0
+ships them together. Where a build differed from the design below, the section says so in place
+under *As built*; the ones that matter most are §12.4's up-mix, §12.6's one rule for every key,
+and §12.5's two owner rulings and the lane a missing file froze.
 
 The owner's words, 2026-09-16, mid-E1: *"I should be able to add music tracks over the top —
 another channel like Camtasia"*; and their own Camtasia project, shown on the 17th, has
@@ -1611,9 +1782,14 @@ The one-list shape does not hold it, and §7's sketch already said so: version 2
   ("music file X is missing — remove the clip or upload the file again"), never renders
   silence in its place (the E1 rule for an unreadable edit, applied here).
 - `at` ≥ 0 in **OUTPUT seconds** — the picture's axis, the one the ruler shows. That is
-  what makes the lane behave as Camtasia's does under a cut (§12.5): with the Music lane
-  unlocked, a ripple delete before a clip moves it earlier with the picture, and one
-  through a clip trims it; locked, the clip stays at its time.
+  what makes the lane behave as Camtasia's does under a cut (§12.5), and it is also what
+  decides *when* a cut ripples at all: because the axis is the picture's, the clips move
+  only when the **picture's** own kept list changed — Video unlocked — and the Music lane's
+  own lock then decides whether its clips come along. With both unlocked a ripple delete
+  before a clip moves it earlier with the picture and one through a clip trims it; with
+  Music locked, or with **Video** locked (where the output's length does not change at all),
+  the clip stays at its time. That is the owner's ruling of 2026-09-21, which narrowed the
+  rule this bullet first stated — §12.5's *As built* on `musicAfterCut` has it, and trap 24.
 - `in` / `out` in the FILE's seconds: `0 ≤ in < out ≤ file duration` (the library's
   recorded length), `out − in ≥ 0.1`. The clip's length on the timeline is `out − in`;
   there is no stretching, no looping (a second lap is a second clip — Camtasia's model, and
@@ -1862,6 +2038,196 @@ output (`with_suffix` replaces the extension) with its log beside that, and publ
 - **Render summary**: "Cuts 1 range of the picture (5.0 s removed), mixes 2 music clips under
   the narration and re-voices — about 30 s …".
 
+***As built* — the owner's first ruling: THE MUSIC RIDES THE PICTURE.** The bullets above key the
+ripple on one thing, the Music lane's own lock — unlocked, a cut moves, trims and splits the
+clips. That reading is coherent (each unlocked lane ripples on its own axis) and it is what makes
+"click Music, select a range, cut" remove a stretch of music alone; but it disagrees with §12.2 in
+exactly one combination, and the Reviewer isolated it rather than judging it — it did not call the
+code wrong, it said the code had not chosen (MINOR 2). With **Video locked** and Music unlocked the
+picture's output length does not change — `duration` is the picture's — and yet every clip moved
+earlier by `b − a`, sliding the bed out from under the frames it was placed against. The
+combination is reachable only through the individual lock icons, never through the channel names.
+`at` is on the picture's axis (§12.2), so the owner's
+answer, 2026-09-21, is that a cut which does not shorten the picture must not move a clip at all:
+the ripple applies **only when the picture's own kept list changed**, which is exactly when Video
+is unlocked. The ruling now lives as **one named rule in one place** —
+`lib/edit.ts::musicAfterCut(clips, locks, a, b)`, whose whole body is
+`return locks.music || locks.video ? clips : cutMusic(clips, a, b)`, called by `cutSelection` in
+`NarrationTimeline.tsx`. It was first written as a line *inside* that handler, and the Reviewer
+showed what that cost: the owner's ruling was pinned by nothing but a regex over a 3,200-line
+component, which a rename or a reformat walks straight through, and no test could ask the ruling
+itself a question. As a function it is a **table over all eight lock combinations** in
+`lib/music.test.ts`, asserting for each whether the cut ripples, and the component's `?raw`
+assertion is demoted to what it should always have been — proof that the cut is the *caller*, not
+proof of the rule. Cite the symbol, not the line: this one's line number was in these notes, and
+the round that moved the rule out of the component made it point at nothing.
+
+The ruling creates a consequence the lane has to answer for, and it is not allowed to answer it by
+inventing a different rule. Clicking the **Music** channel's name locks the other two (§11.4's
+rule, generalised to three lanes), so a range cut with Music as the only unlocked lane now moves
+nothing: the scissors would appear to work and do nothing. It is therefore **disabled** in that one
+combination — `canCut(locks)` in `lib/edit.ts`, which refuses "every lane locked" and "Music alone"
+and nothing else — with a tooltip naming the two ways to change the music by itself: unlock Video
+and cut both, or use the clip's own gestures (drag its ends to trim it, or select it and press
+Delete). The keys refuse the same way rather than sending a `PUT` that changes no clip. **`S` is
+unaffected**: it still splits a clip at the playhead, on the unlocked lanes or (Ctrl+Shift+S)
+regardless of the locks, because a split changes no clip's `at` and so cannot put the music out of
+step with the frames.
+
+***As built* — the owner's second ruling: A CLIP CLICK DOES NOT SEEK.** As first built, a click on
+a clip called `seek(clip.at)`, matching the sentence block's click; `seek` halts playback and
+starts it again at the target, so reaching for the inspector to nudge a bed's level *while
+listening* threw the playhead back to the clip's start every time (the Reviewer's NIT 2, raised as
+the owner's call). The owner's answer, 2026-09-21: **selecting a clip only selects it** — the
+playhead, the transport and any running playback are left exactly as they are
+(`NarrationTimeline.tsx::onClipClick`, which sets the selection and nothing else; `onBlockClick`
+beside it is the one that seeks). That is what makes an inspector under the strip worth having,
+and it is what Camtasia does. A **sentence block's click still seeks**, deliberately (E3): the two
+gestures are meant to differ, and the difference is not to be "harmonised" away by a later phase.
+
+***As built* — a missing file froze the EDITOR, not just the render; the way out is a banner.**
+This section and trap 25 both assume a lost library file costs the audition a clip and the render a
+refusal. It cost more than that. **Every music commit sends the whole list** — that is what a lane
+of clips is, and the bullets above say so — while `services/edit.py::_check_music:394-395` refuses
+to store any list naming a file the library does not have. So with §12.2's own ordinary case, **the
+same bed laid twice** (there is no looping, so one lost file makes two missing clips), removing
+either half leaves the other in the body and the call is refused; and with one live clip beside one
+missing one, moving the live clip is refused by the *missing* one's name — "music clip 2 (sting):
+file 'musicB.mp3' is not in the library" — naming a clip the user never touched and numbering it
+by a position they cannot see. The Reviewer proved all of it against the real API (MAJOR 1):
+`PUT {music: []}` is the only body the server will take, and **no gesture in the UI sent it**; the
+undo stack is per visit, so a reload lost even that. The client's answer, built here: the banner
+that names the stuck clips carries a **button which commits the list minus EVERY missing clip in
+one `PUT`** (`removeMissingClips`), and **Delete on a missing clip does the same** (`removeClip`).
+Both are the same gesture and, as of the second fix round, literally the same rule —
+`lib/edit.ts::clipsAfterDelete(clips, id)`: the named clip goes, unless it is missing, in which case
+every missing clip goes with it, because that is the only body the server will store; an id the
+list does not hold leaves the list alone. It was two filters inlined in two handlers before that,
+which is the same defect as the ripple's — a decision with no name, pinned only by a regex over the
+component — and it is now a table of cases in `lib/music.test.ts` (the ordinary delete, one missing
+of two, all of them, the id that is not there — a stale selection must not clear the lane — and
+that the clips it keeps are **the same objects**, never re-ordered or rewritten). The banner's
+copy says plainly that nothing on the
+lane can be moved, trimmed, added or removed until they are gone. `editRefusal` puts that sentence
+in front of the server's own, which is kept whole rather than replaced — a refusal this client does
+not recognise must still reach the user.
+
+That is a client-side remedy for a server-side rule: the right size for E4b, not the right fix.
+**The deeper one is E4c, it is open, and it is the owner's call**: let `validate_music` accept a
+clip whose file is missing *when that exact clip is already stored* — "you may keep what you have,
+you may not add what is not there" — so the lane stays editable and only the render refuses, which
+is all trap 25 ever claimed. Until that is taken, `missing` is a modelled state the editor can
+leave only by deleting.
+
+***As built* — the ripple rounds the cut's bounds ONCE, so a clip lands ON the join.** `cutMusic`
+first rounded its intermediate subtractions as well as its results, and a millisecond fell out of
+the gap: on a real Ctrl+drag cut of the output at `[9.9856, 13.3144]` — a gesture whose bounds
+carry three decimals, unlike a hand-typed one — the picture's join landed at 9.986 and the clip
+that should have started there at **9.985**, while a clip at 20 s landed at 16.671 where the
+picture had moved by 3.328 (the supervisor's live check, 2026-09-21). The helper now rounds `lo`
+and `hi` once, at the top, and computes everything after that from those two numbers, rounding only
+when a value becomes a clip's own — which is precisely what `removeRange` does to the picture's
+list, so the two axes cannot disagree. Re-proven live after the fix: the join and the clip at the
+same millisecond, a zero gap.
+
+***As built* — the selection band is one row per lane, not one rectangle with offsets.** E3 drew
+the "this cut applies here" band as a single rectangle whose `top` and `bottom` were pushed in by
+`.no-video` / `.no-narration`; the fourth lane brought that rule back as an E3 regression, because
+**a rectangle can only skip lanes at the ENDS**. Computed over all eight lock combinations against
+the body's geometry (ruler 28 px + 4 × 68 px), two were wrong — Narration locked with Music
+unlocked, alone or with Video locked as well — and both painted the band over a lane the cut does
+not touch (the Reviewer's MINOR 1). The band is now a flex column of **one row per lane** plus the
+ruler's, in the lanes' own order, and a locked lane's row is simply not drawn (the five
+`.os-tl-selection-row` spans inside `.os-tl-selection` in `NarrationTimeline.tsx`, and that class
+in `theme.css`); the container is what
+the painter moves, so there is still one `left` and one `width` for all of them. It also deletes
+the `calc(n * var(--tl-lane-h))` arithmetic a fifth lane would have broken again: a fifth lane is
+a fifth row. The general form is trap 36.
+
+***As built* — six smaller ones, each with its reason.**
+
+- **`editBody(op, committed, sourceDuration)` is a pure payload builder** (`lib/edit.ts`), not
+  four lines inside the mutation. The two rules it holds are the highest-risk decisions in the
+  phase — always a `PUT`, never a `DELETE`; `music` only when the operation changes it — and as
+  source text they were pinned only by `?raw` assertions, which a rename, a reformat or a DELETE
+  built from a concatenated path would walk through. Pinned by behaviour now (the Reviewer's
+  MINOR 4, its "better" option).
+- **A clip drag is clamped to the end of the AUDITION** (`moveClip(clip, at, limit)`, the component
+  passing `totalRef.current` = `auditionLength(duration, timing.end)`), as E3's block drag already
+  was — the longer of the picture and the new narration, not the picture's own `duration`, which
+  are different numbers the moment the narration overruns. The server's only rule is `at >= 0`, and
+  the render mixes under `amix=…:duration=first`, so a clip parked past the end was accepted, drawn
+  past the ruler, counted by the Render line and then silently absent from the output (MINOR 3;
+  `moveClip(base, 1e6)` passed `validate_music` unchanged). What the clamp does when the clip is
+  longer than what is left changed again in the last round — see the note below.
+- **The edge zones are capped at a THIRD of a clip each**, not a half, in `clipAt` and in the CSS
+  overlay alike (`min(8px, 33%)`). At a half the two zones met in the middle of any clip drawn
+  16 px wide or narrower, leaving no body to grab: it could be trimmed and never moved, at any
+  zoom that drew it that small (NIT 1).
+- **A cut or a split is refused when the ripple would pass the 200-clip cap.** `cutMusic` can
+  grow the list — 200 clips with a cut through one gives 201, which the server refuses — so the
+  cut path checks the result and says which gesture would have made how many, where only the add
+  path had a guard before (NIT 3).
+- **The audition's envelope is anchored**, so playback that begins mid-fade enters at the level
+  the fade had **reached**, not at the fade's start: `fadePoints` always opens with a
+  `setValueAtTime` (a linear ramp is only linear *from* the previous event) and anchors the
+  plateau before a fade-out, or the bed would slide down across its whole length. The Reviewer
+  reconstructed the automation timeline and compared it to `fadeLevel` at twelve instants over
+  2,229 mid-fade cases.
+- **Deleting a library file goes behind a confirmation** naming it (`MusicLibrary.tsx`'s row
+  button, through the repo's `useConfirm` / `ConfirmDialog`, titled "Delete this track?").
+  The library is studio-wide, the delete is irreversible and there is
+  no undo, and an unreferenced file — somebody else's upload — went on one click from a button
+  sharing its cell with "Add at playhead" (MINOR 5).
+
+***As built* — the second fix round: four things the first build got wrong once the banner was
+used.** Each is a decision, not a tidy-up, and each is recorded because a later reader will
+otherwise put it back.
+
+- **A change to the LIBRARY invalidates the PLAN and the EDIT, through one list.** `missing` is the
+  *server's* answer, computed against the library, and it reaches the strip only through the
+  narration plan's `edit` block. The upload path invalidated the library query alone — so the
+  banner's *other* way out, "put the file back under the same name", left the app insisting the
+  lane was frozen, every one of the banner's four claims false, and its red "Remove the N stuck
+  clips" button still armed over clips whose file had come back. Nothing else would have refetched:
+  `refetchOnWindowFocus` is off and `staleTime` is 15 s, so closing the modal is not a refetch. The
+  keys are now `lib/timeline.ts::libraryChangeKeys(projectId)` — the library, the plan (a key
+  *prefix*, so every provider/voice/speed variant goes) and the page's own `["edit", pid]` — and
+  the modal's upload and delete both reach them through the single `libraryChanged` handler, so the
+  two mutations cannot drift apart. The same two keys are what a successful commit invalidates.
+  `removeMissingClips` carries the belt: it re-reads the clips and returns early when none is
+  missing any more, so the button cannot remove live clips in the window before a refetch lands.
+  That is **trap 37**.
+- **A drag leaves an over-long clip exactly where it is.** `moveClip`'s ceiling is `limit − length`,
+  and a picture cut made with the Music lane locked can leave a clip longer than the whole audition,
+  making that negative. Clamping the ceiling at 0 — the obvious reading — meant the first drag
+  *slammed the clip to 0* and committed it, and every drag after that did nothing. A drag must never
+  move a clip somewhere the user did not drag it to, so a negative ceiling now returns the clip
+  unchanged and the gesture commits nothing at all (`sameMusic` sees no change).
+- **The frozen-lane sentence is gated on the refusal really being about the library**, not merely on
+  a clip's file being gone (`lib/edit.ts::editRefusal`, via `aboutTheLibrary`, which looks for the
+  server's own "not in the library"). A missing file is a state a project can sit in for a whole
+  session, and while it did, *every* 400 — a job holding the project, a range the server would not
+  take — had the frozen-lane paragraph appended and blamed the missing clips for something they had
+  nothing to do with. The server's own sentence is still kept whole either way.
+- **The header's small buttons no longer wear the lock's class.** The Music header carries three of
+  them — the library, the eye, the lock — and while all three were `os-tl-lock`, a rule below had to
+  *undo* the locked header's amber on the two that never meant "locked". They are now `os-tl-tool`,
+  named for what they are, and `os-tl-lock` carries only what being a lock means. This is the same
+  lesson as the level slider one file away (the inspector's level had borrowed `os-tl-zoom`; both
+  controls now share `os-tl-range` and keep their own class for their own width): **a class is a
+  name, and borrowing one couples two things that are only alike today.**
+
+***As built* — the two standing rules, where this lane rests on them.** Both are the owner's and
+neither was a design question, so they are recorded here as things the lane obeys rather than as
+things it decided. **No ducking** ([[feedback_audio_ducking]]): a clip's level is one number,
+constant across the clip whether the narrator is speaking or not — the inspector's slider sets it,
+a new clip takes the studio's `music_volume`, and nothing anywhere reads the voice to move it.
+**The voice never fades** ([[feedback_video_audio]]): fading is the music's own, drawn as the
+triangles at a clip's ends and applied by `fadePoints` in the audition and `afade` in the render;
+nothing in this lane opens the narration master, and the eye on the header is a mute on the music
+bus alone — the audition's, never the render's.
+
 ### 12.6 API changes
 
 | Route | Change |
@@ -1903,14 +2269,21 @@ possibly `null`, and never `music`. **Trap 32 below is reversed by this and is r
 
 ### 12.7 Traps this phase adds
 
-*(E4a proved traps 24–30 in the parenthetical after each; 31 is E4b's, and 32 is reversed by
-the build. 33 and 34 are what the round earned.)*
+*(E4a proved traps 24–30 in the parenthetical after each, and E4b what its half of the phase
+could reach — including 31, which is entirely its; 32 is reversed by E4a's build. 33 and 34 are
+what that round earned, 35 and 36 are what E4b's did, and 37 is what its second fix round earned
+once the banner 35 describes was actually used.)*
 
 24. **`at` is output seconds, so the Music lane obeys the locks like a track**: a cut with
     it unlocked must move and trim the clips (`cutMusic`), and the server accepts whatever
     valid list the client sends — it does not re-derive clips from the picture's cut.
     *(The server half is proven: whatever valid list arrives is what is stored, sorted by
-    `at` and otherwise untouched. `cutMusic` is E4b's and does not exist.)*
+    `at` and otherwise untouched. `cutMusic` was built in E4b and proven there — 6,000 random
+    cases against a reference written the other way round, 0 mismatches, every result accepted
+    unchanged by `validate_music`. **The trap is narrower than it was written**, by the owner's
+    ruling of 2026-09-21: the clips ripple only when the PICTURE's kept list changed, not merely
+    when the lane is unlocked, and the scissors is disabled where that leaves it nothing to do —
+    §12.5's *As built*.)*
 25. **A missing library file is a refusal, never silence**: the clip is marked, the audition
     skips it, the render refuses. And a library delete is refused while any project refers
     to the file. *(Proven at three depths — `stored_music` flags it, `services/revoice.py`
@@ -1918,17 +2291,25 @@ the build. 33 and 34 are what the round earned.)*
     directory, nothing stamped) for a clip flagged `missing` and for a file that left the disk
     after the index was read, and `mix_music` returns False before starting ffmpeg as the
     belt to both. The delete half was the one that failed — the Reviewer's MAJOR 1; see
-    §12.3's As-built note.)*
+    §12.3's As-built note. E4b proved the client's three: the clip draws hatched and named
+    "— missing", `clipPlayback` returns `null` for it so the audition never schedules it and
+    `musicFiles` never fetches its file, and the Render line says the render will refuse. It
+    also found what this trap does NOT cover — the editor froze as well; see §12.5's As-built
+    note and trap 35.)*
 26. **Gain is a linear factor everywhere** — `volume=`, `GainNode.gain`, the slider. The
     pydub "rough dB" formula in `replace_video_audio` is not the model and is not on this
     path. *(Proven: no `dB` anywhere in 4,000 fuzzed graphs, and `replace_video_audio` is
-    untouched by the change.)*
+    untouched by the change. E4b's half too: the inspector's slider is a linear 0–1 through
+    `clipGain`, and the audition multiplies it into a `GainNode` — one number, three places,
+    no curve.)*
 27. **No ducking; the voice never fades.** The bed's level is constant; fades are the
     music's own; the narration master is never opened by the music pass. *(The half about
     ducking and fades held — the head and the tail of the voice measure unfaded, nothing in
     the graph touches `[0:a]` but the up-mix, and the standalone narration track is never
     opened. The half about the level FAILED on a mono voice, by 3.01 dB, until trap 33 was
-    found: see §12.4's As-built note.)*
+    found: see §12.4's As-built note. E4b holds both in the browser as well: a clip's gain is
+    one constant that nothing reads the voice to move, the fades belong to the clip, and the
+    eye is a mute on the music bus alone — §12.5's last As-built note.)*
 28. **`amix` normalises by default** — `normalize=0` on both mixes, or the voice drops
     by 1/N. Stereo before mixing. *(Proven load-bearing: with `normalize=0` stripped the
     voice drops to ×0.354, and the mutant that removes it from both mixes dies on three
@@ -1943,7 +2324,11 @@ the build. 33 and 34 are what the round earned.)*
     change. It is also the trap that chose the decoder, since pydub would have run ffprobe:
     see §12.3's As-built note.)*
 31. **Decoded music is big in the browser**: one decode per file, cached; never one per
-    clip. *(E4b's; nothing in E4a decodes in a browser.)*
+    clip. *(Proven in E4b, which is where the browser is: `musicBuffers` is a
+    `Map<file name, AudioBuffer>` beside the sentence buffers — one decode per FILE however
+    many clips play it, lazily on the first Play rather than on mount, and never for a missing
+    file. The copy under the strip says what it costs, so a long lane is a choice and not a
+    surprise: a few seconds and about 100 MB of memory for a five-minute track.)*
 32. **Every key of a `PUT /edit` body reads the same way: absent means unchanged.**
     *(Written here as an asymmetry — `music` unchanged, a track key whole — and **reversed by
     the build**, because the asymmetry silently dropped the other half of the edit in both
@@ -1983,11 +2368,45 @@ the build. 33 and 34 are what the round earned.)*
     `os.listdir` when an exact answer is what is wanted. (Windows also strips a trailing dot
     and a trailing space from a name; this library never reaches that only because the
     extension check refuses those names first.)
+35. **A modelled "missing" state must leave the EDITOR usable, not merely the render honest.**
+    Marking a clip whose file has gone, skipping it in the audition and refusing the render is
+    only two thirds of an answer. The third is the way out: if every commit sends the whole
+    collection and the validator refuses the whole collection over one bad member, the user is
+    locked out of the *other* members too — here one lost file froze every gesture on the lane
+    behind a refusal that named a clip nobody had touched, and the spec's own ordinary case
+    (the same bed laid twice) made the printed remedy, "remove the clip", impossible to carry
+    out. Whenever a state is modelled as "broken but stored", ask the question in the same
+    breath: *what is the gesture that leaves it, and can the user reach it?* A validator that
+    treats "keep what is already stored" and "add something new" alike will answer no. (E4b
+    ships the client's way out — one button that removes them all in a single commit — and
+    §12.5's As-built note records the server-side fix as **E4c**, open.)
+36. **One rectangle cannot express a per-lane truth.** A band that means "this applies here",
+    drawn as a single box with `top` and `bottom` offsets, can only ever skip rows at the
+    ENDS: the moment the thing it describes is per-row and a middle row opts out, the box
+    lies, and it lies quietly — it still looks like a considered layout. Two of E4b's eight
+    lock combinations painted a cut's selection over a locked lane for exactly that reason.
+    Draw one element per row and show each on its own condition; the arithmetic that made the
+    offsets disappears with it, which is the second win, because that arithmetic is what the
+    NEXT row would have broken again.
+37. **A remedy the UI offers must be re-checked after the user takes it.** Printing a way out of a
+    broken state is half the job; the other half is noticing that the way out was taken. The lane's
+    banner offered two — remove the stuck clips, or put the file back under its name — and the
+    second one left the banner, all four of its claims and its destructive button exactly as they
+    were, because the fact it reports is the *server's* (`missing`) and arrives by a query nothing
+    in that path invalidated. A stale remedy is worse than none: this one, pressed after the file
+    had come back, deleted live clips. So when a fix is offered, ask which query carries the
+    evidence for it, invalidate that query on **every** path that can change the evidence (one
+    shared list of keys, not a copy per call site — a copy drifts), and guard the remedy's own
+    handler so it does nothing when there is nothing left to remedy.
 
 ### 12.8 Decisions for the owner before the build
 
 1. **Music clips live on the output axis and the Music lane obeys the locks** — a cut with
    the lane unlocked moves, trims or splits clips as Camtasia does; locked, they stay.
+   *(Refined by the owner on 2026-09-21, once E4b made the one ambiguous combination visible:
+   the ripple applies only when the **picture's** own list changed as well — "the music rides
+   the picture" — and the scissors is disabled where that would leave it nothing to do. §12.5's
+   *As built*.)*
 2. **Defaults for a new clip**: gain = the studio's `music_volume` (0.15), **fade in 1 s,
    fade out 2 s** (Camtasia adds no fade by default; a bed under narration nearly always
    wants one — the owner's rule allows it). Changeable per clip.
@@ -2003,8 +2422,10 @@ the build. 33 and 34 are what the round earned.)*
    gestures, the inspector, the audition. Release **0.9.0** when E4b lands. *(Taken with the
    rest on 2026-09-21 — "go with your proposals, start E4a". **E4a was built that day**,
    through Developer → Reviewer → Documentation with a fix round after the Reviewer's two
-   MAJORs, and is unreleased: the version stays 0.8.0, and §7's E4a block records what
-   shipped. E4b is next.)*
+   MAJORs, and **E4b on 2026-09-22**, the same way, with its own fix round after the
+   Reviewer's MAJOR and the supervisor's four live findings; §7's two blocks record what each
+   shipped. Both are unreleased — the version stays 0.8.0 — so **the release of 0.9.0 is the
+   only part of this decision still open**.)*
 9. Measured before the build, not guessed: the second pass's cost on the 341 s corpus with
    two five-minute clips (the bundled ffmpeg 7.1), and the presence of every filter named in
    §12.4 in that binary's `-filters`. *(Both measured 2026-09-21, before a line was written.
@@ -2017,6 +2438,12 @@ the build. 33 and 34 are what the round earned.)*
    model permits — 200 clips placed at 330 s on a 340 s output, since `adelay` could have made
    a late clip expensive — at **15.9 s and 132 MB** peak ffmpeg RSS against that rule's own
    740 s deadline, so the 200-clip cap needs no second thought.)*
+10. *(Ruled by the owner on 2026-09-21, during E4b, and recorded in §12.5's *As built* with the
+    reasoning behind each:)* **the music rides the picture** — a cut ripples the clips only when
+    the picture is cut too, and the scissors says so rather than appearing to work — and **a
+    clip click does not seek**: selecting a clip leaves the playhead where it is, so a level can
+    be set while the audition plays. A sentence block's click still seeks; the two are meant to
+    differ, and nothing should harmonise them.
 
 ### Critical files (E4)
 
@@ -2044,3 +2471,18 @@ mono and stereo) and so does `tests/test_no_state_tracked.py`, which now asserts
 `assets/music/` stays git-ignored. Two files the table did not name are a line each:
 `api/routers/edit.py` (the PUT's key mapping and the audit summary's music clause) and
 `services/narration.py` (the plan's `edit` block handed `applied.music`).
+
+*As built (E4b):* the three `frontend/` rows are now built too, and **nothing outside
+`frontend/` was touched** — the whole phase is the three files the table names plus five it
+does not: `frontend/src/lib/timeline.ts` (`EditPayload.music`, optional, because a backend
+before E4a sends no such key, and `libraryChangeKeys`), `frontend/src/pages/ProjectDetail.tsx`
+(the Render line and its label), `frontend/src/lib/music.test.ts`, which is new — the Music
+lane's tests went into a file of their own rather than into `edit.test.ts`, deliberately, so E3's
+suite stays byte-identical and can be shown not to have been weakened —
+`frontend/src/components/project/NarrationTimeline.render.test.tsx`, also new (the SSR render
+harness), and `frontend/vite.config.ts`, whose vitest `include` was widened to `.tsx` so that
+harness runs. Two of the helpers the first row
+names were never needed: there is no `splitMusicAt` (a split is `cutMusic(clips, t, t)` — a
+zero-length interval, tested for idempotence) and no `clipBounds` (`clipLength`, `clipEnd` and
+`clipAt` are what the callers wanted). `frontend/dist` is rebuilt and fingerprinted against the
+source, as `tests/test_frontend_dist.py` requires.

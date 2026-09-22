@@ -326,6 +326,28 @@ export type TrackLocks = Record<Track, boolean>;
 export const TRACKS: readonly Track[] = ["video", "narration"];
 
 /**
+ * Every lane the locks and the channel selection cover (E4): the two tracks —
+ * material with an edit, each a kept list — and the Music lane, which is
+ * CLIPS placed on the output and has no list at all (spec §12.5). `TrackEdit`
+ * stays the two: a cut or a split reads `TrackLocks`, and the music's lock is
+ * read beside it.
+ */
+export type Lane = Track | "music";
+export const LANES: readonly Lane[] = ["video", "narration", "music"];
+export type LaneLocks = Record<Lane, boolean>;
+
+/**
+ * The locks as held in `localStorage` — anything else reads as unlocked.
+ * **A value written before E4 has two keys**, so a missing `music` is not
+ * "lock it": every absent key is unlocked, which is what a project edited
+ * before the Music lane existed must come back as.
+ */
+export function laneLocks(held: unknown): LaneLocks {
+  const stored = (held && typeof held === "object" ? held : {}) as Record<string, unknown>;
+  return { video: stored.video === true, narration: stored.narration === true, music: stored.music === true };
+}
+
+/**
  * A track's WORKING list — what a gesture starts from: the stored list, else
  * the whole source. Every path derives it the same way; a track with no
  * stored ranges is whole, never empty (a cut computed from `[]` would refuse
@@ -375,6 +397,25 @@ export function nextEditForCut(
 }
 
 /**
+ * Whether a cut can change anything at all under these locks — what the
+ * scissors is enabled by, and what the keys check before they send.
+ *
+ * Two combinations can do nothing. Every lane locked is the obvious one. The
+ * other is **Music alone**, which is exactly what clicking the Music channel's
+ * name produces: the clips ride the picture — `at` is in output seconds, the
+ * picture's axis (spec §12.2) — so the ripple applies only when the picture's
+ * own list changed, and with the picture locked a cut would leave every clip
+ * where it is. A scissors that appears to work and changes nothing is worse
+ * than one that says why (the owner's ruling, 2026-09-21: unlock Video to cut
+ * both, or use the clip's own gestures). `S` is unaffected and still splits a
+ * clip at the playhead — a split changes no clip's `at`.
+ */
+export function canCut(locks: LaneLocks): boolean {
+  if (LANES.every((lane) => locks[lane])) return false;
+  return !(locks.video && locks.narration && !locks.music);
+}
+
+/**
  * Split at the playhead (`S`) on the unlocked tracks, or on every track
  * regardless of locks (`Ctrl+Shift+S`, `all`). A boundary already there, or
  * a moment at either end, changes nothing on that track — compare with
@@ -402,17 +443,560 @@ export function clickSelectsPiece(list: Piece[]): boolean {
   return list.length > 1;
 }
 
+// ── the music lane: clips on the output axis (E4, spec §12.2 and §12.5) ─────
+
+/**
+ * One music clip, exactly as the record stores it and `PUT /edit` takes it.
+ * `at` is in OUTPUT seconds — the axis the ruler shows, which is what makes
+ * the lane behave as Camtasia's under a cut (`cutMusic`) — while `in` / `out`
+ * are the slice of the FILE in its own seconds, so the clip's length on the
+ * timeline is `out − in`. `gain` is a LINEAR factor 0–1 (trap 26: never the
+ * old "rough dB" formula), and the fades are linear ramps in seconds,
+ * together never longer than the clip.
+ *
+ * `id` is client-minted and unique in the list (`mintClipId`): the selection,
+ * the undo stack and the inspector need a handle that survives re-ordering,
+ * and the server never renumbers. `file_duration` and `missing` are added by
+ * the READ-BACK only (`services/edit.py::stored_music`) and are never sent —
+ * `musicBody` strips them, because `EditIn` forbids an unknown key.
+ */
+export interface MusicClip {
+  id: string;
+  file: string;
+  at: number;
+  in: number;
+  out: number;
+  gain: number;
+  fade_in: number;
+  fade_out: number;
+  /** Read-back only: the library's recorded length for `file`, `null` when it has gone. */
+  file_duration?: number | null;
+  /** Read-back only: the file is no longer in the library — the render will refuse. */
+  missing?: boolean;
+}
+
+/** `services/edit.py::MIN_CLIP_SECONDS` — shorter than this is a click, not music. */
+export const MIN_CLIP_SECONDS = 0.1;
+/** `services/edit.py::MAX_CLIPS`. */
+export const MAX_CLIPS = 200;
+/** The studio's `music_volume` when it cannot be read (spec §12.8, decision 2). */
+export const DEFAULT_MUSIC_GAIN = 0.15;
+/** A new clip's fades (decision 2): a bed under narration nearly always wants one. */
+export const DEFAULT_FADE_IN = 1;
+export const DEFAULT_FADE_OUT = 2;
+/** The grab zone at each end of a clip, pixels — Camtasia's trim handles. */
+export const CLIP_EDGE_PX = 8;
+
+/** How long the clip runs on the timeline: the slice of the file it plays. */
+export function clipLength(clip: MusicClip): number {
+  return round3(clip.out - clip.in);
+}
+/** Where it ends on the OUTPUT axis. */
+export function clipEnd(clip: MusicClip): number {
+  return round3(clip.at + clipLength(clip));
+}
+
+/** A gain the server will accept: linear, 0–1; anything unreadable falls back to the default. */
+export function clipGain(value: number): number {
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, round3(value))) : DEFAULT_MUSIC_GAIN;
+}
+
+/**
+ * The two fades cut down to fit `length`: each at least 0, and together never
+ * longer than the clip — the server's rule (`fade_in + fade_out <= length`),
+ * applied here so a trim or a cut can never produce a list it would refuse.
+ * The fade IN is kept whole first: it is the one a listener hears.
+ */
+export function fitFades(length: number, fadeIn: number, fadeOut: number): [number, number] {
+  const span = Math.max(0, round3(length));
+  const into = Math.min(Math.max(0, round3(fadeIn)), span);
+  const outOf = Math.min(Math.max(0, round3(fadeOut)), Math.max(0, round3(span - into)));
+  return [into, outOf];
+}
+
+/**
+ * The clips as the PUT body wants them: the eight stored keys and nothing
+ * else. The read-back's `file_duration` and `missing` are DERIVED, and
+ * `EditIn` forbids an unknown key — sending a clip back as it arrived is a
+ * 422.
+ */
+export function musicBody(clips: MusicClip[]): MusicClip[] {
+  return clips.map((clip) => ({
+    id: clip.id,
+    file: clip.file,
+    at: round3(clip.at),
+    in: round3(clip.in),
+    out: round3(clip.out),
+    gain: clipGain(clip.gain),
+    fade_in: round3(clip.fade_in),
+    fade_out: round3(clip.fade_out),
+  }));
+}
+
+/** Whether two clip lists are the same in the body's terms — so a gesture that changed nothing commits nothing. */
+export function sameMusic(a: MusicClip[], b: MusicClip[]): boolean {
+  return JSON.stringify(musicBody(a)) === JSON.stringify(musicBody(b));
+}
+
+/**
+ * A fresh clip id: `^[a-z0-9_-]{1,32}$`, as the server's `_CLIP_ID_RE` wants,
+ * and not one of `taken` — never a number the list is renumbered by, because
+ * the id is the handle the selection and the undo stack hold.
+ */
+export function mintClipId(taken: Iterable<string> = [], random: () => number = Math.random): string {
+  const held = new Set(taken);
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const id = `m${Math.floor(random() * 0xffffff).toString(36)}${attempt > 8 ? attempt.toString(36) : ""}`;
+    if (!held.has(id)) return id;
+  }
+  // Exhausted 64 draws (a fake random that never moves): fall back to a
+  // counter, so a mint always answers with a free id rather than a duplicate
+  // the server would refuse.
+  for (let n = 0; ; n++) if (!held.has(`m${n.toString(36)}`)) return `m${n.toString(36)}`;
+}
+
+/**
+ * The clip the Library's "Add at playhead" makes (spec §12.5): at the
+ * playhead, from the top of the file, as long as the file or as long as the
+ * output has room for — whichever is shorter — at the studio's music volume,
+ * with the default fades cut down to fit. `null` when there is less than
+ * `MIN_CLIP_SECONDS` of room (the playhead is at the very end, or the file is
+ * a click): the caller says so rather than sending a clip the server refuses.
+ */
+export function newMusicClip(args: {
+  id: string; file: string; fileDuration: number; at: number; outputDuration: number; gain: number;
+}): MusicClip | null {
+  const at = Math.max(0, round3(args.at));
+  const file = Math.max(0, round3(args.fileDuration));
+  const room = args.outputDuration > 0 ? Math.max(0, round3(args.outputDuration - at)) : file;
+  const out = round3(Math.min(file, room));
+  if (out < MIN_CLIP_SECONDS - EPSILON) return null;
+  const [fade_in, fade_out] = fitFades(out, DEFAULT_FADE_IN, DEFAULT_FADE_OUT);
+  return { id: args.id, file: args.file, at, in: 0, out, gain: clipGain(args.gain), fade_in, fade_out };
+}
+
+/**
+ * A clip moved along the lane: only `at` changes, never the slice (the drag's
+ * whole contract). Bounded at both ends — never before 0, and never past
+ * `limit − its length`, so the clip cannot be parked beyond the end of the
+ * audition. The server has no such rule (`at >= 0` is all it asks), and the
+ * render mixes under `amix=…:duration=first`, so a clip dropped past the end
+ * would be silently absent from the output while the Render line still counted
+ * it — and it would be drawn past the ruler. E3's block drag clamps the same
+ * way. `limit` defaults to no ceiling, for the callers that have no length to
+ * offer.
+ */
+export function moveClip(clip: MusicClip, at: number, limit = Infinity): MusicClip {
+  const ceiling = round3(limit - clipLength(clip));
+  // There is NO room for it: a clip longer than what is left of the audition,
+  // which a picture cut made with the Music lane locked can leave behind. A
+  // drag must never move a clip somewhere the user did not drag it to, and
+  // capping the ceiling at 0 did exactly that — the first drag slammed the
+  // clip to 0 and committed it, and every drag after that did nothing at all.
+  // So it stays exactly where it is, and the gesture commits nothing
+  // (`sameMusic` sees no change).
+  if (ceiling < 0) return clip;
+  return { ...clip, at: Math.min(Math.max(0, round3(at)), ceiling) };
+}
+
+/** Which end of a clip a pointer has: its left edge, its right edge, or its body. */
+export type ClipZone = "in" | "body" | "out";
+
+/**
+ * A clip trimmed by dragging one of its edges to `toTimeline` (output
+ * seconds). The LEFT edge moves `at` and `in` together — the audio stays
+ * where it is under the pointer, as Camtasia's trim does — and the right edge
+ * moves `out`. Every bound the server checks is applied here: never past the
+ * file's length, never `in < 0` or `at < 0`, never shorter than
+ * `MIN_CLIP_SECONDS`; the fades are re-fitted to the new length.
+ * `fileDuration` is the library's recorded length — `null` for a file that
+ * has gone, which pins the right edge where it is.
+ */
+export function trimClip(clip: MusicClip, edge: "in" | "out", toTimeline: number, fileDuration: number | null): MusicClip {
+  const length = clipLength(clip);
+  const limit = fileDuration === null ? clip.out : round3(fileDuration);
+  if (edge === "in") {
+    const wanted = round3(toTimeline) - clip.at;
+    const delta = round3(Math.min(Math.max(wanted, Math.max(-clip.in, -clip.at)), round3(length - MIN_CLIP_SECONDS)));
+    const next = { ...clip, at: Math.max(0, round3(clip.at + delta)), in: Math.max(0, round3(clip.in + delta)) };
+    const [fade_in, fade_out] = fitFades(clipLength(next), next.fade_in, next.fade_out);
+    return { ...next, fade_in, fade_out };
+  }
+  const wanted = round3(toTimeline) - clipEnd(clip);
+  const delta = round3(Math.min(Math.max(wanted, round3(MIN_CLIP_SECONDS - length)), round3(limit - clip.out)));
+  const next = { ...clip, out: round3(clip.out + delta) };
+  const [fade_in, fade_out] = fitFades(clipLength(next), next.fade_in, next.fade_out);
+  return { ...next, fade_in, fade_out };
+}
+
+/** One piece of a clip after a cut: the same file, a slice of it, at its new place on the output. */
+function clipSlice(clip: MusicClip, at: number, inSeconds: number, outSeconds: number, id: string): MusicClip {
+  const start = round3(inSeconds);
+  const end = round3(outSeconds);
+  // A fade belongs to the clip's OWN edge. An edge the cut made is new, and
+  // carries no fade: a bed sliced in two must not gain two ramps nobody asked
+  // for. The surviving fades are re-fitted to the shorter piece.
+  const [fade_in, fade_out] = fitFades(
+    round3(end - start),
+    Math.abs(start - clip.in) <= EPSILON ? clip.fade_in : 0,
+    Math.abs(end - clip.out) <= EPSILON ? clip.fade_out : 0,
+  );
+  return { ...clip, id, at: Math.max(0, round3(at)), in: start, out: end, fade_in, fade_out };
+}
+
+/**
+ * Camtasia's ripple delete applied to the clips (spec §12.5, decision 1),
+ * in OUTPUT seconds and only when the Music lane is UNLOCKED (trap 19 —
+ * locked, the caller passes the list straight through):
+ *
+ * - a clip wholly after `[a, b]` moves earlier by `b − a`;
+ * - one that spans the cut is SPLIT in two — the part before keeps its `at`
+ *   and its id, the part after starts at `a` with `in` advanced by the
+ *   overlap it lost and a freshly minted id;
+ * - one wholly inside is removed;
+ * - one overlapping an edge is trimmed.
+ *
+ * Every result still satisfies the model: ordered by `at`, no piece shorter
+ * than `MIN_CLIP_SECONDS` (a shorter remnant is dropped), fades fitted to the
+ * new length, ids unique, and nothing left overlapping the cut. A ZERO-LENGTH
+ * interval is the split gesture (`S` on the Music lane): the clips under the
+ * playhead become two, and nothing moves.
+ *
+ * **The interval is rounded ONCE, at its bounds**, and every number after that
+ * is computed from those two and rounded only when it becomes a clip's own
+ * value. That is the same rounding the PICTURE's list gets — `removeRange`
+ * rounds the pieces it keeps, so the join lands at `round3(a)` and everything
+ * after it moves by `round3(b) − round3(a)` — and it is what makes a rippled
+ * clip land exactly ON the join rather than beside it. Rounding the
+ * DIFFERENCE as well put the two a millisecond apart on bounds that are not
+ * round numbers: a Ctrl+drag cut of 9.9856 – 13.3144 left the join at 9.986
+ * and the clip at 9.985, and a clip at 20 s at 16.671 where the picture had
+ * moved by 3.328 (the supervisor's live check, 2026-09-21).
+ */
+export function cutMusic(
+  clips: MusicClip[], a: number, b: number, mint: (taken: Set<string>) => string = mintClipId,
+): MusicClip[] {
+  const lo = round3(Math.max(0, Math.min(a, b)));
+  const hi = round3(Math.max(0, Math.max(a, b)));
+  const cut = hi - lo;
+  const taken = new Set(clips.map((clip) => clip.id));
+  const out: MusicClip[] = [];
+  for (const clip of clips) {
+    const start = clip.at;
+    const end = clipEnd(clip);
+    const headEnd = Math.min(end, lo);
+    const tailStart = Math.max(start, hi);
+    const head = headEnd - start >= MIN_CLIP_SECONDS - EPSILON;
+    const tail = end - tailStart >= MIN_CLIP_SECONDS - EPSILON;
+    if (head) out.push(clipSlice(clip, start, clip.in, clip.in + (headEnd - start), clip.id));
+    if (tail) {
+      const id = head ? mint(taken) : clip.id;
+      taken.add(id);
+      out.push(clipSlice(clip, tailStart - cut, clip.in + (tailStart - start), clip.out, id));
+    }
+  }
+  return out.sort((x, y) => x.at - y.at);
+}
+
+/**
+ * The clips a CUT leaves, under these locks — **the music rides the picture**
+ * (the owner's ruling, 2026-09-21), as one rule in one place rather than a
+ * line inside the component that only a regex over 164 kB of source could
+ * pin.
+ *
+ * `at` is in OUTPUT seconds — the picture's axis (spec §12.2) — so the ripple
+ * applies exactly when the picture's own list really changed, and that is
+ * exactly when Video is unlocked: a cut that does not shorten the picture must
+ * not move a clip out of sync with the frames it was placed against. The Music
+ * lane obeys the locks like a track (trap 24), so its own lock passes the list
+ * straight through as well. With the picture cut and Music unlocked a clip
+ * after the cut moves earlier, one across it is split and one inside it goes.
+ *
+ * A SPLIT is not subject to this and does not come through here: it changes no
+ * clip's `at`, so it cannot put the music out of step with the frames.
+ */
+export function musicAfterCut(clips: MusicClip[], locks: LaneLocks, a: number, b: number): MusicClip[] {
+  return locks.music || locks.video ? clips : cutMusic(clips, a, b);
+}
+
+/**
+ * The clips a DELETE leaves. One rule for the inspector's button, for the
+ * Delete key with a clip selected, and for the banner's "Remove the N stuck
+ * clips" alike — the last is the same gesture aimed at a stuck clip, not a
+ * second rule beside this one.
+ *
+ * **A missing clip cannot go alone.** Every music commit sends the WHOLE list
+ * and the server refuses to store any list still naming a file the library has
+ * lost (`services/edit.py::_check_music`), so in the spec's own ordinary case
+ * — the same bed laid twice (§12.2: there is no looping) — taking out one half
+ * leaves the other in the body and the call is refused by the name of the clip
+ * nobody touched. A missing clip therefore takes EVERY missing clip with it,
+ * which is the only body the server will take; any other clip goes alone and
+ * the missing ones are left exactly where they are, still freezing the lane
+ * and still described by the banner.
+ *
+ * An id that is not in the list leaves the list alone: a stale selection, or a
+ * banner whose plan has refetched since the file came back, must not clear the
+ * lane.
+ */
+export function clipsAfterDelete(clips: MusicClip[], id: string): MusicClip[] {
+  const held = clips.find((clip) => clip.id === id);
+  if (!held) return clips;
+  return held.missing ? clips.filter((clip) => !clip.missing) : clips.filter((clip) => clip.id !== id);
+}
+
+/**
+ * The moments a dragged clip snaps to (E3's `snap` does the snapping): the
+ * playhead, the picture's joins, 0, the picture's end, and the other clips'
+ * starts and ends — never its own, which would pin it where it already is.
+ */
+export function clipSnapTargets(args: {
+  playhead: number; duration: number; joins: number[]; clips: MusicClip[]; exclude?: string;
+}): number[] {
+  const out = [0, round3(args.duration), round3(args.playhead), ...args.joins.map(round3)];
+  for (const clip of args.clips) {
+    if (clip.id === args.exclude) continue;
+    out.push(round3(clip.at), clipEnd(clip));
+  }
+  return out;
+}
+
+/**
+ * Where a dragged clip lands: its start snapped to a candidate, or — when
+ * nothing is near its start — its END snapped instead, so a bed can be pulled
+ * up against a join or another clip by either edge (Camtasia snaps both).
+ * `snapped` is the candidate it caught, for the label; `null` is a free drag.
+ */
+export function snapClip(
+  at: number, length: number, candidates: number[], thresholdSeconds: number,
+): { at: number; snapped: number | null } {
+  const start = snap(at, candidates, thresholdSeconds);
+  if (start.snapped !== null) return { at: Math.max(0, start.t), snapped: start.snapped };
+  const end = snap(round3(at + length), candidates, thresholdSeconds);
+  if (end.snapped !== null) return { at: Math.max(0, round3(end.t - length)), snapped: end.snapped };
+  return { at: Math.max(0, round3(at)), snapped: null };
+}
+
+/**
+ * The clip under a timeline moment and which part of it: the LAST one that
+ * covers it, because clips may overlap and the last is the one drawn on top.
+ * The edge zones are `edgeSeconds` wide (8 px at the current zoom) but never
+ * more than a THIRD of the clip each, so a narrow clip keeps a third of itself
+ * to grab. Half each — which is what a `/ 2` cap means — left a clip 16 px
+ * wide or narrower with the two zones meeting in the middle and no body at
+ * all: it could be trimmed and never moved, at any zoom that drew it that
+ * small. The CSS edge overlays follow the same rule (`min(8px, 33%)`), so the
+ * `ew-resize` cursor never promises a trim where this answers "body".
+ */
+export function clipAt(clips: MusicClip[], t: number, edgeSeconds: number): { clip: MusicClip; zone: ClipZone } | null {
+  for (let i = clips.length - 1; i >= 0; i--) {
+    const clip = clips[i];
+    const end = clipEnd(clip);
+    if (t < clip.at || t > end) continue;
+    const grab = Math.min(Math.max(0, edgeSeconds), clipLength(clip) / 3);
+    const zone: ClipZone = t <= clip.at + grab ? "in" : t >= end - grab ? "out" : "body";
+    return { clip, zone };
+  }
+  return null;
+}
+
+/**
+ * The file's peaks for the stretch a clip plays. `GET /api/music/{name}/peaks`
+ * answers in the FILE's seconds, and the clip shows `in…out` of it — which is
+ * one kept range of that file, so the audio lane's own rule does the work
+ * (`projectPeaks`) and there is no second bucket arithmetic to drift.
+ */
+export function clipPeaks(peaks: number[], bucketSeconds: number, clip: MusicClip): number[] {
+  return projectPeaks(peaks, bucketSeconds, [[clip.in, clip.out]]);
+}
+
+/** Where a clip's one-shot source node goes on the audition's clock. */
+export interface ClipPlayback {
+  /** Seconds after `from` that it starts — 0 when it is already running. */
+  delay: number;
+  /** How far into the FILE to begin. */
+  offset: number;
+  /** How much of it is left to play. */
+  length: number;
+}
+
+/**
+ * A clip placed on the audition's clock from `from` (spec §12.5):
+ * `start(ctxStart + max(0, at − from), in + max(0, from − at),
+ * out − in − max(0, from − at))`. `null` when there is nothing left to hear —
+ * the clip finished before `from`, or its file is missing, which the audition
+ * skips (trap 25).
+ */
+export function clipPlayback(clip: MusicClip, from: number): ClipPlayback | null {
+  if (clip.missing) return null;
+  const behind = Math.max(0, from - clip.at);
+  const length = round3(clipLength(clip) - behind);
+  if (length <= EPSILON) return null;
+  return { delay: Math.max(0, round3(clip.at - from)), offset: round3(clip.in + behind), length };
+}
+
+/**
+ * The clip's own level `played` seconds in: its gain shaped by the two LINEAR
+ * fades (decision 4 — ffmpeg's `afade` default curve and the browser's
+ * `linearRampToValueAtTime` are the same shape, so the audition and the render
+ * agree). The two are multiplied, as the render's two chained `afade` filters
+ * are; validation keeps them from overlapping, so at most one is ever below 1.
+ */
+export function fadeLevel(clip: MusicClip, played: number): number {
+  const length = clipLength(clip);
+  const u = Math.min(Math.max(0, played), length);
+  const rise = clip.fade_in > 0 ? Math.min(1, u / clip.fade_in) : 1;
+  const fall = clip.fade_out > 0 ? Math.min(1, (length - u) / clip.fade_out) : 1;
+  return Math.max(0, Math.min(1, clipGain(clip.gain) * rise * fall));
+}
+
+/** One instruction for the clip's `GainNode`, `at` seconds after playback begins. */
+export interface FadePoint {
+  at: number;
+  value: number;
+  /** A linear ramp to `value` (`linearRampToValueAtTime`), else a plain `setValueAtTime`. */
+  ramp: boolean;
+}
+
+/**
+ * The whole envelope a clip's `GainNode` follows, for a playback that begins
+ * `played` seconds into the clip (a seek into the middle of a bed starts at
+ * the level it had reached). Always begins with a `setValueAtTime`, because a
+ * ramp is only ever linear FROM the previous event — the plateau before a
+ * fade-out has to be anchored or the bed would slide down across its whole
+ * length.
+ */
+export function fadePoints(clip: MusicClip, played = 0): FadePoint[] {
+  const length = clipLength(clip);
+  const level = clipGain(clip.gain);
+  const start = Math.min(Math.max(0, played), length);
+  const points: FadePoint[] = [{ at: 0, value: fadeLevel(clip, start), ramp: false }];
+  const risesUntil = round3(clip.fade_in - start);
+  if (clip.fade_in > 0 && risesUntil > 0) points.push({ at: risesUntil, value: level, ramp: true });
+  if (clip.fade_out > 0) {
+    const fallsFrom = round3(length - clip.fade_out - start);
+    if (fallsFrom > 0) points.push({ at: fallsFrom, value: level, ramp: false });
+    points.push({ at: round3(length - start), value: 0, ramp: true });
+  }
+  return points;
+}
+
+// ── the commit: what a PUT /edit carries, and what a refusal says ───────────
+
+/**
+ * One state of the edit as a client operation carries it: each track's kept
+ * ranges (`null` for a track that keeps everything) and the music clips. The
+ * lane is not a track — it has no kept list — but it is part of the edit, so
+ * undo and redo carry it (spec §12.5, decision 10).
+ */
+export interface EditOp extends TrackEdit {
+  music: MusicClip[];
+}
+
+/** The body of `PUT /api/projects/{pid}/edit`: a key left out means UNCHANGED (trap 32). */
+export interface EditBody {
+  video: Keep | null;
+  narration: Keep | null;
+  music?: MusicClip[];
+}
+
+/**
+ * The body a commit sends — the single highest-risk decision in E4b, so it is
+ * a function with tests rather than four lines inside a mutation.
+ *
+ * **Always a PUT, never a DELETE.** E3 sent `DELETE /edit` when both tracks
+ * went back to whole, because that left the record with no `edit` key at all;
+ * since E4a a DELETE clears the MUSIC too, so undoing the last picture cut
+ * would have silently wiped the lane. `{video: null, narration: null}` says
+ * exactly what is meant, and the server removes the `edit` key itself when
+ * nothing but the version would remain (spec §12.6).
+ *
+ * **`music` is sent only when this operation CHANGES it**, because absent
+ * means unchanged for every key (trap 32). A cut that leaves the clips alone
+ * must not re-send them — the server refuses to store a clip whose file has
+ * left the library, so re-sending an unchanged list would make every
+ * unrelated edit impossible on a project with one missing file. Compared in
+ * the BODY's own terms (`sameMusic`), so the read-back's `file_duration` and
+ * `missing` never look like a change.
+ */
+export function editBody(op: EditOp, committed: { music: MusicClip[] }, sourceDuration: number): EditBody {
+  const body: EditBody = {
+    video: trackBody(op.video, sourceDuration),
+    narration: trackBody(op.narration, sourceDuration),
+  };
+  if (!sameMusic(op.music, committed.music)) body.music = musicBody(op.music);
+  return body;
+}
+
+/**
+ * The server's own words for the one refusal the frozen-lane sentence
+ * explains: `services/edit.py::_check_music` answers "music clip 2 (sting):
+ * file 'musicB.mp3' is not in the library." The phrase is matched rather than
+ * the whole sentence, because the position and the id in front of it are the
+ * parts that vary — and case-insensitively, so a re-worded capital does not
+ * silently drop the paragraph.
+ */
+const NOT_IN_LIBRARY = "not in the library";
+
+/** Whether the server's own sentence says the refusal is the missing files'. */
+function aboutTheLibrary(detail: string): boolean {
+  return detail.toLowerCase().includes(NOT_IN_LIBRARY);
+}
+
+/**
+ * What the panel says when a commit is refused: the user's terms first, the
+ * server's sentence after them.
+ *
+ * The server names a clip by its POSITION in the list and by its id — "music
+ * clip 2 (sting): file 'musicB.mp3' is not in the library." — which is a
+ * handle the user never chose and a number they cannot see. That is the
+ * second half of the answer, not the first: what they need to read is that
+ * nothing was saved and what to do next. The detail is KEPT rather than
+ * replaced, because a refusal this client does not recognise must still reach
+ * the user whole, and no rule of the server's is restated here — the one
+ * extra sentence describes what THIS client does (it sends the whole lane)
+ * and points at the button that clears it.
+ *
+ * That extra sentence is gated on the refusal REALLY being about the library,
+ * not merely on a clip's file being gone: a clip whose file has left the
+ * library is a state the project can sit in for a whole session, and while it
+ * did, every other 400 — a job holding the project, a range the server would
+ * not take — had the frozen-lane paragraph appended and blamed the missing
+ * clips for something they had nothing to do with.
+ */
+export function editRefusal(detail: string, what: "edit" | "timing", missingClips = 0): string {
+  const lead = what === "timing"
+    ? "That timing was not saved — the blocks are back where the last saved plan puts them."
+    : "That edit was not saved — the strip still shows the cut and the clips the server holds.";
+  const stuck = what === "edit" && missingClips > 0 && aboutTheLibrary(detail)
+    ? ` Every change to the Music lane sends the whole list, and ${missingClips === 1
+      ? "one clip names a file" : `${missingClips} clips name files`} the library no longer has, so nothing`
+      + ` on the lane can be changed until ${missingClips === 1 ? "it is" : "they are"} removed`
+      + " — the button above does it in one go."
+    : "";
+  const said = detail.trim() ? ` The server said: ${detail.trim()}` : "";
+  return `${lead}${stuck}${said}`;
+}
+
 // ── the pointer gestures ────────────────────────────────────────────────────
 
-/** Every drag the strip knows: a scrub (the ruler or the head), a handle, a Ctrl+drag range, a block move, a marquee. */
-export type DragKind = "scrub" | "in" | "out" | "range" | "move" | "marquee";
+/**
+ * Every drag the strip knows: a scrub (the ruler or the head), a handle, a
+ * Ctrl+drag range, a block move, a marquee, and (E4) a music clip moved along
+ * its lane or trimmed by one of its edges.
+ */
+export type DragKind = "scrub" | "in" | "out" | "range" | "move" | "marquee" | "clip" | "trim";
 /**
  * What a release that never moved — a click on the thing that was pressed —
  * means per kind: `seek` (the ruler), `pick` (the piece under a marquee's
  * start, or a seek where the lane has one piece or is locked), `click` (a
- * block: left to its own click handler, which chooses, selects and seeks),
- * `keep-selection` (a handle or a Ctrl+click: the selection as it stands),
- * `nothing` (the head, or a pointer the browser cancelled).
+ * block, or a music clip and its trim edges: left to its own click handler,
+ * and the two handlers deliberately differ — a block's chooses, selects and
+ * SEEKS, a clip's only selects, because seeking would jump the playhead back
+ * every time the inspector was reached for while the audition plays (the
+ * owner's ruling, 2026-09-21)), `keep-selection` (a handle or a Ctrl+click:
+ * the selection as it stands), `nothing` (the head, or a pointer the browser
+ * cancelled).
  */
 export type UnmovedRelease = "seek" | "pick" | "click" | "keep-selection" | "nothing";
 
@@ -421,7 +1005,7 @@ export function unmovedRelease(kind: DragKind, seekOnClick: boolean, cancelled: 
   switch (kind) {
     case "scrub": return seekOnClick ? "seek" : "nothing";
     case "marquee": return "pick";
-    case "move": return "click";
+    case "move": case "clip": case "trim": return "click";
     default: return "keep-selection";
   }
 }
@@ -429,8 +1013,10 @@ export function unmovedRelease(kind: DragKind, seekOnClick: boolean, cancelled: 
 /**
  * Whether the click the browser fires after a release must be ignored: a
  * real drag happened, or the release itself was the click's meaning (a scrub
- * seeks, a marquee picks). A block's or a handle's unmoved release lets the
- * click through — the block's own handler is where a click is a click.
+ * seeks, a marquee picks). A block's, a music clip's, a trim edge's or a
+ * handle's unmoved release lets the click through — the element's own handler
+ * is where a click is a click, and those handlers deliberately differ: a
+ * block's seeks, a clip's only selects (the owner's ruling, 2026-09-21).
  *
  * The pointer is captured LAZILY, only once a drag has really moved: capture
  * on pointer-down would retarget that click (and a double-click) to the
@@ -645,17 +1231,32 @@ function removes(keep: Keep | null, sourceDuration: number): keep is Keep {
 
 /**
  * The line under the Render button, or `null` when neither track removes
- * anything. Cut together — the two lists equal — it is E2's line word for
- * word. Otherwise the picture part ("Cuts 2 ranges of the picture (12.4 s
- * removed)") and the narration part, which is about the narration's
- * TIMELINE: that stretch closes up and the sentences spoken in it are left
- * out — which ones is the plan's answer, so no count is claimed here. The
- * estimate is the picture step's alone. One sentence.
+ * anything and there is no music. Cut together — the two lists equal — it is
+ * E2's line word for word. Otherwise the picture part ("Cuts 2 ranges of the
+ * picture (12.4 s removed)"), the narration part, which is about the
+ * narration's TIMELINE (that stretch closes up and the sentences spoken in it
+ * are left out — which ones is the plan's answer, so no count is claimed
+ * here), and the music part, which is the second ffmpeg pass under the
+ * finished narration (spec §12.4). The estimate is the picture step's alone.
+ *
+ * The music clause is joined with a COMMA, as §12.5 writes the sentence:
+ * "Cuts 1 range of the picture (5.0 s removed), mixes 2 music clips under the
+ * narration and re-voices …". Joined with "and", as it first shipped, the line
+ * read "… and mixes 2 music clips under the narration and re-voices", which is
+ * two joins where the sentence has room for one.
+ *
+ * A clip whose file has gone gets its own sentence, because the render
+ * REFUSES on it (trap 25) — the job would stop before any work, and a Render
+ * button that did not say so would be the one thing this line exists to
+ * prevent.
  */
-export function renderSummary(video: Keep | null, narration: Keep | null, sourceDuration: number): string | null {
+export function renderSummary(
+  video: Keep | null, narration: Keep | null, sourceDuration: number, music: MusicClip[] = [],
+): string | null {
   const cutsPicture = removes(video, sourceDuration);
   const cutsNarration = removes(narration, sourceDuration);
-  if (!cutsPicture && !cutsNarration) return null;
+  const clips = music ?? [];
+  if (!cutsPicture && !cutsNarration && clips.length === 0) return null;
   const together = cutsPicture && cutsNarration && JSON.stringify(video) === JSON.stringify(narration);
   const parts: string[] = [];
   if (cutsPicture) {
@@ -668,8 +1269,18 @@ export function renderSummary(video: Keep | null, narration: Keep | null, source
     parts.push(`${cutsPicture ? "shortens" : "Shortens"} the narration's timeline by ${removed.toFixed(1)} s `
       + "(sentences spoken in the removed stretch are left out)");
   }
+  const cuts = parts.join(" and ");
+  const mixes = clips.length === 0 ? ""
+    : `${cuts ? "mixes" : "Mixes"} ${clips.length} music clip${clips.length === 1 ? "" : "s"} under the narration`;
+  const what = mixes && cuts ? `${cuts}, ${mixes}` : `${cuts}${mixes}`;
+  const mix = clips.length > 0 ? "the music mix and " : "";
   const tail = cutsPicture
-    ? `about ${renderEstimate(video, sourceDuration)} s, plus any sentences the audition has not fetched yet.`
-    : "the picture is not cut, so it takes only as long as the sentences the audition has not fetched yet.";
-  return `${parts.join(" and ")} and re-voices — ${tail}`;
+    ? `about ${renderEstimate(video, sourceDuration)} s, plus ${mix}any sentences the audition has not fetched yet.`
+    : `the picture is not cut, so it takes only as long as ${mix}the sentences the audition has not fetched yet.`;
+  const missing = clips.filter((clip) => clip.missing);
+  const names = [...new Set(missing.map((clip) => clip.file))].join(", ");
+  const refusal = missing.length === 0 ? "" : ` The render will refuse while ${missing.length} music clip`
+    + `${missing.length === 1 ? " names" : "s name"} a file that is not in the library (${names}): remove `
+    + `${missing.length === 1 ? "the clip" : "those clips"} or upload the file again.`;
+  return `${what} and re-voices — ${tail}${refusal}`;
 }

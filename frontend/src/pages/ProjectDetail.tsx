@@ -305,8 +305,12 @@ export default function ProjectDetailPage() {
   // E1): when EITHER track removes anything the button says so, with what it
   // will do and about how long the picture step takes. With no edit, or one
   // that keeps everything, the button and the job are exactly as before.
+  // ... and since E4 the line also says how many music clips the second pass
+  // will mix under the narration, and - when a clip names a file the library
+  // has lost - that the render will REFUSE until it is removed or uploaded
+  // again, because it will (spec §12.2).
   const cut = edit.data && edit.data.source_duration !== null
-    ? renderSummary(edit.data.video.keep, edit.data.narration.keep, edit.data.source_duration)
+    ? renderSummary(edit.data.video.keep, edit.data.narration.keep, edit.data.source_duration, edit.data.music)
     : null;
 
   return (
