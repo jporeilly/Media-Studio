@@ -7,7 +7,7 @@ Log output goes to both console and a rotating log file in data/logs/.
 import logging
 import logging.handlers
 
-from utils.config import CONFIG_DIR
+from utils.config import CONFIG_DIR, FFMPEG_PAIR_WARNING, FFPROBE_MISSING_WARNING
 
 # Log directory inside the portable data folder
 LOG_DIR = CONFIG_DIR / "logs"
@@ -40,3 +40,14 @@ def get_logger(name: str) -> logging.Logger:
         logger.addHandler(_file)
         logger.propagate = False
     return logger
+
+
+# The startup warnings utils.config works out but cannot log itself (this
+# module imports it, so it cannot import this one back). Emitted here, once per
+# process, into app.log as well as the console. Both describe a 0.9.0 install
+# updated in place: running the shipped ffmpeg with a prober from somewhere
+# else, or with no prober at all.
+if FFMPEG_PAIR_WARNING:
+    get_logger("CONFIG").warning(FFMPEG_PAIR_WARNING)
+if FFPROBE_MISSING_WARNING:
+    get_logger("CONFIG").warning(FFPROBE_MISSING_WARNING)

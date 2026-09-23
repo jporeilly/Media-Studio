@@ -1,8 +1,8 @@
 # Install Media Studio Enterprise
 
 Media Studio Enterprise ships as a single Windows installer. It brings its own Python
-runtime and ffmpeg, so the machine needs nothing pre-installed to import decks and
-videos, transcribe, and render narrated MP4s. This page is for the people who install,
+runtime and a matched ffmpeg and ffprobe, so the machine needs nothing pre-installed to
+import decks and videos, transcribe, render narrated MP4s and re-voice videos. This page is for the people who install,
 run and update it. Building the installer is covered in
 [desktop/README.md](desktop/README.md); running the app from a source checkout in
 [README.md › Develop](README.md#develop).
@@ -12,8 +12,10 @@ run and update it. Building the installer is covered in
 - **Windows 10 or 11, 64-bit.** No administrator rights: the app installs per-user.
 - **WebView2 runtime.** Part of Windows 11. On a machine without it the installer
   downloads it, which needs an internet connection once.
-- **Disk space.** The installer is about 145 MB; installed it takes roughly 700 MB,
-  plus your projects and rendered videos.
+- **Disk space.** The 0.9.1 installer is about 25 MB larger than 0.9.0's 148 MB; the
+  exact size is measured after the build:
+  **[TBD at release: measured 0.9.1 installer size]**.
+  Installed it takes roughly 770 MB, plus your projects and rendered videos.
 - **Microsoft PowerPoint** (optional, for `.pptx` decks). With PowerPoint installed,
   slides render at full fidelity, animations included. Without it the engine's
   built-in renderer produces basic slides from the deck's text — not the deck's real
@@ -70,7 +72,7 @@ previous version first, and that removal leaves your data alone too. But read
 C:\Media-Studio-Enterprise\
   media-studio-desktop.exe    the app window (named after its Rust crate, not the product)
   uninstall.exe
-  app\                        the application: a git checkout of the repo, plus boot.py and bin\ffmpeg.exe
+  app\                        the application: a git checkout of the repo, plus boot.py and bin\ (ffmpeg.exe, ffprobe.exe)
     data\                     your database, settings, projects, logs (see below)
     assets\finished\          rendered videos
   python\                     the bundled Python 3.12 runtime with every dependency installed
@@ -139,10 +141,31 @@ for newer commits, and — for an admin — applies them in place:
 
 An update delivers everything in the checkout: the backend **and the built UI**
 (`frontend/dist` is committed to the repo). It does not replace the bundled Python
-interpreter itself, the window (`media-studio-desktop.exe`) or the vendored `ffmpeg.exe`
-— changes to those, and any new version number, come with a new installer. After an
-update, the version shown in Settings is the new one while Add/Remove Programs still
-shows the installer's; that is expected.
+interpreter itself, the window (`media-studio-desktop.exe`) or the vendored media
+binaries in `app\bin\` (`ffmpeg.exe`, `ffprobe.exe`) — changes to those, and any new
+version number, come with a new installer. After an update, the version shown in
+Settings is the new one while Add/Remove Programs still shows the installer's; that is
+expected.
+
+**Install 0.9.1 with its installer — do not apply it through Settings › Updates.** No
+installer before 0.9.1 shipped `ffprobe.exe` (0.9.0's `app\bin\` holds `ffmpeg.exe`
+alone), and without a prober the re-voice **and every narrated render** fail on any
+machine that has no ffprobe of its own — both decode their narration MP3s through a
+library that needs one. `ffprobe.exe` arrives only with the 0.9.1 **installer**: an
+in-place update brings 0.9.1's code but never refreshes `app\bin\`, so it leaves both
+features as broken as they were. Run the 0.9.1 installer over the old install (on one
+that has already updated itself, uninstall it first — your data survives — as
+[Things to know](#things-to-know) explains).
+
+An install that was updated in place anyway says so at every start, with a warning in
+`app\data\logs\app.log`:
+
+- **On a machine with an ffprobe of its own**, the app pairs the shipped ffmpeg with that
+  prober and keeps working. The warning names the two binaries, their versions and their
+  paths, and asks for the installer.
+- **On a machine with none**, the warning says that `app\bin` has no `ffprobe.exe` and
+  that the re-voice and every narrated render will fail until the installer is run — and
+  they do, at their first decode, with `[WinError 2]` in the job's log.
 
 ### What in-app updates need
 
@@ -157,7 +180,8 @@ shows the installer's; that is expected.
 
 ### Things to know
 
-- **Prefer Settings › Updates over reinstalling.** Running an installer over an install
+- **Prefer Settings › Updates over reinstalling** — except for a release that changes
+  `app\bin\`, as 0.9.1 does (see above). Running an installer over an install
   that has updated itself rewinds `app\` to the installer's commit, and files an earlier
   update had added stay behind as untracked files — which can block the next `git pull`
   if upstream added those same files in between. To move to a new installer cleanly,
@@ -212,8 +236,8 @@ four buttons:
 
 **Check what the machine is missing.** The installer ships a checker that prints one
 OK / WARN / FAIL row per dependency, with a fix for each. Only WebView2, the bundled
-Python and its core packages are FAILs; ffmpeg, git, Ollama and disk space are warnings
-that name the feature they affect:
+Python and its core packages are FAILs; ffmpeg, ffprobe, git, Ollama and disk space are
+warnings that name the feature they affect:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Media-Studio-Enterprise\provisioning\check-environment.ps1"

@@ -11,6 +11,12 @@ python-pptx>=0.6.21
 pywin32>=306
 Pillow>=10.0.0
 moviepy>=2.0.0
+# moviepy brings imageio-ffmpeg, whose bundled binary IS the ffmpeg the installer
+# ships (app\bin\ffmpeg.exe; 0.6.0 bundles 7.1). Pinned so a runtime rebuild
+# cannot move ffmpeg off 7.1 while desktop/scripts/fetch-ffprobe.ps1 holds its
+# ffprobe at 7.1 - the two change together or not at all, and stage-app.ps1
+# fails the build when they differ.
+imageio-ffmpeg==0.6.0
 pydub>=0.25.1
 numpy>=1.24.0
 requests>=2.31.0

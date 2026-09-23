@@ -144,6 +144,8 @@ if (-not $winOk) { Warn "pywin32/win32com did not import cleanly - PowerPoint CO
 # the binary into site-packages; stage-app.ps1 then ships it as app\bin\ffmpeg.exe
 # (boot.py puts app\bin on PATH). Confirm it is here now, so a missing binary is
 # discovered at build time and not at first render on a customer machine.
+# ffprobe has its OWN step - fetch-ffprobe.ps1 - because no wheel vendors one
+# and pydub needs a prober; see that script for why the version must match.
 $ffPy = Join-Path (Split-Path -Parent $PSScriptRoot) "src-tauri\vendor\python\python.exe"
 $prevEapFf = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
@@ -151,7 +153,7 @@ $ffExe = (& $ffPy -B -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_
 $ffOk  = ($LASTEXITCODE -eq 0 -and $ffExe -and (Test-Path -LiteralPath $ffExe))
 $ErrorActionPreference = $prevEapFf
 if ($ffOk) {
-    Ok "imageio-ffmpeg present - stage-app.ps1 ships it as app\bin\ffmpeg.exe (ffprobe is not bundled)"
+    Ok "imageio-ffmpeg present - stage-app.ps1 ships it as app\bin\ffmpeg.exe (ffprobe comes from fetch-ffprobe.ps1)"
 } else {
     Warn "imageio-ffmpeg not found in the runtime - video rendering will need ffmpeg on PATH"
 }

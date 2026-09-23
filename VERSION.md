@@ -16,7 +16,11 @@ split at the playhead into pieces, drag the narration — and the transcript dow
 (released 2026-09-18); E4 the music lane — a studio-wide music library, clips placed on a
 fourth lane and moved, trimmed, levelled and faded there, auditioned in the browser and
 mixed under the voice by one more render pass — in 0.9.0 (released 2026-09-22) —, studio settings,
-accounts, project ownership and the audit log, self-update, the Windows desktop installer;
+accounts, project ownership and the audit log, self-update, the Windows desktop installer —
+which now ships a matched ffprobe beside its ffmpeg, so neither the re-voice nor a narrated
+render depends any longer on the machine having a prober of its own (an install updated in
+place from an older installer still does, and says so at every start) —, and the Docs page,
+which serves the user-facing documents and a full guide to the Timeline inside the app;
 see CHANGELOG.md). Still to come: the rest of the edit timeline (E5's trim
 handles, markers, J/K/L and snapping of cuts; E4c, so that a music file leaving the library
 leaves the editor usable rather than only the render honest), and the
@@ -40,7 +44,7 @@ Cargo.toml still carries an older number alongside the current one.
 | `desktop/src-tauri/tauri.conf.json` | `"version": "x.y.z"` — the installer's file name and the Add/Remove Programs entry |
 | `desktop/src-tauri/Cargo.toml` | `version = "x.y.z"` — the shell exe's file version |
 | `desktop/src-tauri/Cargo.lock` | the `media-studio-desktop` entry (cargo rewrites it on the next build, so bump it with the others or the tree is dirty after a build) |
-| `README.md` | the `<b>Version x.y.z</b>` line |
+| `README.md` | the `**Version x.y.z**` line (plain markdown, since the Docs page renders README) |
 | `VERSION.md` | `**Current version:**` — this file |
 | `CHANGELOG.md` | release header `## [x.y.z] - YYYY-MM-DD` |
 

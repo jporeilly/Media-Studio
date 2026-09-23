@@ -4,7 +4,7 @@
   "version": "0.9.0",
   "identifier": "com.pentaho.media-studio",
   "build": {
-    "beforeBuildCommand": "npm run fetch:python && npm run stage:app",
+    "beforeBuildCommand": "npm run fetch:python && npm run fetch:ffprobe && npm run stage:app",
     "frontendDist": "../dist"
   },
   "app": {

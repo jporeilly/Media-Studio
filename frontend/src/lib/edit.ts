@@ -41,10 +41,10 @@ export const EPSILON = 0.0005;
 /** One second is about this many pixels at full zoom. */
 export const MAX_PPS = 200;
 /**
- * A "frame" for Comma / Period. The source's frame rate is not known without
- * ffprobe, which the packaged app does not have (spec trap 2), so a frame is
- * a thirtieth of a second — right for the screen recordings this is built
- * for and a fixed, honest step for everything else.
+ * A "frame" for Comma / Period. The timeline never probes the source for its
+ * real frame rate — it answers instantly from what it already holds (spec
+ * trap 2) — so a frame is a thirtieth of a second: right for the screen
+ * recordings this is built for and a fixed, honest step for everything else.
  */
 export const FRAME_SECONDS = 1 / 30;
 /** How many edits the client-side undo stack remembers. */

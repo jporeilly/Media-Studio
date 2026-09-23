@@ -6,6 +6,7 @@
   "scripts": {
     "build:frontend": "npm --prefix ../frontend run build",
     "fetch:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-python.ps1",
+    "fetch:ffprobe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-ffprobe.ps1",
     "stage:app": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-app.ps1",
     "icons": "python scripts/make-icons.py",
     "tauri": "tauri",
@@ -13,7 +14,7 @@
     "tauri:build": "tauri build",
     "check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-environment.ps1",
     "collect": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/collect-installer.ps1",
-    "dist": "npm run build:frontend && npm run fetch:python && npm run stage:app && npm run tauri:build && npm run collect"
+    "dist": "npm run build:frontend && npm run fetch:python && npm run fetch:ffprobe && npm run stage:app && npm run tauri:build && npm run collect"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

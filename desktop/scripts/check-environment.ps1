@@ -14,6 +14,9 @@
 
       - ffmpeg absent only affects video RENDERING; import, transcription and the
         UI all work without it.
+      - ffprobe absent breaks the RE-VOICE AND EVERY NARRATED RENDER: pydub
+        decodes each synthesised sentence and each slide's narration MP3 through
+        it. Import, transcription and the UI work without it.
       - Ollama absent only affects the optional local-AI features.
 
     Treating those as hard failures would teach people to ignore the output.
@@ -195,6 +198,27 @@ if ($vendored -and (Test-Path -LiteralPath $vendored)) {
     } else {
         Report "ffmpeg" "WARN" "neither vendored (app\bin\ffmpeg.exe) nor on PATH - video rendering will fail" `
             "reinstall the app (the installer vendors ffmpeg), or: winget install -e --id Gyan.FFmpeg"
+    }
+}
+
+# ffprobe: checked SEPARATELY from ffmpeg, because the two can genuinely come
+# apart. 0.9.0's installer shipped ffmpeg alone, and Settings > Updates pulls
+# the checkout and not the binaries - so a 0.9.0 install updated in place has
+# one and not the other. On a machine with no ffmpeg of its own that install
+# fails every re-voice AND every narrated render (both decode MP3s through
+# pydub, which needs the prober) while its ffmpeg row reads OK - a confusing
+# enough symptom to be worth its own row.
+$vendoredProbe = $null
+if ($appRoot) { $vendoredProbe = Join-Path $appRoot "bin\ffprobe.exe" }
+if ($vendoredProbe -and (Test-Path -LiteralPath $vendoredProbe)) {
+    Report "ffprobe" "OK" ("vendored: " + $vendoredProbe)
+} else {
+    $ffprobe = Get-Command ffprobe.exe -ErrorAction SilentlyContinue
+    if ($ffprobe) {
+        Report "ffprobe" "OK" ("on PATH: " + $ffprobe.Source)
+    } else {
+        Report "ffprobe" "WARN" "neither vendored (app\bin\ffprobe.exe) nor on PATH - the re-voice and every narrated render will fail" `
+            "run the 0.9.1 (or later) installer - an in-place update does not deliver it"
     }
 }
 

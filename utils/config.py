@@ -28,12 +28,52 @@ TEMP_DIR.mkdir(exist_ok=True)
 (APP_DIR / "assets" / "finished").mkdir(parents=True, exist_ok=True)
 
 
+def _shipped_ffmpeg_paths() -> tuple[str | None, str | None]:
+    """The ffmpeg/ffprobe the INSTALLER put in the app's own ``bin/``.
+
+    ``desktop/scripts/stage-app.ps1`` stages both there and ``desktop/boot.py``
+    prepends that directory to PATH, so a plain ``shutil.which`` would usually
+    find them anyway. "Usually" is the problem: PATH order is an environment
+    accident, and a machine with its own ffmpeg installed ahead of the app's
+    would silently pair a different build with the one the app was tested
+    against. 7.1 and 8.0.1 already differ where this app feels it. Taking them
+    by absolute path makes the pair explicit rather than lucky.
+
+    Each is resolved on its own: an install that self-updates from 0.9.0 gets
+    the new code but keeps its old ``bin/`` (the update pulls the checkout, not
+    the binaries), so ffmpeg can be there with no ffprobe beside it. Then the
+    prober comes from the machine, if it has one - allowed, because refusing it
+    would break a machine that otherwise works, but never silent: see
+    :func:`_mixed_pair_warning`.
+    """
+    suffix = ".exe" if os.name == "nt" else ""
+    bin_dir = APP_DIR / "bin"
+    ffmpeg = bin_dir / f"ffmpeg{suffix}"
+    ffprobe = bin_dir / f"ffprobe{suffix}"
+    return (
+        str(ffmpeg) if ffmpeg.is_file() else None,
+        str(ffprobe) if ffprobe.is_file() else None,
+    )
+
+
 def _get_ffmpeg_paths() -> tuple[str | None, str | None]:
     """Find ffmpeg and ffprobe executable paths.
 
-    Priority: system PATH > static-ffmpeg > imageio-ffmpeg.
-    Returns (ffmpeg_path, ffprobe_path) — either may be None.
+    Priority: the app's own ``bin/`` > system PATH > static-ffmpeg >
+    imageio-ffmpeg. Returns (ffmpeg_path, ffprobe_path) — either may be None.
     """
+    shipped_ffmpeg, shipped_ffprobe = _shipped_ffmpeg_paths()
+    if shipped_ffmpeg and shipped_ffprobe:
+        return shipped_ffmpeg, shipped_ffprobe
+
+    found_ffmpeg, found_ffprobe = _discovered_ffmpeg_paths()
+    # A shipped binary always beats a discovered one of unknown version; the
+    # discovery only fills a gap the install left.
+    return (shipped_ffmpeg or found_ffmpeg), (shipped_ffprobe or found_ffprobe)
+
+
+def _discovered_ffmpeg_paths() -> tuple[str | None, str | None]:
+    """Find ffmpeg/ffprobe anywhere on the machine (source checkout, dev box)."""
     import shutil
 
     # 1. System PATH
@@ -79,10 +119,36 @@ if FFMPEG_PATH:
 
     try:
         from pydub import AudioSegment
+        import pydub.utils as _pydub_utils
+
         AudioSegment.converter = FFMPEG_PATH
         AudioSegment.ffmpeg = FFMPEG_PATH
+
         if _FFPROBE_PATH:
-            AudioSegment.ffprobe = _FFPROBE_PATH
+            # pydub 0.25.1 has NO ffprobe attribute it reads. `converter`
+            # (and its back-compat alias `ffmpeg`) steers the ENCODER only;
+            # every decode probes through utils.mediainfo_json ->
+            # get_prober_name(), which returns the bare name "ffprobe" and
+            # leaves the resolving to Windows. Setting AudioSegment.ffprobe,
+            # as this module used to, creates an attribute nothing ever reads,
+            # so the engine's ten from_file call sites - the re-voice's and
+            # every narrated render's - were resolving their prober off PATH
+            # no matter what was configured here.
+            #
+            # Replacing get_prober_name is the seam that works: pydub then
+            # spawns the ABSOLUTE path of the binary that shipped with the
+            # app. Two things follow. The decode no longer depends on PATH
+            # ORDER, so a system ffmpeg of another version cannot win; and it
+            # no longer runs an ffprobe.exe that merely happens to sit in the
+            # working directory, which pydub's own `which` searches FIRST.
+            #
+            # The only behaviour this changes is pydub's file-OBJECT branch,
+            # where mediainfo_json compares the prober's NAME to "ffprobe" to
+            # pick `cache:pipe:0` over `-`. Every from_file call in this app
+            # passes a path, not a file object.
+            # ``or "ffprobe"`` so that nulling _FFPROBE_PATH later restores
+            # pydub's own behaviour rather than handing Popen a None.
+            _pydub_utils.get_prober_name = lambda: _FFPROBE_PATH or "ffprobe"
     except ImportError:
         pass
 
@@ -97,6 +163,109 @@ if os.name == "nt":
             super().__init__(*args, **kwargs)
 
     _sp.Popen = _SilentPopen
+
+
+def _binary_version(path: str) -> str:
+    """The first line of ``<path> -version``, or why it could not be read."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [path, "-version"], capture_output=True, timeout=10,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=0x08000000 if os.name == "nt" else 0,  # CREATE_NO_WINDOW
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"version unreadable ({type(exc).__name__})"
+    lines = (out.stdout or "").splitlines()
+    return lines[0].strip() if lines else f"version unreadable (exit {out.returncode})"
+
+
+def _mixed_pair_warning(shipped, resolved, version_of=_binary_version) -> str | None:
+    """The startup warning for an ffmpeg/ffprobe pair that did not come from one place.
+
+    ``shipped`` is ``_shipped_ffmpeg_paths()``; ``resolved`` is what the app
+    will actually run, ``(FFMPEG_PATH, _FFPROBE_PATH)``. The state this exists
+    for: a 0.9.0 install updated in place, whose ``bin/`` holds the shipped
+    ffmpeg 7.1 and no ffprobe, on a machine with an ffprobe of its own - so the
+    render runs the tested ffmpeg and pydub probes with whatever the machine
+    has (8.0.1 on the dev box). It is ALLOWED: the decode is ffmpeg's, the
+    prober only reports stream metadata, and refusing the foreign one would
+    break a machine that works. What it must not be is silent.
+
+    Returns None - no warning - when the pair is shipped together, when both
+    come from the machine (a source checkout), and when either one is missing
+    altogether: there is no pair to mix, and a missing binary fails loudly on
+    its own.
+    """
+    shipped_ffmpeg, shipped_ffprobe = shipped
+    ffmpeg, ffprobe = resolved
+    if not (ffmpeg and ffprobe):
+        return None
+    ffmpeg_shipped = ffmpeg == shipped_ffmpeg
+    ffprobe_shipped = ffprobe == shipped_ffprobe
+    if ffmpeg_shipped == ffprobe_shipped:
+        return None
+
+    def origin(is_shipped: bool) -> str:
+        return "shipped in app\\bin" if is_shipped else "found on this machine"
+
+    return (
+        "ffmpeg and ffprobe did not come from the same place, so this install is "
+        "not running the pair it was built and tested with. "
+        f"ffmpeg: {ffmpeg} ({origin(ffmpeg_shipped)}; {version_of(ffmpeg)}). "
+        f"ffprobe: {ffprobe} ({origin(ffprobe_shipped)}; {version_of(ffprobe)}). "
+        "This is what a 0.9.0 install updated in place looks like: Settings > "
+        "Updates delivers the code but never app\\bin. Narrated renders and the "
+        "re-voice still run, but on a prober the app was not tested with. Run the "
+        "latest Media Studio Enterprise installer over this install to restore "
+        "the matched pair."
+    )
+
+
+def _missing_prober_warning(shipped, resolved) -> str | None:
+    """The startup warning for an install whose ``bin/`` has no prober, on a
+    machine that has none either.
+
+    The worst of the three states a 0.9.0 install updated in place can be in:
+    the shipped ffmpeg is in ``app\\bin``, no ffprobe is there (an in-place
+    update never refreshes ``bin``) and none is installed anywhere else, so the
+    first re-voice or narrated render dies with ``FileNotFoundError
+    [WinError 2]`` and nothing before that says why. :func:`_mixed_pair_warning`
+    is silent here on purpose - there is no pair to mix - so this is its own
+    warning.
+
+    Returns None - no warning - unless the app runs the SHIPPED ffmpeg and has
+    no prober at all. A source checkout with no shipped ffmpeg is a developer's
+    machine, not a broken install, and stays silent whatever it lacks; so does
+    an install whose prober was found somewhere (shipped, or the machine's).
+    Never runs a binary: it has nothing to ask.
+    """
+    shipped_ffmpeg, _shipped_ffprobe = shipped
+    ffmpeg, ffprobe = resolved
+    if not shipped_ffmpeg or ffmpeg != shipped_ffmpeg or ffprobe:
+        return None
+    return (
+        "No ffprobe was found. This install's app\\bin carries ffmpeg "
+        f"({ffmpeg}) but no ffprobe.exe, and none is installed anywhere else on "
+        "this machine. That is what a 0.9.0 install updated in place looks like: "
+        "Settings > Updates delivers the code but never refreshes app\\bin, and "
+        "0.9.0 shipped no ffprobe. Until the latest Media Studio Enterprise "
+        "installer is run over this install, the re-voice and every narrated "
+        "render will fail (FileNotFoundError [WinError 2])."
+    )
+
+
+# Worked out once, here, and LOGGED by utils.logger the moment logging exists:
+# utils.logger imports this module, so this module cannot import it back. The
+# two describe different states and never fire together (one needs a prober,
+# the other its absence).
+FFMPEG_PAIR_WARNING = _mixed_pair_warning(
+    _shipped_ffmpeg_paths(), (FFMPEG_PATH, _FFPROBE_PATH)
+)
+FFPROBE_MISSING_WARNING = _missing_prober_warning(
+    _shipped_ffmpeg_paths(), (FFMPEG_PATH, _FFPROBE_PATH)
+)
 
 # Default configuration
 DEFAULT_CONFIG = {

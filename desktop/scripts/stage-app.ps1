@@ -6,8 +6,9 @@
     Stages the app into src-tauri\vendor\app (which tauri.conf.json's
     bundle.resources maps to "app" inside the install) as a GIT CHECKOUT of the
     committed tree - so the installed app can self-update with `git pull` - then
-    overlays boot.py and a vendored ffmpeg.exe. The built UI (frontend\dist) is
-    COMMITTED and arrives with the clone, so a pull updates the UI too.
+    overlays boot.py and the vendored ffmpeg.exe / ffprobe.exe pair. The built
+    UI (frontend\dist) is COMMITTED and arrives with the clone, so a pull
+    updates the UI too.
 
     The staged tree MIRRORS the repo's FLAT layout:
 
@@ -32,6 +33,8 @@
 param(
     # Build even when the tree is dirty or HEAD is not on a pushed branch. The
     # installer then ships something self-update cannot fast-forward from.
+    # Also stages an ffmpeg/ffprobe pair of DIFFERENT builds, which otherwise
+    # fails the stage (see the media binaries block).
     [switch]$Force
 )
 
@@ -139,25 +142,99 @@ if (-not (Test-Path -LiteralPath (Join-Path $stageUi "index.html"))) {
 # import api.app whatever working directory it is given. See desktop\boot.py.
 Copy-Item -LiteralPath (Join-Path $desktopDir "boot.py") -Destination (Join-Path $stageDir "boot.py") -Force
 
-# ffmpeg: the engine invokes it BY NAME and a customer machine has none on PATH.
-# moviepy's imageio-ffmpeg dependency vendors the binary (under a versioned
-# name) into the runtime's site-packages; ship it as app\bin\ffmpeg.exe and
-# boot.py puts app\bin on PATH. ffprobe is not bundled - the engine degrades
-# gracefully where it is optional (e.g. the re-voice pad falls back to apad).
+# The media binaries. Both are invoked BY NAME and a customer machine has
+# neither on PATH, so both are shipped into app\bin and boot.py puts that
+# directory FIRST on PATH.
+#
+#   ffmpeg.exe  - moviepy's imageio-ffmpeg dependency vendors it (under a
+#                 versioned name) into the runtime's site-packages.
+#   ffprobe.exe - fetch-ffprobe.ps1 vendors it from gyan.dev's 7.1 essentials
+#                 archive, the same zip imageio-ffmpeg repackages its ffmpeg
+#                 from (the two ffmpeg.exe files are byte-identical), so the
+#                 pair that ships is the pair that was released together.
+#
+# Why ffprobe ships even though the ENGINE no longer calls it: the engine's own
+# probe was removed in 0.9.1 (it asks ffmpeg now), but the engine decodes audio
+# through pydub.AudioSegment.from_file, and for anything that is not a .wav
+# PYDUB runs its own prober - mediainfo_json -> get_prober_name in
+# pydub\utils.py, a bare "ffprobe" found on PATH, whatever the app does. Ten
+# from_file call sites across core\audio_mixer.py, core\video_creator.py and
+# services\processing.py go through it: the re-voice decodes every synthesised
+# sentence, and every narrated render decodes every slide's MP3 to build its
+# master track. With no prober on the machine that raises FileNotFoundError
+# [WinError 2] at once, so on every clean install both the re-voice and every
+# narrated render fail. ffprobe is here for pydub.
 $vendorPy = Join-Path $desktopDir "src-tauri\vendor\python\python.exe"
+$binDir   = Join-Path $stageDir "bin"
+$stagedFfmpeg  = ""
+$stagedFfprobe = ""
 if (Test-Path -LiteralPath $vendorPy) {
     $ErrorActionPreference = "Continue"
     $ffSrc = (& $vendorPy -B -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())" 2>&1 | Out-String).Trim()
     $ffOk  = ($LASTEXITCODE -eq 0)
     $ErrorActionPreference = $prevEap
     if ($ffOk -and $ffSrc -and (Test-Path -LiteralPath $ffSrc)) {
-        $binDir = Join-Path $stageDir "bin"
         New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-        Copy-Item -LiteralPath $ffSrc -Destination (Join-Path $binDir "ffmpeg.exe") -Force
+        $stagedFfmpeg = Join-Path $binDir "ffmpeg.exe"
+        Copy-Item -LiteralPath $ffSrc -Destination $stagedFfmpeg -Force
         Ok ("vendored ffmpeg -> app\bin\ffmpeg.exe (" + [math]::Round((Get-Item -LiteralPath $ffSrc).Length / 1MB) + " MB)")
     } else {
         Warn "imageio-ffmpeg not found in the vendored runtime - the install will need ffmpeg on PATH"
     }
+}
+
+$fpSrc = Join-Path $desktopDir "src-tauri\vendor\ffprobe\ffprobe.exe"
+if (Test-Path -LiteralPath $fpSrc) {
+    New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+    $stagedFfprobe = Join-Path $binDir "ffprobe.exe"
+    Copy-Item -LiteralPath $fpSrc -Destination $stagedFfprobe -Force
+    Ok ("vendored ffprobe -> app\bin\ffprobe.exe (" + [math]::Round((Get-Item -LiteralPath $fpSrc).Length / 1MB) + " MB)")
+} else {
+    Warn "NO ffprobe.exe TO STAGE - run 'npm run fetch:ffprobe' (the dist chain does)"
+    Warn "  without it pydub has no prober, and the RE-VOICE AND EVERY NARRATED RENDER"
+    Warn "  FAIL on every machine that has no ffmpeg of its own - every machine but a developer's"
+}
+
+# The pair must be the same build. A binary from another version is not a
+# drop-in: 7.1 and 8.0.1 already differ where this app feels it (an unbounded
+# -af apad never finishes on 7.1 and exits in 0.2 s on 8.0.1). ffmpeg's side is
+# held at 7.1 by requirements.txt's imageio-ffmpeg==0.6.0 pin and ffprobe's by
+# fetch-ffprobe.ps1's; this is what stops a build when one moves without the
+# other. It FAILS the stage - a yellow line in a 13-minute log is not a stop -
+# unless -Force, which a developer's dirty-tree build already needs. A version
+# line that cannot be read counts as a mismatch: the check fails closed.
+#
+# A function between markers so tests/test_ffprobe_shipped.py can run exactly
+# this code against real binaries: the whole script cannot be run without
+# -Force on a dirty tree, and -Force is the one thing that lets a mismatch by.
+# --- same-build check: begin ---
+function Assert-SameMediaBuild {
+    param([string]$FfmpegExe, [string]$FfprobeExe, [switch]$AllowMismatch)
+    $prevEapVer = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $ffVer = ((& $FfmpegExe  -version 2>&1 | Out-String) -split "`n")[0].Trim()
+    $fpVer = ((& $FfprobeExe -version 2>&1 | Out-String) -split "`n")[0].Trim()
+    $ErrorActionPreference = $prevEapVer
+    # "ffmpeg version X ..." / "ffprobe version X ..." - compare the X.
+    $ffBuild = ($ffVer -replace '^ffmpeg version ', '' -split ' ')[0]
+    $fpBuild = ($fpVer -replace '^ffprobe version ', '' -split ' ')[0]
+    if (($ffVer -match '^ffmpeg version ') -and ($fpVer -match '^ffprobe version ') -and $ffBuild -and ($ffBuild -eq $fpBuild)) {
+        Ok ("ffmpeg and ffprobe are the same build (" + $ffBuild + ")")
+        return
+    }
+    Warn "THE STAGED ffmpeg AND ffprobe ARE DIFFERENT BUILDS - re-pin fetch-ffprobe.ps1"
+    Warn ("  ffmpeg  " + $ffVer)
+    Warn ("  ffprobe " + $fpVer)
+    if (-not $AllowMismatch) {
+        throw ("the staged ffmpeg and ffprobe are different builds (" + $ffBuild + " vs " + $fpBuild +
+               ") - re-pin fetch-ffprobe.ps1 or imageio-ffmpeg in requirements.txt so they match" +
+               " (or -Force to stage the mismatched pair anyway)")
+    }
+    Warn "-Force: staging the mismatched pair anyway"
+}
+# --- same-build check: end ---
+if ($stagedFfmpeg -and $stagedFfprobe) {
+    Assert-SameMediaBuild -FfmpegExe $stagedFfmpeg -FfprobeExe $stagedFfprobe -AllowMismatch:$Force
 }
 
 # Belt and braces: prove nothing sensitive slipped through. A rename or a new
