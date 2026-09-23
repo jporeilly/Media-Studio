@@ -125,7 +125,7 @@ npm run icons             # python scripts/make-icons.py
 
 ### Output & install
 
-- Installer: `C:\Projects\Media-Studio-Enterprise\dist\Media-Studio-Enterprise_<ver>_x64-setup.exe` (0.9.0: 154,761,799 bytes, 148 MB; 0.9.1 about 25 MB larger, measured after the build: **[TBD at release: measured 0.9.1 installer size]**)
+- Installer: `C:\Projects\Media-Studio-Enterprise\dist\Media-Studio-Enterprise_<ver>_x64-setup.exe` (0.9.0: 154,761,799 bytes, 148 MB; 0.9.1 about 25 MB larger, measured after the build: **178,044,267 bytes (170 MB)**)
 - Install (double-click, **per-user, no admin**; silent: `/S`): `C:\Media-Studio-Enterprise\`
   - `media-studio-desktop.exe` - the shell (named after the Cargo crate, not the product), and `uninstall.exe`
   - `app\` - the git checkout (with the committed `frontend\dist`) + `boot.py` + `bin\ffmpeg.exe` + `bin\ffprobe.exe`
@@ -394,7 +394,7 @@ once; every restart after it works.
   a soft import check and warns.
 - **Installer size.** 0.9.0's installer is 154,761,799 bytes (148 MB). 0.9.1's
   is about 25 MB larger - the exact figure exists only after `npm run dist`:
-  **[TBD at release: measured 0.9.1 installer size]**. The growth is the prober:
+  **178,044,267 bytes (170 MB)**. The growth is the prober:
   `ffprobe.exe` is 83 MB raw but NSIS compresses the payload with LZMA, under
   which it comes to about 23 MB (ffmpeg's tools are each a fully static build,
   so they share nothing). On disk the install is about 770 MB, measured from the
