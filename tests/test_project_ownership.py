@@ -79,12 +79,24 @@ PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
 # owner to check. Listed here so the decision is visible beside the table, and
 # so the guard below fails if one of them ever grows a project id without
 # joining the table.
+#
+# The in-app documentation (api/routers/docs.py) is studio-wide for the same
+# reason and read-only: the markdown is the APP's, shipped in the checkout, and
+# belongs to no project. It needs a session like everything else (401 signed
+# out, held by tests/test_docs.py). Its ``{slug:path}`` route serves a
+# WHITELIST - the four root documents and ``docs/guides/`` - and never joins a
+# caller's slug onto a directory, because ``docs/porting/`` is internal design
+# material that must not be reachable through it; that is a DECISION, not an
+# oversight, and tests/test_docs.py proves no spelling reaches it.
 STUDIO_WIDE_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/music"),
     ("POST", "/api/music"),
     ("GET", "/api/music/{name}"),
     ("GET", "/api/music/{name}/peaks"),
     ("DELETE", "/api/music/{name}"),
+    ("GET", "/api/docs"),
+    ("GET", "/api/docs/search"),
+    ("GET", "/api/docs/{slug:path}"),
 }
 
 

@@ -1,5 +1,33 @@
 # Design spec — the edit timeline (vertical 6)
 
+> **Amended 2026-09-23 (0.9.1).** Every statement below that the packaged app carries
+> **no ffprobe** — §1.4, and the traps and asides that lean on it — was true when this
+> survey was written and is no longer. The installer now ships `app\bin\ffprobe.exe`
+> beside `ffmpeg.exe`, pinned to gyan.dev's 7.1 essentials build (the same archive
+> imageio-ffmpeg repackages its ffmpeg from), because **pydub** probes on its own behalf
+> once per re-voiced sentence and once per narrated slide, and no amount of fixing the
+> engine's calls reaches it.
+> What has *not* changed is the design: the timeline still takes its lengths from the WAV
+> header and the project's own record, the engine resolves binaries by path — and, since
+> the same release swept out the last of the bare-name call sites §1.3 lists, with a test
+> that fails if one comes back, never spawns a bare name — and nothing here should start
+> probing. The constraint stands; only its justification has moved from "there is no
+> prober" to "probing is the wrong answer". See `CHANGELOG.md` (#f1-revoice-probe,
+> #f2-ship-ffprobe) and `desktop/README.md`.
+>
+> What *has* changed, in the same release (#f1-revoice-probe), is the render's side of the
+> length. §4 step 3, §7's third note on E1 and trap 2 call the mux's `video_duration`
+> argument **unwired** and an unbounded `apad` "unobservable under `-shortest`". The
+> argument is wired now — the re-voice job passes the length it knows — and
+> `replace_video_audio` also measures the picture it is given, from ffmpeg's own header
+> (never a prober), and pads to the larger of the two. The re-voice bounds its last
+> sentence by that same number, so §7's note that the render bounds it "by ffprobe of the
+> cut picture … or by the section's end where there is no ffprobe" is 0.9.0's account too.
+> And the `apad` claim was never true of the ffmpeg the app ships: the bundled 7.1 does
+> not finish a bare `apad` (the dev box's 8.0.1 does), so wherever no length was known,
+> 0.9.0's mux ran until its ten-minute timeout killed it. With no length at all the mux
+> now pads nothing.
+
 Read-only survey, 2026-09-16, plus measurements taken that day on the real 5m41s 1080p
 source (`data/projects/6d808448772c/finished.mp4`). **E1 — the model and the render —, E2
 — the gesture — and E3 — tracks — are built (2026-09-16, 2026-09-17 and 2026-09-18; E1 and E2

@@ -24,6 +24,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { type ComponentProps, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { NarrationTimeline } from "./NarrationTimeline";
 import { narrationPlanKey } from "../../lib/timeline";
@@ -85,8 +86,13 @@ function markup(over: { music?: unknown[]; locks?: Locks } = {}): string {
     projectId: PID, provider: "edge", voiceId: "en-GB", speed: 1, active: true,
     selected: null, onSelect: () => {}, jobActive: false, offsets: {}, onOffsetsSaved: () => {},
   };
+  // A MemoryRouter around it since the strip's summary carries the link to the
+  // Timeline document: a `<Link>` needs a router context, and this is the app's
+  // own way of linking (the only `target="_blank"` in the app is for a link
+  // that really does leave it).
   return renderToStaticMarkup(
-    createElement(QueryClientProvider, { client: qc }, createElement(NarrationTimeline, props)),
+    createElement(MemoryRouter, null,
+      createElement(QueryClientProvider, { client: qc }, createElement(NarrationTimeline, props))),
   );
 }
 
@@ -272,6 +278,78 @@ describe("the header's buttons and the sliders wear their own classes", () => {
     const html = markup();
     expect(html).toContain('class="os-tl-range os-tl-zoom"');
     expect(html).not.toContain('class="os-tl-zoom"');
+  });
+});
+
+describe("the strip's summary is a list of the basic gestures, and the rest is a document", () => {
+  /** The `<dl>` of gestures, from its opening tag to its close. */
+  function actions(html: string): string {
+    const at = html.indexOf('class="os-tl-actions"');
+    expect(at, "the action list is not in the markup").toBeGreaterThan(-1);
+    const from = html.lastIndexOf("<dl", at);
+    return html.slice(from, html.indexOf("</dl>", from) + 5);
+  }
+
+  it("pairs every gesture with what it does, in a real definition list", () => {
+    const list = actions(markup());
+    const terms = [...list.matchAll(/<dt>(.*?)<\/dt>/g)].map((m) => m[1]);
+    const meanings = [...list.matchAll(/<dd>(.*?)<\/dd>/g)].map((m) => m[1]);
+    // A table faked with spaces was the other way to do this, and it would not
+    // survive the app's small size or a narrow window.
+    expect(terms.length).toBe(meanings.length);
+    expect(terms.length).toBeGreaterThanOrEqual(9);
+    // The basics the owner listed: a range, the cut, the split, the channel,
+    // the lock, a block, the library, a clip, the eye, undo.
+    expect(terms).toEqual([
+      "Drag the green or red handle, or Ctrl+drag",
+      "Scissors, or Delete",
+      "S",
+      "Click a lane&#x27;s name",
+      "The lock icon",
+      "Drag a sentence block",
+      "The + on Music",
+      "Drag a clip, or either of its ends",
+      "The eye on Music",
+      "Ctrl+Z",
+    ]);
+  });
+
+  it("points at the Timeline document for everything else", () => {
+    const html = markup();
+    expect(html).toContain('href="/docs/guides/timeline"');
+    expect(html).toContain("Full help: the Timeline");
+  });
+
+  it("no longer carries the two paragraphs of prose that were there", () => {
+    // The exact sentences that moved into docs/guides/timeline.md. If one comes
+    // back here, the strip is dense again and the document is a second copy.
+    const html = markup();
+    for (const gone of [
+      "Play here to hear the new narration",
+      "is the fourth lane",
+      "the row under the strip sets its level and its fades",
+      "it snaps to the playhead, the joins, the other sentences",
+      "Each track is decoded once when you press Play",
+      "Ctrl+Shift+S all of them",
+    ]) {
+      expect(html, `"${gone}" is still on the strip`).not.toContain(gone);
+    }
+  });
+
+  it("keeps the summary shorter than the prose it replaced", () => {
+    // A stand-in for the rendered height, which no SSR render can measure (the
+    // real one was measured in a browser against the same stylesheet: 136 px
+    // where the two paragraphs were 201 px, in a card 1110 px wide). Those
+    // paragraphs were 415 words of unbroken text; this is a list, so its height
+    // is its ROWS - and a row added here is a row the ruler moves down by. A
+    // sentence added to the context has to be paid for by one taken out.
+    const html = markup();
+    const help = html.slice(html.indexOf('class="os-tl-help'), html.indexOf('class="os-tl-panel"'));
+    const words = help.replace(/<[^>]*>/g, " ").split(/\s+/).filter(Boolean).length;
+    const context = help.slice(0, help.indexOf("<dl")).replace(/<[^>]*>/g, " ").split(/\s+/).filter(Boolean).length;
+    expect(words, "the summary is creeping back towards the 415 words of prose").toBeLessThan(170);
+    expect(context, "two short lines of context, then the list").toBeLessThan(45);
+    expect([...actions(html).matchAll(/<dt>/g)].length).toBeLessThanOrEqual(12);
   });
 });
 

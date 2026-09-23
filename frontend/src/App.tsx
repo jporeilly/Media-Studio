@@ -36,7 +36,9 @@ export default function App() {
         <Route index element={<DashboardPage />} />
         <Route path="/projects" element={<Lazy><ProjectsPage /></Lazy>} />
         <Route path="/projects/:id" element={<Lazy><ProjectDetailPage /></Lazy>} />
-        <Route path="/docs" element={<Lazy><DocsPage /></Lazy>} />
+        {/* The splat carries the document's own path (`docs/guides/timeline`),
+            so every document is a link anyone can send. */}
+        <Route path="/docs/*" element={<Lazy><DocsPage /></Lazy>} />
         <Route path="/settings" element={<Lazy><SettingsPage /></Lazy>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

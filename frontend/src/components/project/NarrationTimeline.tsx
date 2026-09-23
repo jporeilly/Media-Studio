@@ -10,8 +10,10 @@ import {
   useState,
 } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   AudioLines,
+  ChevronRight,
   Eye,
   EyeOff,
   Lock,
@@ -2484,34 +2486,49 @@ export function NarrationTimeline({
 
   return (
     <div className="os-tl">
-      <div className="os-muted os-small">
-        Play here to hear the new narration against the picture — no render, no job; every sentence
-        is fetched exactly as the re-voice will speak it. A block sits where its sentence is{" "}
-        <strong>aimed</strong>; a pin is a floor, so a clip that runs long is first sped up a little
-        to fit, and only marked when it really will push the next sentence late. To cut: drag the
-        green or red handle on the playhead, or Ctrl+drag, to select; the scissors (or Ctrl+Delete,
-        Backspace) remove the selection and close the gap; Ctrl+Z undoes. The picture skips at a
-        join because that is the edit. Click a lane's <strong>name</strong> to edit just that
-        channel (the other lanes lock; the lock icons toggle one at a time), and a locked lane
-        keeps everything on it exactly where it is. <strong>S</strong> splits the unlocked lanes at the
-        playhead (Ctrl+Shift+S all of them); once a lane is split, clicking a piece selects it
-        (until then a click on a lane seeks, as on the ruler). <strong>Drag</strong> a
-        sentence block to move it — it snaps to the playhead, the joins, the other sentences and
-        its own spoken moment (hold Ctrl to drag freely) — or nudge the selected blocks with
-        [ and ] (Shift for a quarter second); Reset timing puts them back where they were spoken.
-      </div>
-      <div className="os-muted os-small">
-        <strong>Music</strong> is the fourth lane: open the library from its header (the <strong>+</strong>),
-        add a track at the playhead, then drag the clip along the lane to move it or drag its ends to trim
-        it; the row under the strip sets its level and its fades, and Delete removes the selected clip. Clicking a
-        clip only selects it — the playhead stays where it is, so a level can be set while the audition plays.
-        The music <strong>rides the picture</strong>: a cut ripples the clips only when the picture is cut too and
-        the lane is unlocked (a clip across the cut is split in two); with either locked they stay at their times,
-        and with Music the only unlocked lane the scissors is disabled, because it would have nothing to move.
-        The eye on the header silences the music <em>here only</em>,
-        so you can hear the voice alone; the render always mixes it. Each track is decoded once when you
-        press Play, which is a few seconds and about 100 MB of memory for a five-minute file, so a long
-        library is expensive to audition.
+      {/* The strip's own help is the BASICS, as a list of gestures: two lines
+          of context, then the gesture on the left and what it does on the
+          right. The owner, looking at the packaged app (2026-09-22): "the text
+          is dense. Can some of this be available in documentation and just a
+          summary of the basic actions displayed." Everything the two
+          paragraphs that were here used to say — the lanes, the locks in full,
+          splitting and pieces, the snapping, the Music lane's rules, the keys
+          — is `docs/guides/timeline.md` now, which the link at the foot opens.
+
+          Keep this SHORT. Every line added here pushes the ruler further down
+          the page, which is the thing being fixed; a new rule belongs in the
+          document. One element, not two: `.os-tl` is a grid and each child
+          costs another 10 px of gap. */}
+      <div className="os-tl-help os-muted os-small">
+        <div>
+          Play to hear the new narration against the picture — no render, no job. A block sits where its
+          sentence is <strong>aimed</strong>, and the picture skips at a join because that is the edit.
+        </div>
+        <dl className="os-tl-actions">
+          <dt>Drag the green or red handle, or Ctrl+drag</dt>
+          <dd>Select a range</dd>
+          <dt>Scissors, or Delete</dt>
+          <dd>Cut the selection and close the gap</dd>
+          <dt>S</dt>
+          <dd>Split the unlocked lanes at the playhead</dd>
+          <dt>Click a lane's name</dt>
+          <dd>Edit that channel alone — the others lock</dd>
+          <dt>The lock icon</dt>
+          <dd>Leave that lane exactly as it is</dd>
+          <dt>Drag a sentence block</dt>
+          <dd>Re-time it; [ and ] nudge, Reset timing puts it back</dd>
+          <dt>The + on Music</dt>
+          <dd>The library — add a track at the playhead</dd>
+          <dt>Drag a clip, or either of its ends</dt>
+          <dd>Move it, or trim it; Delete removes it</dd>
+          <dt>The eye on Music</dt>
+          <dd>Hear the voice alone — the render still mixes the music</dd>
+          <dt>Ctrl+Z</dt>
+          <dd>Undo</dd>
+        </dl>
+        <Link className="os-tl-help-link" to="/docs/guides/timeline">
+          Full help: the Timeline <ChevronRight size={12} />
+        </Link>
       </div>
 
       {droppedByOffset.length > 0 && (
@@ -2598,7 +2615,7 @@ export function NarrationTimeline({
               type="button"
               className="os-tl-btn"
               aria-label="Step back one frame"
-              title="Step back one frame (,) — a frame is 1/30 s here; the source's own rate is not known without ffprobe"
+              title="Step back one frame (,) — a frame is 1/30 s here; the timeline never probes the source for its own rate"
               onClick={() => stepBy(-1)}
             >
               <StepBack size={15} />
@@ -2616,7 +2633,7 @@ export function NarrationTimeline({
               type="button"
               className="os-tl-btn"
               aria-label="Step forward one frame"
-              title="Step forward one frame (.) — a frame is 1/30 s here; the source's own rate is not known without ffprobe"
+              title="Step forward one frame (.) — a frame is 1/30 s here; the timeline never probes the source for its own rate"
               onClick={() => stepBy(1)}
             >
               <StepForward size={15} />

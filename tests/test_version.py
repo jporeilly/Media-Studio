@@ -37,7 +37,7 @@ def test_version_is_plain_semver():
         # The lockfile records the crate's own version; cargo rewrites it on the
         # next build, so a bump that skips it leaves the tree dirty after a build.
         ("desktop/src-tauri/Cargo.lock", r'^name = "media-studio-desktop"\nversion = "{v}"$'),
-        ("README.md", r"<b>Version {v}</b>"),
+        ("README.md", r"\*\*Version {v}\*\*"),
         ("VERSION.md", r"^\*\*Current version:\*\* {v}$"),
         ("CHANGELOG.md", r"^## \[{v}\] - \d{{4}}-\d{{2}}-\d{{2}}$"),
     ],
@@ -52,7 +52,7 @@ def test_version_string_agrees_everywhere(rel, pattern):
     "rel, pattern",
     [
         # A leftover older number in any carrier means a bump missed a file.
-        ("README.md", r"<b>Version (\d+\.\d+\.\d+)</b>"),
+        ("README.md", r"\*\*Version (\d+\.\d+\.\d+)\*\*"),
         ("VERSION.md", r"^\*\*Current version:\*\* (\d+\.\d+\.\d+)$"),
         ("desktop/src-tauri/Cargo.toml", r'^version = "(\d+\.\d+\.\d+)"$'),
     ],

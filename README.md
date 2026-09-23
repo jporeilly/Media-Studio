@@ -1,6 +1,6 @@
 <h1 align="center">Media Studio Enterprise</h1>
 
-<p align="center"><b>Version 0.9.0</b> — React + FastAPI. Turn slide decks and videos into narrated MP4s.</p>
+**Version 0.9.0** — React + FastAPI. Turn slide decks and videos into narrated MP4s.
 
 Media Studio Enterprise is the React + FastAPI successor to **Slide Studio Enterprise**
 (NiceGUI). It reuses the same Python media engine — PowerPoint/PDF export, Edge TTS &
@@ -35,12 +35,13 @@ the whole app suite looks and feels the same.
 > a new voice or a translated language that keeps step with
 > the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
 > configurable password policy, projects that belong to whoever imported them with an audit
-> log of every change for admins, self-update from Git, and a Windows desktop installer are
-> in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the music and transition-sound
-> library, the rest of the edit timeline (E4's music lane over the top; E5's trim handles,
-> markers, J/K/L and snapping of cuts), and the rest of the
-> administration work (notifications, a branding lock, an admin page of its own, per-kind job
-> limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
+> log of every change for admins, self-update from Git, a Windows desktop installer, and a
+> **Docs** page in the app that serves this README, the install guide, the changelog, the
+> version note and a full guide to the Timeline are
+> in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the transition-sound library, the
+> rest of the edit timeline (E5's trim handles, markers, J/K/L and snapping of cuts), and
+> the rest of the administration work (notifications, a branding lock, an admin page of its
+> own, per-kind job limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
 > `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).
 
 ## Stack
@@ -82,17 +83,24 @@ source.
 
 ## Desktop edition
 
-`desktop/` builds a Windows installer — `dist\Media Studio Enterprise_<version>_x64-setup.exe`:
-a small Tauri/WebView2 shell with a vendored Python runtime and ffmpeg, so a machine needs
-nothing pre-installed. It installs per-user into `%LOCALAPPDATA%\Media Studio Enterprise\`
-(no admin rights), and the app inside is a git checkout, so **Settings › Updates** can pull
-new commits — backend and UI — and restart in place on a machine that has `git` and access
-to the repo. Data and rendered videos live inside that folder (`app\data\`,
+`desktop/` builds a Windows installer — `dist\Media-Studio-Enterprise_<version>_x64-setup.exe`:
+a small Tauri/WebView2 shell with a vendored Python runtime and a matched ffmpeg and ffprobe
+(`app\bin\`), so a machine needs nothing pre-installed. It installs per-user into
+`C:\Media-Studio-Enterprise\` (no admin rights), and the app inside is a git checkout, so
+**Settings › Updates** can pull new commits — backend and UI — and restart in place on a
+machine that has `git` and access to the repo. An update never touches `app\bin\`, so a
+release that changes the binaries has to be installed with its installer: 0.9.1, the first
+to ship ffprobe, is one. Data and rendered videos live inside that folder (`app\data\`,
 `app\assets\finished\`) and survive an uninstall. [INSTALL.md](INSTALL.md) covers install,
 first launch, updating and uninstall; [desktop/README.md](desktop/README.md) covers the build.
 
 ## Documentation
 
+The app's **Docs** page (in the sidebar) serves this README, INSTALL.md, the changelog,
+VERSION.md and the guides under `docs/guides/`. The design journal in `docs/porting/` is
+deliberately not served.
+
+- [The Timeline](docs/guides/timeline.md) — the full help for editing a video project: the lanes, cutting, locks, splitting, re-timing, the Music lane and every key
 - [INSTALL.md](INSTALL.md) — install, update and uninstall the Windows desktop edition
 - [VERSION.md](VERSION.md) — version carriers and bump policy
 - [CHANGELOG.md](CHANGELOG.md) — changes
