@@ -26,6 +26,13 @@
     developer's media_studio.db, config.json or .env would leak accounts, lab
     settings and provider API keys into a customer install.
 
+    Ships NOTHING under data\. The app creates data\ (config.json, the
+    database, projects, logs, cache) at first import, and an NSIS upgrade
+    writes every bundled file over the install, so anything staged there lands
+    on top of a user's live data - 0.9.1's installer did exactly that to
+    app.log. The stage is proved to be the committed tree plus boot.py and
+    bin\ before it is declared done (Assert-StagePristine, at the end).
+
 .NOTES
     Windows PowerShell 5.1+. ASCII-only on purpose.
 #>
@@ -95,6 +102,8 @@ if (-not $aheadOk) {
 } elseif ([int]$ahead -gt 0) {
     if (-not $Force) { throw "HEAD is $ahead commit(s) ahead of its upstream - push first, or the install can never fast-forward" }
     Warn "-Force: HEAD is $ahead commit(s) ahead of its upstream"
+} elseif ($dirty) {
+    Ok "HEAD is on '$branch', pushed"
 } else {
     Ok "HEAD is on '$branch', pushed, tree clean"
 }
@@ -273,7 +282,7 @@ if (Test-Path -LiteralPath $vendorPy) {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     # HARD gate: the api package + the root __init__ (version source) must import.
-    # -B: never write bytecode into the tree robocopy just excluded it from.
+    # -B: never write bytecode into the staged tree.
     $probe = "import sys; sys.path.insert(0, sys.argv[1]); import api; print('api', api.__version__)"
     $out = & $vendorPy -B -c $probe $stageDir 2>&1
     $code = $LASTEXITCODE
@@ -297,14 +306,82 @@ if (Test-Path -LiteralPath $vendorPy) {
         Ok "staged tree imports 'api.app' cleanly"
     }
     $ErrorActionPreference = $prevEap
-
-    # Belt and braces: remove any __pycache__ a stray run left behind. A shipped
-    # .pyc is invisible until someone lists the installer.
-    Get-ChildItem -LiteralPath $stageDir -Recurse -Directory -Filter "__pycache__" |
-        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
 } else {
     Warn "no vendored runtime yet - skipping the import check (run fetch:python first)"
 }
+
+# The import check is not free. Importing api.app runs utils\config.py and
+# utils\logger.py, and those create the app's runtime folders beside the code -
+# IN THE STAGED TREE: data\ (cache\, temp\, logs\ and an EMPTY logs\app.log,
+# opened by the log handler at import) and assets\finished\. Tauri bundles the
+# tree as it stands and an NSIS upgrade writes every bundled file over the
+# install, so 0.9.1's installer (whose clone also carried a then-tracked
+# data\.gitkeep) truncated the user's app.log to 0 bytes on install;
+# config.json and media_studio.db survived only because the import happens not
+# to create them. Nothing under data\ may ever ship - the app creates it at
+# first import - so undo what the import did, then PROVE the tree is the
+# committed one plus the two overlays. (utils\config.py has no data-dir
+# override yet; with one, the import could run with its data elsewhere.)
+foreach ($debris in @("data", "assets")) {
+    $d = Join-Path $stageDir $debris
+    if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+}
+# Belt and braces: any __pycache__ a stray run left behind. A shipped .pyc is
+# invisible until someone lists the installer.
+Get-ChildItem -LiteralPath $stageDir -Recurse -Directory -Filter "__pycache__" |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+
+# The assertion is deliberately wider than "data\ is gone": a delete followed by
+# a check for the thing deleted can never fail. This asks git, which knows the
+# committed tree exactly, and it runs whether or not the import check did.
+# Between markers so tests/test_stage_pristine.py can run this exact code
+# against a throwaway clone and watch it refuse each kind of stray.
+# --- pristine check: begin ---
+function Assert-StagePristine {
+    param([string]$StageDir, [string[]]$Overlays)
+    $prevEapPr = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    # Everything git can see that is not the committed tree: untracked, ignored
+    # (--ignored, or data\logs\app.log would pass - *.log is ignored), modified,
+    # deleted. Then the committed top-level entries, for what git cannot see.
+    $status   = (& git -C $StageDir status --porcelain --ignored 2>&1 | Out-String)
+    $statusOk = ($LASTEXITCODE -eq 0)
+    $tracked  = @((& git -C $StageDir ls-tree --name-only HEAD 2>&1 | Out-String) -split "`n" |
+        ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $treeOk   = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevEapPr
+    if (-not $statusOk -or -not $treeOk) { throw "git could not read the staging tree: $status" }
+    $stray = @()
+    $seenTop = @()
+    foreach ($line in ($status -split "`n")) {
+        $line = $line.TrimEnd("`r")
+        if ($line.Length -lt 4) { continue }
+        # "XY path": two status columns, a space, the path (a directory ends in /).
+        $path = $line.Substring(3).Trim().TrimEnd("/")
+        $seenTop += ($path -split "/")[0]
+        if ($Overlays -contains $path) { continue }
+        $stray += $line.Trim()
+    }
+    # An EMPTY directory is invisible to git. Nothing committed is ever one and a
+    # clone never makes one, so every top-level entry must be committed or an
+    # overlay - this is how data\cache\ and assets\finished\ would slip past.
+    foreach ($entry in (Get-ChildItem -LiteralPath $StageDir -Force)) {
+        if ($entry.Name -eq ".git") { continue }
+        if (($tracked -contains $entry.Name) -or ($Overlays -contains $entry.Name)) { continue }
+        if ($seenTop -contains $entry.Name) { continue }
+        $suffix = ""
+        if ($entry.PSIsContainer) { $suffix = "/" }
+        $stray += ("?? " + $entry.Name + $suffix + " (not committed)")
+    }
+    if (@($stray).Count -gt 0) {
+        $stray | ForEach-Object { Warn ("stray: " + $_) }
+        throw ("the staged tree is not the committed tree plus " + ($Overlays -join ", ") +
+               " - something wrote into the stage (the import check?); it would ship, and an upgrade would write it over the install")
+    }
+    Ok ("the staged tree is the committed tree plus " + ($Overlays -join ", ") + " - nothing under data\ ships")
+}
+# --- pristine check: end ---
+Assert-StagePristine -StageDir $stageDir -Overlays @("boot.py", "bin")
 
 $count = (Get-ChildItem -LiteralPath $stageDir -Recurse -File).Count
 Ok "staged $count file(s) to src-tauri\vendor\app"

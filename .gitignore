@@ -21,8 +21,12 @@ npm-debug.log*
 yarn-error.log*
 
 # ---- Runtime data (per-deployment; never committed) ----
-data/*
-!data/.gitkeep
+# The whole folder, placeholder included: the app creates data/ itself at import
+# (utils/config.py, api/store.py). A tracked data/.gitkeep travelled with the
+# staged checkout into 0.9.1's installer, and an upgrade install wrote it - and
+# the empty data/logs/app.log the staging import left beside it - over the
+# install's live data/ (desktop/scripts/stage-app.ps1, the pristine check).
+data/
 *.db
 *.db-wal
 *.db-shm

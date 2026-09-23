@@ -195,7 +195,19 @@ FAILs; everything else is a WARN that names the feature it affects.
   `fetch-ffprobe.ps1`'s as `app\bin\ffprobe.exe` (all git-ignored at the root,
   so they do not dirty the installed checkout), checks that the two binaries
   report the same build, and proves the staged tree imports `api` (hard) and
-  `api.app` (soft) on the vendored runtime.
+  `api.app` (soft) on the vendored runtime. **That import is not free**: it
+  runs `utils/config.py` and `utils/logger.py`, which create `data\` (`cache\`,
+  `temp\`, `logs\` and an empty `logs\app.log`) and `assets\finished\` beside
+  the code - in the staged tree. Tauri bundles the tree as it stands and an
+  NSIS upgrade writes every bundled file over the install, which is how 0.9.1's
+  installer (built before this guard, when `data\.gitkeep` was tracked as well)
+  truncated the install's `app.log` to 0 bytes. So the script removes `data\`
+  and `assets\` after the import checks and then proves, with git, that the
+  stage is the committed tree plus `boot.py` and `bin\`: anything else
+  untracked, ignored, modified or deleted, or any top-level directory git does
+  not know (an empty one), fails the build (`Assert-StagePristine`, run for real
+  against a throwaway clone by `tests/test_stage_pristine.py`). Nothing under
+  `data\` ships; the app creates it at first import.
 - **Vendored ffprobe** - `fetch-ffprobe.ps1` downloads gyan.dev's versioned
   **7.1 essentials** archive (from its own `GyanD/codexffmpeg` release repo, not
   the moving `ffmpeg-release-*` links) and extracts the single entry
