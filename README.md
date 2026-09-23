@@ -1,6 +1,6 @@
 <h1 align="center">Media Studio Enterprise</h1>
 
-**Version 0.9.0** — React + FastAPI. Turn slide decks and videos into narrated MP4s.
+**Version 0.9.1** — React + FastAPI. Turn slide decks and videos into narrated MP4s.
 
 Media Studio Enterprise is the React + FastAPI successor to **Slide Studio Enterprise**
 (NiceGUI). It reuses the same Python media engine — PowerPoint/PDF export, Edge TTS &
@@ -37,7 +37,8 @@ the whole app suite looks and feels the same.
 > configurable password policy, projects that belong to whoever imported them with an audit
 > log of every change for admins, self-update from Git, a Windows desktop installer, and a
 > **Docs** page in the app that serves this README, the install guide, the changelog, the
-> version note and a full guide to the Timeline are
+> version note and a full guide to the Timeline (0.9.1, released 2026-09-23, which also
+> ships the ffprobe the re-voice needs on any machine but the developer's) are
 > in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the transition-sound library, the
 > rest of the edit timeline (E5's trim handles, markers, J/K/L and snapping of cuts), and
 > the rest of the administration work (notifications, a branding lock, an admin page of its
