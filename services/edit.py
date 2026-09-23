@@ -38,8 +38,8 @@ cannot disagree about whether an edit changes anything or where a sentence
 lands once it has. The spec is ``docs/porting/edit-timeline.md``.
 
 **The source's length is the WAV header's** (``services.waveform.duration_for``)
-- never ffprobe, which the packaged app does not have, and never
-``record["duration"]``, which was measured on the video and can differ by a
+- never a probe (the header is exact, spawns nothing, and is the file being
+drawn), and never ``record["duration"]``, which was measured on the video and can differ by a
 frame. With no ``audio.wav`` an edit cannot be measured, so it cannot be stored
 (``SourceLengthUnknown``, a 409 at the route) and it is not applied.
 

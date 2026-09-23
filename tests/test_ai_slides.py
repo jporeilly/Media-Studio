@@ -308,7 +308,7 @@ class _FakeRenderProcessor:
         self.outputs = {"srt": out.with_suffix(".srt").name}
         return 1
 
-    def _revoice_video(self, pm, source, out, progress=None):
+    def _revoice_video(self, pm, source, out, progress=None, **kwargs):
         out.write_bytes(b"MP4")
         return True
 

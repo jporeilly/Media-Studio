@@ -7,9 +7,9 @@ the 16 kHz mono file the transcribe step already extracts - to one magnitude per
 Four decisions are pinned here rather than left to a code reading:
 
 - **no ffmpeg and no ffprobe.** ``audio.wav`` is OUR file, written as PCM by the
-  importer, so the stdlib ``wave`` module reads it directly. ffprobe may not
-  exist at all in the packaged app (the imageio fallback ships ffmpeg only), and
-  the length the strip is drawn against must come from the WAV header - the
+  importer, so the stdlib ``wave`` module reads it directly - exact, with no
+  process spawned, where a probe would be slower and measure something else -
+  and the length the strip is drawn against must come from the WAV header: the
   scale of the file actually being drawn.
 - **the resolution is fixed, not a query parameter.** 8 buckets a second between
   a floor of 800 and a ceiling of 12000, so there is exactly ONE cache entry per
@@ -464,7 +464,7 @@ def test_an_empty_wav_is_a_422_rather_than_a_division_by_zero(client):
 
 def test_the_duration_comes_from_the_wav_header_and_never_from_ffprobe():
     """``duration_for`` is the header read the audition plan uses when it only
-    wants the length. ffprobe may not exist in the packaged app at all, and the
+    wants the length: exact for the file, with no process spawned, and the
     strip and everything drawn over it must share ONE scale - the scale of the
     file being drawn."""
     pid = _video(with_audio=False)

@@ -14,10 +14,10 @@ Workflow:
 import os
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
+import re
 import subprocess
 import tempfile
 import threading
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Callable
@@ -381,30 +381,75 @@ def transcribe_audio(
     return segments, detected_lang, duration
 
 
-def get_video_chapters(video_path: Path) -> List[dict]:
-    """Extract chapter markers from a video file using ffprobe.
+# A chapter as ffmpeg prints it in the header of an input it can open:
+#     Chapter #0:1: start 2.000000, end 5.000000
+#       Metadata:
+#         title           : Second slide
+# (verified against the shipped app/bin/ffmpeg.exe on a file this app wrote).
+_CHAPTER_LINE = re.compile(r"^\s*Chapter #\d+:\d+: start ([\d.]+), end ([\d.]+)")
+_TITLE_LINE = re.compile(r"^\s*title\s*:\s*(.*)$")
 
-    Returns list of {"start": float, "end": float, "title": str}.
+
+def parse_chapters(header: str) -> List[dict]:
+    """The chapters in an ``ffmpeg -i`` header, as
+    ``{"start": float, "end": float, "title": str}``.
+
+    Each ``Chapter #x:y:`` line, with the ``title`` from the Metadata block
+    that follows it up to the next chapter or stream; a chapter with no title
+    is numbered, exactly as the ffprobe version numbered it. Split out from
+    :func:`get_video_chapters` so the parsing can be tested without a video.
     """
-    cmd = [
-        "ffprobe", "-i", str(video_path),
-        "-print_format", "json",
-        "-show_chapters",
-        "-loglevel", "quiet",
-    ]
+    chapters: List[dict] = []
+    pending = None
+    for line in (header or "").splitlines():
+        found = _CHAPTER_LINE.match(line)
+        if found:
+            if pending is not None:
+                chapters.append(pending)
+            pending = {
+                "start": float(found.group(1)),
+                "end": float(found.group(2)),
+                "title": f"Chapter {len(chapters) + 1}",
+            }
+            continue
+        if pending is None:
+            continue
+        if re.match(r"^\s*Stream #", line):
+            chapters.append(pending)
+            pending = None
+            continue
+        title = _TITLE_LINE.match(line)
+        if title:
+            pending["title"] = title.group(1).strip() or pending["title"]
+    if pending is not None:
+        chapters.append(pending)
+    return chapters
+
+
+def get_video_chapters(video_path: Path) -> List[dict]:
+    """Extract chapter markers from a video file.
+
+    Returns list of {"start": float, "end": float, "title": str}, and [] when
+    there are none or the file cannot be read.
+
+    Read out of ffmpeg's own header rather than with ``ffprobe -show_chapters``
+    (F1): the engine's own code never needs a prober, so this answers on any
+    machine. The old bare call raised FileNotFoundError on a host with no
+    ffprobe on PATH - every 0.9.0 install - and this function swallowed that
+    into an empty list, so an import there would have lost its chapters
+    silently. **No customer ever met it**: the only caller is
+    :func:`import_video`, which nothing in the app invokes (the product's video
+    path is ``services.transcription``, which extracts audio and transcribes
+    and never reads chapters). It was fixed as part of F1's sweep of the same
+    defect class, not because the product was losing chapters.
+    """
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            return []
-        data = json.loads(result.stdout)
-        chapters = []
-        for ch in data.get("chapters", []):
-            chapters.append({
-                "start": float(ch.get("start_time", 0)),
-                "end": float(ch.get("end_time", 0)),
-                "title": ch.get("tags", {}).get("title", f"Chapter {len(chapters) + 1}"),
-            })
-        return chapters
+        # The one ``ffmpeg -i`` runner, in core.video_creator beside the
+        # duration probe that shares it, so there is a single place that knows
+        # how this app asks a file about itself. Imported here so a plain
+        # import of this module still costs nothing.
+        from core.video_creator import _ffmpeg_header
+        return parse_chapters(_ffmpeg_header(video_path))
     except Exception as e:
         logger.warning(f"Could not extract chapters: {e}")
         return []
@@ -530,28 +575,40 @@ def extract_keyframes(
         max_frames: Maximum number of frames to extract.
 
     Returns:
-        List of paths to extracted PNG images.
+        List of paths to extracted PNG images, or [] when there is no ffmpeg.
+
+    Every run is the RESOLVED ``FFMPEG_PATH``, never the bare name (trap 3),
+    and the fallback's duration comes from ffmpeg's own header rather than from
+    a prober (F1): the engine's code never needs one, so it answers anywhere.
     """
+    from utils.config import FFMPEG_PATH
+    if not FFMPEG_PATH:
+        logger.warning("FFmpeg is not available - no keyframes extracted")
+        return []
+
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _frame_at(ts: float, out: Path) -> bool:
+        """One frame at ``ts`` into ``out``; True when it landed."""
+        subprocess.run([
+            FFMPEG_PATH, "-ss", str(ts), "-i", str(video_path),
+            "-vframes", "1", "-q:v", "2", "-y", str(out),
+        ], capture_output=True, timeout=30)
+        return out.exists()
 
     if timestamps:
         # Extract at specific timestamps
         frames = []
         for i, ts in enumerate(timestamps[:max_frames]):
             out = output_dir / f"frame_{i + 1:03d}.png"
-            cmd = [
-                "ffmpeg", "-ss", str(ts), "-i", str(video_path),
-                "-vframes", "1", "-q:v", "2", "-y", str(out),
-            ]
-            subprocess.run(cmd, capture_output=True, timeout=30)
-            if out.exists():
+            if _frame_at(ts, out):
                 frames.append(out)
         logger.info(f"Extracted {len(frames)} keyframes at specified timestamps")
         return frames
 
     # Auto-detect scene changes using ffmpeg scene filter
     cmd = [
-        "ffmpeg", "-i", str(video_path),
+        FFMPEG_PATH, "-i", str(video_path),
         "-vf", "select='gt(scene,0.3)',showinfo",
         "-vsync", "vfr", "-frame_pts", "1",
         "-y", str(output_dir / "frame_%03d.png"),
@@ -566,13 +623,8 @@ def extract_keyframes(
         for f in frames:
             f.unlink()
 
-        # Get video duration
-        probe = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-             "-of", "csv=p=0", str(video_path)],
-            capture_output=True, text=True, timeout=30,
-        )
-        duration = float(probe.stdout.strip()) if probe.stdout.strip() else 60
+        # Get video duration — 60 s when nothing can say, as before.
+        duration = get_video_duration(video_path) or 60
         interval = duration / min(max_frames, max(int(duration / 10), 5))
 
         frames = []
@@ -580,12 +632,7 @@ def extract_keyframes(
         i = 0
         while ts < duration and i < max_frames:
             out = output_dir / f"frame_{i + 1:03d}.png"
-            cmd = [
-                "ffmpeg", "-ss", str(ts), "-i", str(video_path),
-                "-vframes", "1", "-q:v", "2", "-y", str(out),
-            ]
-            subprocess.run(cmd, capture_output=True, timeout=30)
-            if out.exists():
+            if _frame_at(ts, out):
                 frames.append(out)
             ts += interval
             i += 1
@@ -595,13 +642,14 @@ def extract_keyframes(
 
 
 def get_video_duration(video_path: Path) -> float:
-    """Get video duration in seconds using ffprobe."""
-    cmd = [
-        "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-        "-of", "csv=p=0", str(video_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    return float(result.stdout.strip()) if result.stdout.strip() else 0.0
+    """Get video duration in seconds, or 0.0 when it cannot be told.
+
+    ffmpeg, never a prober (F1) - and ONE implementation of "how long is this
+    file", the mux's own probe, rather than a second spelling of it here that
+    would be free to drift back to a bare ffprobe.
+    """
+    from core.video_creator import _probe_duration
+    return _probe_duration(Path(video_path)) or 0.0
 
 
 def import_video(

@@ -1,5 +1,23 @@
 # Porting spec — narration timeline (vertical 5)
 
+> **Amended 2026-09-23 (0.9.1).** Trap 5 below ("`ffprobe` may not exist") and every
+> aside that says the packaged app ships ffmpeg only were true when this survey was
+> written and are no longer: the installer now carries `app\bin\ffprobe.exe` beside
+> `ffmpeg.exe`, pinned to gyan.dev's 7.1 essentials build, because **pydub** probes on
+> its own behalf on every non-`.wav` decode. The trap's *rule* is unchanged and still
+> binding — the timeline's length comes from the WAV header, never from a probe — because
+> it was never really about availability: a decoded length and a container's metadata
+> disagree, and the plan and the render must not. See `CHANGELOG.md`
+> (#f1-revoice-probe, #f2-ship-ffprobe).
+>
+> The render's half of trap 5, and of §7's note on "the last sentence's end bound", moved
+> in the same release (#f1-revoice-probe): the re-voice measures the picture from ffmpeg's
+> own header (`core.video_creator.pad_seconds`, raised by the length the job passes), so
+> `video_end` is known on every machine, prober or none, and the render falls back to the
+> section's end only when neither ffmpeg nor the job can give a length. The one divergence
+> §7 accepts — the plan bounds the last sentence by the WAV's length, the render by the
+> picture's — is unchanged, and is still documented in `services/narration.py`.
+
 Read-only survey, 2026-09-15. **This is not a port.** SlideStudio's "Timeline Editor"
 (`C:\Projects\slidestudio_enterprise\gui\components\timeline_tab.py`, 147 lines) is a
 per-*slide* duration-bar list with a pause spinner (`:75-141`) — no waveform, no drag, no

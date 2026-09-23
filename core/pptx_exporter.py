@@ -402,12 +402,16 @@ class PPTXExporter:
         except Exception:
             pass
 
-        # Try ffmpeg (widely available)
+        # Try ffmpeg — the RESOLVED path, never the bare name (trap 3): a host
+        # that relies on the bundled binary has no "ffmpeg" on PATH.
+        from utils.config import FFMPEG_PATH
+        if not FFMPEG_PATH:
+            return png_paths
         try:
             for page_num in range(expected_count):
                 out_path = output_dir / f"page_{page_num + 1:03d}.png"
                 cmd = [
-                    "ffmpeg", "-y",
+                    FFMPEG_PATH, "-y",
                     "-i", str(pdf_path),
                     "-vf", f"select=eq(n\\,{page_num})",
                     "-vframes", "1",

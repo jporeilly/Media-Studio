@@ -431,8 +431,9 @@ def _revoice(client, pid):
 class _KeepsNarration(_FakeVideoProcessor):
     """Leaves the standalone narration track behind, as the real engine does."""
 
-    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
-        ok = super()._revoice_video(pm, source_video, output_path, progress=progress, file_label=file_label)
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="", **kwargs):
+        ok = super()._revoice_video(pm, source_video, output_path, progress=progress,
+                                    file_label=file_label, **kwargs)
         processing.narration_path_for(output_path).write_bytes(b"NARRATION")
         return ok
 

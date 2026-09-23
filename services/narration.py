@@ -537,9 +537,11 @@ def transcript_section(transcript) -> dict:
     ``services.revoice`` writes it onto the engine's single slide
     (``original_start_time`` / ``original_end_time``), and :func:`plan` needs it
     to work out the window the LAST sentence has - which is bounded by this
-    section's end whenever the video's own duration is not known
-    (``_probe_duration`` returns nothing without ffprobe, which the packaged app
-    may not have). Two copies of "the section is the whole transcript" would be
+    section's end whenever the picture's length is not known (the render's
+    ``core.video_creator.pad_seconds`` answers nothing: ffmpeg could not read
+    the file and the job had no length to offer - it asks ffmpeg itself, never
+    a prober, so a missing ffprobe is no longer one of the ways in). Two copies
+    of "the section is the whole transcript" would be
     free to drift, and the timeline would then advertise a rate for the final
     sentence that the render does not use.
     """
@@ -615,24 +617,24 @@ def project_narration(record: dict, transcript: list) -> Projection:
     # and never the record's if the audio can speak for itself.
     #
     # **Where this diverges from the render, exactly.** ``_revoice_video`` bounds
-    # its LAST spoken sentence by ``_probe_duration(video)`` and drops any
-    # sentence pinned at or past that. Two differences follow, and both are
-    # accepted rather than hidden:
-    #
-    # - when ffprobe IS available the two numbers are the same recording
-    #   measured two ways (the extracted audio is that video's own audio), so
-    #   they agree to within a frame;
-    # - when ffprobe is ABSENT - which the packaged app must assume, since the
-    #   imageio fallback ships ffmpeg only - the render gets ``video_end = 0.0``
-    #   and falls back to bounding the last sentence by the SECTION's end, while
-    #   this still uses the WAV duration. Those genuinely differ whenever the
-    #   recording runs on after the last word.
+    # its LAST spoken sentence by the PICTURE's length and drops any sentence
+    # pinned at or past that. Since F1 that length is measured with ffmpeg
+    # (``core.video_creator.pad_seconds``: the file itself, raised by whatever
+    # the job was told). The engine's own code never needs a prober, so this no
+    # longer depends on what the host has installed and no longer collapses to
+    # 0.0 on a machine without ffprobe, as it did in 0.9.0. One difference remains,
+    # and it is accepted rather than hidden: this plan is drawn against the
+    # extracted AUDIO's length and the render bounds against the PICTURE's.
+    # They are the same recording measured two ways and usually agree to within
+    # a frame, but they genuinely differ whenever the frames run on after the
+    # sound stops - a mic that stopped early, a silent closing card.
     #
     # Blast radius: the last spoken sentence only, and only when the bound would
     # make it short enough to be sped up - a longer window can only lower a
-    # speed to the floor it is already at. Using ffprobe here instead is refused
-    # by the porting spec's traps 5 and 6; using the record's duration would not
-    # be the scale of the file being drawn.
+    # speed to the floor it is already at. Measuring the video here instead is
+    # refused by the porting spec's traps 5 and 6 (the strip and everything
+    # drawn over it must share the scale of the file being drawn); using the
+    # record's duration would not be that scale either.
     source_duration = waveform.duration_for(pid)
 
     # The edit, applied by the very function the render applies it with, so

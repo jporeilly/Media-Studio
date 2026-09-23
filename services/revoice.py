@@ -246,9 +246,26 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         pm.state.source_video_path = str(render_source)
         pm.save()
 
+        # The best length this job can offer the engine WITHOUT measuring the
+        # file, and it must be understood for what it is: with a cut it is the
+        # edit's own output length (``edit.output_duration``, the sum of the
+        # kept ranges - exact, and known before ffmpeg ran), but with no cut it
+        # is the length of the extracted AUDIO, not of the picture
+        # (``edit.apply`` is handed ``waveform.duration_for(pid)``, the
+        # audio.wav header, and passes it straight through; ``record`` carries
+        # faster-whisper's measurement of that same WAV). The two differ
+        # whenever a recording's sound stops before its frames do, so the
+        # engine treats this as a belt and measures the picture itself - see
+        # ``core.video_creator.pad_seconds``. It is passed at all because it
+        # is exact for a cut and because it still answers when a file cannot
+        # be measured.
+        told_seconds = applied.output_duration or float(record.get("duration") or 0.0) or None
+
         _report(0.1, "Re-voicing…")
         processor = processing.VideoProcessor(voice_id=voice_id, speed=speed, provider=provider or "")
-        ok = processor._revoice_video(pm, render_source, out, progress=progress)
+        ok = processor._revoice_video(
+            pm, render_source, out, progress=progress, video_duration=told_seconds,
+        )
     finally:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)

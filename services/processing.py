@@ -1062,6 +1062,7 @@ class VideoProcessor:
         self, pm: ProjectManager, source_video: Path, output_path: Path,
         progress: Optional[ProgressCallback] = None,
         file_label: str = "",
+        video_duration: Optional[float] = None,
     ) -> bool:
         """Re-voice a video with sentence-level time alignment.
 
@@ -1078,10 +1079,23 @@ class VideoProcessor:
         ``_per_sentence_speed`` and the tempo squeeze. An older project carries
         none of them and behaves exactly as before.
 
+        ``video_duration`` is what the CALLER believes the picture's length to
+        be - the edit's own output length when the picture was cut, and
+        otherwise a number measured on the extracted audio rather than on the
+        frames (``services.revoice``). It is a belt, not the answer: the
+        picture itself is measured here too, and the LARGER of the two bounds
+        the last sentence's window and is handed to ``replace_video_audio`` as
+        the length to pad the narration to (``core.video_creator.pad_seconds``,
+        which carries the reasoning). Probing asks ffmpeg now, never ffprobe
+        (F1), so it costs ~0.04 s and works on a host that has no ffprobe.
+
         Sentences whose synthesis failed are counted in ``self.failed_sentences``
         for the job to report.
         """
-        from core.video_creator import replace_video_audio, trim_leading_silence_segment, _level_opening, _probe_duration
+        from core.video_creator import (
+            replace_video_audio, trim_leading_silence_segment, _level_opening,
+            pad_seconds,
+        )
         from core.tts_provider import get_onset_profile
         from pydub import AudioSegment
         import subprocess as _sp
@@ -1110,12 +1124,19 @@ class VideoProcessor:
             # video with apad and -shortest trims to the video length, so the
             # tail after the final segment is room the last sentence may use.
             # Squeezing it into the speaker's own slot would compress it for no
-            # reason. A probe failure (no ffprobe in the packaged app) simply
-            # leaves the section's own end as the bound.
+            # reason.
+            #
+            # The picture is MEASURED, and the caller's number is only allowed
+            # to raise that measurement (pad_seconds): what the job can offer
+            # is the length of the extracted audio, so taking it on its own
+            # bounded the last sentence - and the mux - by where the sound
+            # stopped rather than where the picture ends. A picture nothing can
+            # measure leaves the section's own end as the bound, as before.
             actual_source = source_video
             if pm.state.source_video_path and Path(pm.state.source_video_path).exists():
                 actual_source = Path(pm.state.source_video_path)
-            video_end = _probe_duration(actual_source) or 0.0
+            picture_seconds = pad_seconds(actual_source, video_duration)
+            video_end = picture_seconds or 0.0
 
             tts_baseline = DEFAULT_BASELINE_RATE
             if not is_free:
@@ -1141,12 +1162,20 @@ class VideoProcessor:
             # tempo-adjusted so the next sentence still lands on time. In free
             # mode nothing is pinned and nothing is sped up.
             def _tempo(clip, factor: float, name: str):
-                """Speed a clip up by ``factor`` with ffmpeg atempo (pitch kept)."""
+                """Speed a clip up by ``factor`` with ffmpeg atempo (pitch kept).
+
+                The RESOLVED ffmpeg, never the bare name (trap 3); with no
+                ffmpeg at all the clip is returned at its own speed, which is
+                what a failed run already did.
+                """
+                from utils.config import FFMPEG_PATH
+                if not FFMPEG_PATH:
+                    return clip
                 src = tmp_dir / f"{name}_src.mp3"
                 dst = tmp_dir / f"{name}_fast.mp3"
                 clip.export(str(src), format="mp3")
                 _sp.run([
-                    "ffmpeg", "-i", str(src), "-filter:a", f"atempo={factor:.4f}", "-y", str(dst),
+                    FFMPEG_PATH, "-i", str(src), "-filter:a", f"atempo={factor:.4f}", "-y", str(dst),
                 ], capture_output=True, timeout=60)
                 return AudioSegment.from_file(str(dst)) if dst.exists() else clip
 
@@ -1320,6 +1349,13 @@ class VideoProcessor:
                 output_path=output_path,
                 background_music=bg_music,
                 music_volume=music_vol,
+                # The length settled above, so the window maths and the pad
+                # agree. The mux measures the same file again rather than
+                # trusting it - it is the last place that can - and the two
+                # answers are the same number; None when nothing could tell,
+                # and the mux then emits no pad rather than the unbounded one
+                # that used to hang the job (F1).
+                video_duration=picture_seconds,
             )
             if ok:
                 # Only once the mux succeeded, so a failed re-voice leaves no

@@ -4,12 +4,14 @@ Reads the project's own ``audio.wav`` - the 16 kHz mono file the transcription
 step already extracts - with the stdlib :mod:`wave` module and numpy, and
 reduces it to one magnitude per time bucket for the editor to draw.
 
-**No ffmpeg and no ffprobe.** Both are deliberate. The packaged app may have no
-ffprobe at all (the imageio fallback ships ffmpeg only), and the duration the
-strip is drawn against must be the duration of the file actually being drawn -
-so it comes from the WAV header (``nframes / framerate``) rather than from
-``record["duration"]``, which was measured on the video and can differ by a
-frame or two.
+**No ffmpeg and no ffprobe.** Both are deliberate. The duration the strip is
+drawn against must be the duration of the file actually being drawn, and that
+file is our own PCM WAV, so it comes from the WAV header (``nframes /
+framerate``): exact for this file, read in microseconds with no process
+spawned, where any probe would be slower and would measure something else -
+and it does not care what the host has installed. Not ``record["duration"]``
+either, which is faster-whisper's own measurement and can differ by a frame
+or two.
 
 Resolution is fixed at 125 ms per bucket rather than taken from the caller, so
 there is exactly one cache entry per project no matter how wide the strip is
@@ -269,9 +271,10 @@ def compute_peaks(path: Path) -> dict:
 def duration_for(pid: str) -> float | None:
     """How long the project's extracted audio is, from the WAV header alone.
 
-    ``nframes / framerate`` - no decode, no ffprobe (which may not exist at all
-    in the packaged app), and not ``record["duration"]``, which was measured on
-    the video: the timeline strip and everything drawn over it must share one
+    ``nframes / framerate`` - no decode and no probe: the header of the file
+    being drawn is exact for it and costs no process, where a probe would be
+    slower and would measure something else. Not ``record["duration"]``
+    either: the timeline strip and everything drawn over it must share one
     scale, and it has to be the scale of the file being drawn.
 
     ``None`` rather than an exception when there is no audio or it cannot be

@@ -105,7 +105,7 @@ def _revoice(tmp_path, monkeypatch, segments, *, clip_ms=1500, free=False, speed
     """Run _revoice_video with the engine stubbed; return the aligned chunks.
 
     ``video_seconds`` is what the duration probe reports for the source video;
-    None stands for a probe that failed (no ffprobe), which is the fallback the
+    None stands for a picture nothing could measure, which is the fallback the
     last sentence's bound has to cope with. ``mux_ok`` is what the final audio
     swap reports, for the paths that only matter when it fails.
     """
@@ -313,7 +313,7 @@ def test_the_last_sentence_may_use_the_video_after_it(tmp_path, monkeypatch):
 
 
 def test_without_a_duration_probe_the_last_sentence_keeps_its_own_slot(tmp_path, monkeypatch):
-    """No ffprobe (the packaged app): fall back to the section's end so the
+    """A picture nothing can measure: fall back to the section's end so the
     closing sentence cannot overrun the video and be cut off mid-word."""
     monkeypatch.setattr(processing.VideoProcessor, "_per_sentence_speed",
                         lambda self, *a, **k: 1.0)
@@ -610,6 +610,76 @@ def test_a_generator_that_writes_nothing_counts_as_a_failure_too(tmp_path, monke
 def test_a_clean_run_counts_no_failures(tmp_path, monkeypatch):
     captured, _ = _revoice(tmp_path, monkeypatch, GAPPY)
     assert captured["processor"].failed_sentences == 0
+
+
+def _revoice_told(tmp_path, monkeypatch, video_duration, probe=None):
+    """``_revoice_video`` told ``video_duration``, with the picture measuring
+    ``probe``; returns the mux's kwargs.
+
+    The real ``pad_seconds`` rule runs: only ``_probe_duration`` is stubbed, so
+    what these tests pin is how the measurement and the caller's number combine
+    - not a re-implementation of it.
+    """
+    pm = _manager(tmp_path, GAPPY)
+    proc = processing.VideoProcessor(voice_id="en-US-AriaNeural", speed=1.0)
+    monkeypatch.setattr(proc, "_create_tts_generator", lambda: _FakeTTS())
+    monkeypatch.setattr(proc, "_calibrate_tts_baseline", lambda *a, **k: 15.0)
+
+    muxed = {}
+
+    def _mux(**kwargs):
+        muxed.update(kwargs)
+        return True
+
+    def _probe(path):
+        return probe
+
+    import core.video_creator as vc
+    monkeypatch.setattr(vc, "replace_video_audio", _mux)
+    monkeypatch.setattr(vc, "trim_leading_silence_segment", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_level_opening", lambda clip, profile=None: clip)
+    monkeypatch.setattr(vc, "_probe_duration", _probe)
+
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    assert proc._revoice_video(
+        pm, source, tmp_path / "out.mp4", video_duration=video_duration,
+    ) is True
+    return muxed
+
+
+def test_the_measured_picture_wins_over_the_length_the_job_was_given(tmp_path, monkeypatch):
+    """G1, at the engine's own seam: the job can only offer a length measured
+    on the extracted AUDIO, so a picture that outlives its sound must not be
+    cut down to it. The measurement wins; the caller's number may only raise
+    it."""
+    muxed = _revoice_told(tmp_path, monkeypatch, 6.014, probe=20.0)
+    assert muxed["video_duration"] == 20.0, "20 s of picture, not 6 s of sound"
+
+    muxed = _revoice_told(tmp_path, monkeypatch, 20.0, probe=6.0)
+    assert muxed["video_duration"] == 20.0, "a longer belt still raises a short measurement"
+
+
+@pytest.mark.parametrize("told", [None, 0, -3.0, "later"])
+def test_without_a_usable_length_the_picture_alone_decides(tmp_path, monkeypatch, told):
+    """A missing or nonsense length is not passed on as one: what the picture
+    measures bounds the last sentence and pads the narration."""
+    muxed = _revoice_told(tmp_path, monkeypatch, told, probe=14.0)
+    assert muxed["video_duration"] == 14.0
+
+
+def test_an_unmeasurable_picture_falls_back_to_what_the_job_knows(tmp_path, monkeypatch):
+    """The belt: a file ffmpeg cannot measure still gets the job's length, so
+    the pad is not lost for a format the probe cannot read."""
+    muxed = _revoice_told(tmp_path, monkeypatch, 12.5, probe=None)
+    assert muxed["video_duration"] == 12.5
+
+
+def test_when_nothing_can_tell_the_mux_is_told_nothing(tmp_path, monkeypatch):
+    """Neither measured nor known reaches the mux as None - which emits no pad
+    at all - rather than as a zero that could be mistaken for a length."""
+    muxed = _revoice_told(tmp_path, monkeypatch, None, probe=None)
+    assert muxed["video_duration"] is None
 
 
 def test_the_speaking_rate_is_never_calibrated_on_a_muted_sentence(tmp_path, monkeypatch):

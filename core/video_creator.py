@@ -6,6 +6,8 @@ Supports configurable resolution, transition pauses between slides,
 and optional transition sound effects.
 """
 
+import math
+import re
 import time
 import subprocess
 from pathlib import Path
@@ -257,17 +259,163 @@ def _level_opening(audio, profile=None):
     return result
 
 
-def _probe_duration(path: Path) -> Optional[float]:
-    """Return a media file's duration in seconds via ffprobe, or None on failure."""
+# What ``_build_replace_audio_cmd`` raises when there is no ffmpeg to name.
+FFMPEG_MISSING = "FFmpeg is not available - install ffmpeg (or the imageio-ffmpeg package)."
+
+# ffmpeg's OWN duration line, and nothing else that looks like one.
+#
+# It is printed at exactly two spaces of indent, directly under the input, and
+# the field that follows it is separated by a comma:
+#     "  Duration: 00:00:10.00, start: 0.000000, bitrate: 87 kb/s"  (mp4)
+#     "  Duration: 00:00:06.01, bitrate: 256 kb/s"                   (wav - no start:)
+# The input's METADATA block is printed FIRST and its values are indented four
+# spaces or more, so an unanchored search found them before ffmpeg's own line:
+#     "    comment         : Duration: 596523:14:07.99"
+# - ffmpeg's classic bogus-duration rendering, easily present in a remuxed or
+# tool-tagged file. That read 2147483647.99 out of a 10 s video and put
+# ``apad=whole_dur=2147483647.990`` into the mux, which is the shipped stall
+# reached through the fixed code. Anchored on the indent and the separator, and
+# both binaries print both shapes identically (verified 7.1 and 8.0.1, on mp4,
+# wav and mp3).
+_DURATION_LINE = re.compile(
+    r"^ {2}Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)(?=,|\s*$)", re.MULTILINE
+)
+
+# No real media file is a week long. A number past this is a mis-parse, a bogus
+# tag or a caller's bug, never a duration - so it is "unknown", which is the
+# branch that emits no pad at all. The belt to :data:`_DURATION_LINE`'s braces:
+# it closes the stall class for ANY future path that hands the mux a bad number,
+# not just for the one that was found. (A two-hour recording, the longest thing
+# this app has been pointed at, is 1/84th of it.)
+MAX_MEDIA_SECONDS = 7 * 24 * 3600
+
+
+def usable_duration(value) -> Optional[float]:
+    """``value`` as a number of seconds that may bound a filter, else None.
+
+    THE rule, in one place, for every "do we know how long this is?" question
+    the mux asks: a real, finite, positive float no longer than
+    :data:`MAX_MEDIA_SECONDS`. None, a string, a NaN, an infinity, a zero or
+    negative length and an absurd one are all "we do not know" - and the point
+    of funnelling them here is that the unknown answer is the SAFE one (no pad
+    at all), so no caller can turn a junk value into an argv that runs for
+    ever. See :func:`_pad_filter`.
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds <= 0 or seconds > MAX_MEDIA_SECONDS:
+        return None
+    return seconds
+
+
+def _ffmpeg_header(path) -> str:
+    """What ffmpeg says about ``path``: the header it writes to stderr, or "".
+
+    ``ffmpeg -i <file>`` with no output file prints everything it knows about
+    the input - duration, streams, chapters - and exits at once with "At least
+    one output file must be specified" (measured against the SHIPPED
+    ``app/bin/ffmpeg.exe``: 0.04 s, exit 1, and 0.04 s for a file that is not
+    there or is not media at all). That is how the engine reads a file's
+    metadata: **its own code never needs a prober** (F1), which is what makes
+    it safe on any machine - one with no ffprobe, or with a different one on
+    PATH. (The installer ships an ffprobe from 0.9.1, but for pydub's decode;
+    0.9.0 shipped none, and every ffprobe call the engine made answered
+    nothing on a customer machine.)
+
+    The RESOLVED ``FFMPEG_PATH``, never a bare name (trap 3). "" when there is
+    no ffmpeg or it could not be run, so every caller's "cannot tell" branch is
+    the one that runs. Decoded with ``errors="replace"``: a file name that is
+    not cp1252 must not raise inside a probe.
+    """
+    from utils.config import FFMPEG_PATH
+
+    if not FFMPEG_PATH:
+        return ""
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-            capture_output=True, text=True, timeout=30,
+            [FFMPEG_PATH, "-hide_banner", "-i", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30,
         )
-        return float(out.stdout.strip())
     except Exception:
+        return ""
+    return out.stderr or ""
+
+
+def _probe_duration(path: Path) -> Optional[float]:
+    """A media file's duration in seconds, or None when it cannot be told.
+
+    Asks ffmpeg, never a prober (:func:`_ffmpeg_header`), so it answers on any
+    machine. The old bare ``["ffprobe", ...]`` here answered None wherever
+    none was on PATH - every 0.9.0 install - and the mux was then handed an
+    unbounded pad it could not finish (F1).
+
+    None when there is no ffmpeg, when ffmpeg cannot open the file, when it
+    reports ``Duration: N/A``, or when the answer is not a usable length
+    (:func:`usable_duration`) - the unchanged contract, so every caller
+    behaves exactly as before.
+    """
+    found = _DURATION_LINE.search(_ffmpeg_header(path))
+    if not found:
         return None
+    hours, minutes, seconds = found.groups()
+    return usable_duration(int(hours) * 3600 + int(minutes) * 60 + float(seconds))
+
+
+def pad_seconds(source_video, told=None) -> Optional[float]:
+    """How long the PICTURE at ``source_video`` is, for padding the narration
+    to it: the LARGER of what ffmpeg says about the file and what the caller
+    was ``told``, or None when neither can say.
+
+    **The caller's number is a belt; the probe is the braces.** F1's first
+    round trusted the caller alone, on the brief's premise that "the app
+    already knows the picture's length". It does not - it knows the AUDIO's.
+    For an uncut project the length threaded in is ``waveform.duration_for``,
+    the extracted ``audio.wav``'s header (``services/edit.py`` passes it
+    straight through as ``output_duration`` when nothing is cut), and the
+    fallback ``record["duration"]`` is faster-whisper's measurement of that
+    same WAV. A 10.00 s picture whose audio stream stops at 6.01 s - a mic that
+    stopped before the capture did, a clip ending on a silent card - then muxed
+    to 6.01 s: **four seconds of picture deleted, with a success and no
+    warning** (measured on both binaries). Probing asks ffmpeg itself and
+    costs ~0.04 s, so it is simply done.
+
+    **The larger, not the probe alone**, because the two failures are not
+    symmetric: the pad's contract is "at least as long as the picture", so a
+    pad that overshoots costs one ``-shortest`` trim and nothing else, while a
+    pad that falls short silently deletes picture. The probe reads the
+    container's own duration, which is the longest stream, so for a cut,
+    picture-only intermediate it IS the picture; the told value keeps the
+    edit's exact arithmetic (the sum of the kept ranges, known before ffmpeg
+    ran) in play, and covers a file ffmpeg cannot measure at all. Both operands
+    go through :func:`usable_duration`, so neither can be a number that hangs
+    the mux.
+    """
+    known = [
+        seconds for seconds in (_probe_duration(Path(source_video)), usable_duration(told))
+        if seconds is not None
+    ]
+    return max(known) if known else None
+
+
+def _pad_filter(video_duration) -> Optional[str]:
+    """The audio filter that pads the narration to the picture, or None when
+    there must not be one.
+
+    ``apad=whole_dur=<n>`` pads with trailing silence to exactly ``n`` seconds
+    and stops. A BARE ``apad`` pads for ever, and on the ffmpeg the app ships
+    (7.1) that never finishes: measured against ``app/bin/ffmpeg.exe`` with a
+    5 s picture and a 3 s narration, ``apad=whole_dur=5.000`` exits 0 in 0.1 s
+    while a bare ``apad`` was still running when it was killed, leaving a
+    48-byte ``ftyp`` stub with no ``moov`` atom. ``-shortest`` does NOT bound
+    it, whatever the old docstring here claimed. So when the length is unknown
+    there is no pad at all: the mux is then bounded by the shorter stream
+    (the pre-``apad`` behaviour), which completes.
+    """
+    seconds = usable_duration(video_duration)
+    return None if seconds is None else f"apad=whole_dur={seconds:.3f}"
 
 
 def _build_replace_audio_cmd(source_video, audio, temp_output, video_duration):
@@ -278,23 +426,43 @@ def _build_replace_audio_cmd(source_video, audio, temp_output, video_duration):
     not covered). ``apad`` pads the audio with trailing silence to the video's
     duration so ``-shortest`` trims to the *video* length — the whole original
     video, including its closing transition, is kept with a silent tail rather
-    than being cut to the shorter audio. When the duration is unknown, ``apad``
-    pads to infinity and ``-shortest`` still bounds the output to the video.
+    than being cut to the shorter audio.
+
+    **No argv this builds can run for ever.** The pad is emitted only for a
+    length that is known (:func:`_pad_filter`); with none, the command carries
+    no ``-af`` at all and the mux ends with the shorter stream - the original
+    video's tail is lost, which is a visible but FINITE cost, where the bare
+    ``apad`` this used to emit hung the whole job for its ten-minute timeout.
+
+    ``FFMPEG_PATH`` from ``utils.config``, never the bare name (trap 3): the
+    older call sites that spawn "ffmpeg" work only because that module
+    prepends the binary's directory to PATH at import.
     """
-    pad = f"apad=whole_dur={video_duration:.3f}" if video_duration else "apad"
-    return [
-        "ffmpeg",
+    from utils.config import FFMPEG_PATH
+
+    if not FFMPEG_PATH:
+        # Unreachable through ``replace_video_audio``, which refuses first;
+        # here so that no argv this function returns can ever name a binary
+        # the host may not have.
+        raise RuntimeError(FFMPEG_MISSING)
+    pad = _pad_filter(video_duration)
+    cmd = [
+        FFMPEG_PATH,
         "-i", str(source_video),       # original video
         "-i", str(audio),               # new audio
         "-c:v", "copy",                 # keep video codec (no re-encode)
         "-map", "0:v:0",               # video from first input
         "-map", "1:a:0",               # audio from second input
-        "-af", pad,                     # pad narration with trailing silence
+    ]
+    if pad:
+        cmd += ["-af", pad]             # pad narration with trailing silence
+    cmd += [
         "-c:a", "aac",                  # re-encode padded audio for MP4
         "-shortest",                    # bound to the (now longer-or-equal) video
         "-y",                           # overwrite
         str(temp_output),
     ]
+    return cmd
 
 
 def replace_video_audio(
@@ -316,22 +484,23 @@ def replace_video_audio(
         output_path: Where to save the output video.
         background_music: Optional background music to mix in.
         music_volume: Volume level for background music (0.0-1.0).
-        video_duration: The picture's length in seconds when the caller
-            already knows it, in which case nothing is probed. None probes
-            the source with ffprobe exactly as before (and pads to infinity
-            when there is no ffprobe to ask). Present and tested, but UNWIRED
-            in E1: an edited output's length is the sum of its kept ranges,
-            known before ffmpeg runs, yet the only caller of this function
-            is ``services.processing.VideoProcessor._revoice_video``, which
-            the edit deliberately left untouched - so an edited run still
-            takes the None path. It is unobservable either way: the mux is
-            ``-shortest``, and a plain ``apad`` and ``apad=whole_dur=<the
-            edit's length>`` give identical output whenever the narration
-            outruns the picture (measured on the 336 s edited corpus render).
+        video_duration: What the caller believes the picture's length to be,
+            in seconds - a BELT, never the whole answer. The picture is always
+            probed as well and the LARGER of the two is padded to
+            (:func:`pad_seconds`): the numbers the re-voice job can offer are
+            measured on the extracted audio, not on the picture, so trusting
+            one alone truncated a video whose audio stream was shorter than its
+            frames. With neither available the mux runs with no pad at all.
 
     Returns:
         True if successful.
     """
+    from utils.config import FFMPEG_PATH
+
+    if not FFMPEG_PATH:
+        logger.error("Cannot replace the audio: ffmpeg is not available")
+        return False
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_output = output_path.with_suffix(".tmp.mp4")
 
@@ -358,8 +527,19 @@ def replace_video_audio(
 
         # Keep the video stream, swap the audio, and pad the audio to the full
         # video length so the original ending (its closing transition) is kept.
+        # The picture is measured HERE, every time, whatever the caller said:
+        # this is the last place that can tell the mux how long the picture
+        # really is, and it must be right for any caller (pad_seconds).
+        video_duration = pad_seconds(source_video, video_duration)
         if video_duration is None:
-            video_duration = _probe_duration(source_video)
+            # Said out loud, because the output loses the picture's tail: this
+            # is the branch that used to hang (F1), and it is now reached only
+            # when nobody - the caller, the record, the edit, or ffmpeg itself
+            # - can say how long the picture is.
+            logger.warning(
+                "No length for %s: muxing without a pad, so the output ends with the "
+                "shorter of picture and narration", source_video.name,
+            )
         cmd = _build_replace_audio_cmd(source_video, audio_to_use, temp_output, video_duration)
 
         logger.info("Replacing audio: %s -> %s (video %.1fs)",

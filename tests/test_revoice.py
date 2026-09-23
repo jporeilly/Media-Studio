@@ -30,6 +30,7 @@ class _FakeVideoProcessor:
     last = None
     captured = None
     source = None  # the picture the engine was told to mux onto
+    duration = "unset"  # the picture's length the engine was told (F1)
 
     def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", provider="", **kwargs):
         self.voice_id = voice_id
@@ -38,13 +39,15 @@ class _FakeVideoProcessor:
         self.provider = provider
         _FakeVideoProcessor.last = self
 
-    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="",
+                       video_duration=None):
         if progress:
             progress(0.9, "revoicing")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"FAKEREVOICE")
         _FakeVideoProcessor.captured = pm
         _FakeVideoProcessor.source = source_video
+        _FakeVideoProcessor.duration = video_duration
         return True
 
 
@@ -275,8 +278,9 @@ class _KeepsNarration(_FakeVideoProcessor):
     """A re-voice that also leaves the narration track behind, as the real
     engine does once the audio swap has succeeded."""
 
-    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
-        ok = super()._revoice_video(pm, source_video, output_path, progress=progress, file_label=file_label)
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="", **kwargs):
+        ok = super()._revoice_video(pm, source_video, output_path, progress=progress,
+                                    file_label=file_label, **kwargs)
         processing.narration_path_for(output_path).write_bytes(b"NARRATION")
         return ok
 
@@ -331,9 +335,10 @@ def test_a_stale_narration_claim_is_cleared_by_the_next_re_voice(client, monkeyp
 class _DropsSentences(_FakeVideoProcessor):
     """A re-voice where two sentences could not be synthesised."""
 
-    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="", **kwargs):
         self.failed_sentences = 2
-        return super()._revoice_video(pm, source_video, output_path, progress=progress, file_label=file_label)
+        return super()._revoice_video(pm, source_video, output_path, progress=progress,
+                                      file_label=file_label, **kwargs)
 
 
 def test_the_per_sentence_adjustments_travel_into_the_engine(client, monkeypatch):
@@ -379,11 +384,12 @@ class _AdjustsMidway(_FakeVideoProcessor):
     """Stands in for a user adjusting a sentence while the job runs: the record
     on disk changes after ``revoice_project`` read its copy."""
 
-    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label=""):
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="", **kwargs):
         record = store.get_project(_AdjustsMidway.pid)
         record["transcript"][0]["offset"] = -0.4
         store.save_project(record)
-        return super()._revoice_video(pm, source_video, output_path, progress=progress, file_label=file_label)
+        return super()._revoice_video(pm, source_video, output_path, progress=progress,
+                                      file_label=file_label, **kwargs)
 
 
 def test_a_re_voice_saves_onto_the_record_as_it_is_now(client, monkeypatch):
@@ -515,6 +521,10 @@ def test_a_project_with_no_edit_renders_exactly_as_before(client, monkeypatch):
     assert cuts == []
     source = store.PROJECTS_DIR / pid / "clip.mp4"
     assert _FakeVideoProcessor.source == source
+    assert _FakeVideoProcessor.duration == 4.0, (
+        "the extracted AUDIO's length - all this job can offer without measuring the "
+        "picture; the engine treats it as a belt and measures the picture itself (F1)"
+    )
     assert _FakeVideoProcessor.captured.state.source_video_path == str(source)
     slide = _FakeVideoProcessor.captured.state.slides[0]
     assert slide.original_segments == [
@@ -522,6 +532,30 @@ def test_a_project_with_no_edit_renders_exactly_as_before(client, monkeypatch):
         {"start": 2.0, "end": 4.0, "text": "This is a test."},
     ]
     assert "edit_rendered_at" not in store.get_project(pid)
+
+
+def test_the_length_the_job_offers_is_the_audios_and_is_named_as_such(client, monkeypatch):
+    """What the number threaded into the engine REALLY is, pinned so nobody
+    calls it the picture's again.
+
+    With no cut it is ``waveform.duration_for`` - the extracted ``audio.wav``'s
+    header - and not ``record["duration"]``; the two are given different values
+    here so the assertion can tell them apart, which the fixture next door
+    (WAV and record agreeing) could not. Both are measured on the audio, so
+    neither knows how long the picture is: that is why
+    ``core.video_creator.pad_seconds`` measures the file itself and only lets
+    this number raise the answer.
+    """
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _cut_recorder(monkeypatch)
+    pid = _video_with_transcript()
+    _wav(pid, 4.0)
+    record = store.get_project(pid)
+    record["duration"] = 9.0  # what faster-whisper measured on that same WAV
+    store.save_project(record)
+
+    assert _revoice(client, pid)["status"] == "done"
+    assert _FakeVideoProcessor.duration == 4.0, "the WAV header, not the record"
 
 
 def test_an_edit_that_keeps_everything_takes_the_untouched_path(client, monkeypatch):
@@ -569,6 +603,10 @@ def test_an_edit_cuts_the_picture_first_and_renders_onto_the_cut(client, monkeyp
 
     # The engine muxes onto the cut picture, not the source.
     assert _FakeVideoProcessor.source == cut["dst"]
+    assert _FakeVideoProcessor.duration == 3.5, (
+        "the CUT picture's length - the sum of the kept ranges, known before ffmpeg ran - "
+        "so the mux pads to it instead of probing (F1)"
+    )
     pm = _FakeVideoProcessor.captured
     assert pm.state.source_video_path == str(cut["dst"])
     slide = pm.state.slides[0]

@@ -10,10 +10,12 @@ No slides are rendered and no encode runs: the VideoCreator, ffmpeg, pydub and
 the Whisper pass are captured or stubbed.
 """
 
+import shutil
 import subprocess
 import sys
 import tempfile
 import types
+import wave
 from pathlib import Path
 from typing import get_args
 
@@ -989,47 +991,519 @@ def test_a_failed_cut_answers_false_and_leaves_nothing_behind(tmp_path, monkeypa
     assert started == []
 
 
-def test_the_mux_takes_the_edits_length_and_never_probes_for_it(tmp_path, monkeypatch):
-    """An edited output's length is the sum of its kept ranges, known before
-    ffmpeg runs, so the mux is told it: ``apad`` pads the narration to exactly
-    that and ffprobe - which the packaged app does not have - is never asked."""
-    calls = _fake_ffmpeg(monkeypatch)
+def _fake_ffmpeg_measuring(monkeypatch, picture_seconds):
+    """Capture ffmpeg commands, answering the PROBE the way the real binary
+    does: ``[ffmpeg, "-hide_banner", "-i", <file>]`` with no output file exits 1
+    and prints the input's header on stderr, as text (the probe runs with
+    ``text=True``). ``picture_seconds`` None is a file ffmpeg cannot measure.
+    Any other command is the mux, whose output file (the last argument) is
+    created."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["-hide_banner", "-i"] and len(cmd) == 4:
+            if picture_seconds is None:
+                header = f"{cmd[3]}: Invalid data found when processing input\n"
+            else:
+                hours = int(picture_seconds // 3600)
+                minutes = int(picture_seconds % 3600 // 60)
+                seconds = picture_seconds % 60
+                header = (
+                    f"Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '{cmd[3]}':\n"
+                    f"  Duration: {hours:02d}:{minutes:02d}:{seconds:05.2f}, "
+                    "start: 0.000000, bitrate: 87 kb/s\n"
+                    "At least one output file must be specified\n"
+                )
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=header)
+        Path(cmd[-1]).write_bytes(b"x")
+        return types.SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", "ffmpeg-test")
+    return calls
+
+
+@pytest.mark.parametrize("measured, told, pad", [
+    (400.0, 336.008, "apad=whole_dur=400.000"),   # the picture outlives the belt: the probe wins
+    (300.0, 336.008, "apad=whole_dur=336.008"),   # the belt outlives the probe: the belt raises it
+    (None, 336.008, "apad=whole_dur=336.008"),    # unmeasurable: the belt holds
+    (336.0, None, "apad=whole_dur=336.000"),      # told nothing: the measurement alone
+    (None, None, None),                           # neither: no pad at all, never an unbounded one
+])
+def test_the_mux_measures_the_picture_and_pads_to_the_larger(tmp_path, monkeypatch, measured, told, pad):
+    """The mux's contract since the F1 fix round, through ``replace_video_audio``
+    itself with the probe answered in its real call shape.
+
+    The PROBE ALWAYS RUNS - through ffmpeg, never a prober - because the
+    length a caller can offer (the edit's sum of kept ranges for a cut, the
+    extracted audio's length otherwise) is not the picture's, and trusting it
+    alone deleted the tail of a picture that outlived its sound. The larger of
+    the two is padded to, since an over-long pad costs one ``-shortest`` trim
+    and a short one silently drops picture. The caller's value is the fallback
+    when the probe cannot answer; with neither there is no ``-af`` at all.
+    """
+    calls = _fake_ffmpeg_measuring(monkeypatch, measured)
     cut = tmp_path / "finished_cut.mp4"
     cut.write_bytes(b"mp4")
     master = tmp_path / "master.mp3"
     master.write_bytes(b"mp3")
     out = tmp_path / "finished_revoiced.mp4"
 
-    assert video_creator.replace_video_audio(cut, master, out, video_duration=336.008) is True
-    (cmd,) = calls
-    assert "ffprobe" not in cmd[0]
-    assert cmd[cmd.index("-af") + 1] == "apad=whole_dur=336.008"
+    assert video_creator.replace_video_audio(cut, master, out, video_duration=told) is True
+    assert len(calls) == 2, (
+        f"the picture must be measured before the mux whatever the caller said; ran {calls}"
+    )
+    probe, cmd = calls
+    assert probe == ["ffmpeg-test", "-hide_banner", "-i", str(cut)], "the picture is measured, with ffmpeg"
+    assert not any("ffprobe" in str(arg) for call in calls for arg in call)
+    if pad is None:
+        assert "-af" not in cmd
+    else:
+        assert cmd[cmd.index("-af") + 1] == pad
     assert cmd[cmd.index("-c:v") + 1] == "copy", "the picture was already re-encoded by the cut; the mux copies it"
     assert out.exists()
 
 
-def test_without_a_length_the_mux_probes_exactly_as_before(tmp_path, monkeypatch):
-    """The unedited path is unchanged: no argument, one ffprobe, its answer in
-    ``whole_dur`` - and a plain ``apad`` when the probe answers nothing."""
-    calls = []
+# -- F1: no argv the mux builds can run for ever, and nothing asks for ffprobe --
 
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if "ffprobe" in cmd[0]:
-            return types.SimpleNamespace(returncode=0, stdout="12.5\n", stderr="")
-        Path(cmd[-1]).write_bytes(b"x")
-        return types.SimpleNamespace(returncode=0, stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+def _mux_fixtures(tmp_path):
+    """A stub picture and narration for the command-shape checks."""
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"mp4")
     master = tmp_path / "master.mp3"
     master.write_bytes(b"mp3")
+    return video, master
+
+
+@pytest.mark.parametrize("video_duration, pad", [
+    (12.5, "apad=whole_dur=12.500"),
+    (336.008, "apad=whole_dur=336.008"),
+    ("7.25", "apad=whole_dur=7.250"),       # a length that arrived as text still bounds the pad
+    (None, None),
+    (0, None),
+    (0.0, None),
+    (-5.0, None),                            # a nonsense length is UNKNOWN, never a pad
+    ("", None),
+    ("later", None),
+    (float("inf"), None),
+    (float("nan"), None),
+])
+def test_the_mux_command_can_never_run_for_ever(tmp_path, monkeypatch, video_duration, pad):
+    """THE invariant of F1: every argv ``_build_replace_audio_cmd`` builds
+    terminates on the bundled ffmpeg.
+
+    A bare ``apad`` pads for ever and ffmpeg 7.1 - the build the app ships -
+    never finishes it (measured: killed at 60 s with a 48-byte stub), so the
+    pad is emitted only for a length that is really known, and a length that
+    is None, zero, negative, unparseable or not finite means NO pad at all
+    rather than an unbounded one. And argv[0] is the resolved binary, never a
+    bare name that a customer's PATH does not have.
+    """
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", "ffmpeg-test")
+    video, master = _mux_fixtures(tmp_path)
+    cmd = video_creator._build_replace_audio_cmd(video, master, tmp_path / "out.mp4", video_duration)
+
+    assert cmd[0] == "ffmpeg-test", "the resolved path, never a bare binary name (trap 3)"
+    assert Path(cmd[0]).name not in ("ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe")
+    assert not any("ffprobe" in str(arg) for arg in cmd)
+    if pad is None:
+        assert "-af" not in cmd, "no length known: no pad at all, so the mux ends with the shorter stream"
+    else:
+        assert cmd[cmd.index("-af") + 1] == pad
+    assert all("apad" not in str(arg) or "whole_dur=" in str(arg) for arg in cmd), (
+        "an unbounded apad is the command that hangs"
+    )
+    assert "-shortest" in cmd and cmd[-1].endswith("out.mp4")
+
+
+def test_the_mux_refuses_when_there_is_no_ffmpeg(tmp_path, monkeypatch, caplog):
+    """No ffmpeg means False **and the specific log line** - never an argv
+    naming a binary the host may not have.
+
+    The return value alone cannot hold this guard: delete the early refusal and
+    ``_build_replace_audio_cmd``'s RuntimeError is swallowed by the function's
+    broad ``except`` and returns False too, so the check would stay green while
+    the one line that tells an operator WHY nothing renders was lost. The log
+    line is what distinguishes the two paths, so the log line is asserted.
+    """
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", None)
+    video, master = _mux_fixtures(tmp_path)
+    with caplog.at_level("ERROR"):
+        assert video_creator.replace_video_audio(video, master, tmp_path / "out.mp4") is False
+    assert "Cannot replace the audio: ffmpeg is not available" in caplog.text, (
+        "refused up front, not caught as an unexplained exception"
+    )
+    assert "Error replacing video audio" not in caplog.text, "not the catch-all"
+    with pytest.raises(RuntimeError):
+        video_creator._build_replace_audio_cmd(video, master, tmp_path / "out.mp4", 5.0)
+
+
+def test_without_a_length_the_mux_asks_ffmpeg_never_ffprobe(tmp_path, monkeypatch):
+    """The picture is measured out of ffmpeg's own header, never with a
+    prober: the engine's code must answer on any machine, and the old bare
+    ``["ffprobe", ...]`` probe answered nothing on every 0.9.0 install, which
+    shipped none (F1)."""
+    header = (
+        "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'clip.mp4':\n"
+        "  Duration: 00:00:12.50, start: 0.000000, bitrate: 43 kb/s\n"
+        "At least one output file must be specified\n"
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "-c:v" not in cmd:  # the probe: ffmpeg -hide_banner -i <file>
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=header)
+        Path(cmd[-1]).write_bytes(b"x")
+        return types.SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", "ffmpeg-test")
+    video, master = _mux_fixtures(tmp_path)
 
     assert video_creator.replace_video_audio(video, master, tmp_path / "out.mp4") is True
-    assert calls[0][0] == "ffprobe" and calls[1][calls[1].index("-af") + 1] == "apad=whole_dur=12.500"
+    probe, mux = calls
+    assert probe == ["ffmpeg-test", "-hide_banner", "-i", str(video)]
+    assert not any("ffprobe" in str(arg) for call in calls for arg in call), "nothing asks for ffprobe"
+    assert mux[mux.index("-af") + 1] == "apad=whole_dur=12.500"
 
     calls.clear()
     monkeypatch.setattr(video_creator, "_probe_duration", lambda path: None)
     assert video_creator.replace_video_audio(video, master, tmp_path / "out2.mp4") is True
-    assert calls[0][calls[0].index("-af") + 1] == "apad", "no length known: pad to infinity, -shortest bounds it"
+    (mux,) = calls
+    assert "-af" not in mux, "nothing could say how long the picture is: no pad, so the mux still ends"
+
+
+# -- F1: the checks that need a REAL ffmpeg ------------------------------------
+
+BUNDLED_FFMPEG = Path(r"C:\Media-Studio-Enterprise\app\bin\ffmpeg.exe")
+
+
+def _real_ffmpegs() -> list[str]:
+    """Every real ffmpeg on this machine, for the checks a fake cannot make.
+
+    Both, when there are two: the one the app resolves here AND - on a machine
+    with the product installed - the 7.1-essentials build that actually SHIPS.
+    They do not behave the same, which is the whole of F1: an unbounded
+    ``apad`` completes on this box's ffmpeg 8.0.1 in 0.2 s and never finishes
+    on the bundled 7.1, so a regression test that only ever sees the developer's
+    binary is exactly the test that let the bug out.
+    """
+    found = []
+    resolved = config_module.FFMPEG_PATH
+    if resolved and Path(resolved).is_file():
+        found.append(str(resolved))
+    if BUNDLED_FFMPEG.is_file() and str(BUNDLED_FFMPEG) not in found:
+        found.append(str(BUNDLED_FFMPEG))
+    return found
+
+
+REAL_FFMPEGS = _real_ffmpegs()
+needs_ffmpeg = pytest.mark.skipif(not REAL_FFMPEGS, reason="no real ffmpeg on this machine")
+
+
+def _wav_seconds(path: Path) -> float:
+    """A WAV's length from its header - what ``waveform.duration_for`` reads,
+    and so what a re-voice job would thread into the mux."""
+    with wave.open(str(path), "rb") as wf:
+        return wf.getnframes() / wf.getframerate()
+
+
+def _picture_longer_than_its_audio(ffmpeg: str, tmp_path: Path,
+                                   video_seconds: float = 10.0, audio_seconds: float = 6.0):
+    """A picture of ``video_seconds`` whose AUDIO STREAM stops at
+    ``audio_seconds`` - a mic that stopped before the capture did, a clip
+    ending on a silent card - plus the ``audio.wav`` the app's own
+    ``extract_audio`` makes from it (the file every stored duration is
+    measured on) and a short narration to re-voice it with.
+    """
+    video = tmp_path / "clip.mp4"
+    subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"testsrc=size=320x240:rate=30:duration={video_seconds}",
+                    "-f", "lavfi", "-i", f"sine=frequency=440:duration={audio_seconds}",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-map", "0:v:0", "-map", "1:a:0", str(video)],
+                   capture_output=True, timeout=120, check=True)
+    extracted = video_importer.extract_audio(video, tmp_path / "audio.wav")
+    narration = tmp_path / "narration.mp3"
+    subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=330:duration=2",
+                    "-c:a", "libmp3lame", str(narration)],
+                   capture_output=True, timeout=120, check=True)
+    return video, extracted, narration
+
+
+def _real_media(ffmpeg: str, tmp_path: Path, seconds: float = 5.0, audio_seconds: float = 3.0):
+    """A real ``seconds`` picture and a real, SHORTER narration, made with the
+    very binary under test."""
+    video = tmp_path / "clip.mp4"
+    audio = tmp_path / "narration.mp3"
+    subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"testsrc=size=320x240:rate=30:duration={seconds}",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", str(seconds), str(video)],
+                   capture_output=True, timeout=120, check=True)
+    subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"sine=frequency=440:duration={audio_seconds}",
+                    "-c:a", "libmp3lame", str(audio)],
+                   capture_output=True, timeout=120, check=True)
+    return video, audio
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ffmpeg", REAL_FFMPEGS, ids=lambda p: Path(p).parent.parent.name or "ffmpeg")
+def test_a_mux_with_no_known_length_finishes_on_the_real_ffmpeg(tmp_path, monkeypatch, ffmpeg):
+    """The shipped regression, end to end on the binary itself.
+
+    A 5 s picture, a 3 s narration and NOTHING able to say how long the picture
+    is - the path every 0.9.0 install took, having no ffprobe to ask. The mux must
+    COMPLETE and leave a playable file with a ``moov`` atom, not the 48-byte
+    ``ftyp`` stub the unbounded ``apad`` left behind while it ran on for its
+    ten-minute timeout. Every ffmpeg run inside is bounded to 30 s so a
+    re-stall fails this test instead of hanging the suite.
+    """
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
+    video, audio = _real_media(ffmpeg, tmp_path)
+    # Nothing knows the length: the caller passes none and the probe is blind.
+    monkeypatch.setattr(video_creator, "_probe_duration", lambda path: None)
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kwargs: real_run(cmd, **{**kwargs, "timeout": 30}))
+
+    out = tmp_path / "revoiced.mp4"
+    assert video_creator.replace_video_audio(video, audio, out) is True, (
+        "the mux did not finish - an unbounded pad is back"
+    )
+    written = out.read_bytes()
+    assert b"moov" in written, f"a playable file, not a {len(written)}-byte stub"
+    assert len(written) > 1000
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ffmpeg", REAL_FFMPEGS, ids=lambda p: Path(p).parent.parent.name or "ffmpeg")
+def test_a_known_length_pads_the_narration_to_the_picture(tmp_path, monkeypatch, ffmpeg):
+    """The ordinary path, on the real binary: told the picture's length, the
+    mux pads the shorter narration out to it and keeps the picture's tail."""
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
+    video, audio = _real_media(ffmpeg, tmp_path)
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kwargs: real_run(cmd, **{**kwargs, "timeout": 30}))
+
+    out = tmp_path / "revoiced.mp4"
+    assert video_creator.replace_video_audio(video, audio, out, video_duration=5.0) is True
+    assert b"moov" in out.read_bytes()
+    assert video_creator._probe_duration(out) == pytest.approx(5.0, abs=0.2), (
+        "the whole picture is kept, with a silent tail"
+    )
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ffmpeg", REAL_FFMPEGS, ids=lambda p: Path(p).parent.parent.name or "ffmpeg")
+def test_the_probe_answers_with_no_ffprobe_anywhere(tmp_path, monkeypatch, ffmpeg):
+    """``_probe_duration`` on a real file with ffprobe made unfindable: the
+    engine's own probe must not need one, whatever the host has installed -
+    the old one spawned a bare ffprobe and answered nothing without it."""
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
+    video, audio = _real_media(ffmpeg, tmp_path, seconds=4.0, audio_seconds=2.0)
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    assert shutil.which("ffprobe") is None, "the point of the test: no ffprobe to be found"
+
+    assert video_creator._probe_duration(video) == pytest.approx(4.0, abs=0.2)
+    assert video_creator._probe_duration(audio) == pytest.approx(2.0, abs=0.2)
+    # And it says "I cannot tell" - quickly, never a stall - for the rest.
+    assert video_creator._probe_duration(tmp_path / "not_there.mp4") is None
+    not_media = tmp_path / "notes.txt"
+    not_media.write_text("hello", encoding="utf-8")
+    assert video_creator._probe_duration(not_media) is None
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ffmpeg", REAL_FFMPEGS, ids=lambda p: Path(p).parent.parent.name or "ffmpeg")
+def test_chapters_are_read_out_of_ffmpegs_own_header(tmp_path, monkeypatch, ffmpeg):
+    """``get_video_chapters`` used to shell out to ffprobe; it reads the header
+    ffmpeg prints for any input instead (F1). Nothing in the product calls it -
+    ``import_video`` has no caller - so this is the sweep's fix, not a
+    user-visible one.
+
+    Parametrised like its siblings **because the parser is a regex over that
+    header**, which is the one thing that can differ between builds: proving it
+    on the developer's 8.0.1 alone would say nothing about the 7.1 that ships.
+    """
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
+    video, _ = _real_media(ffmpeg, tmp_path)
+    meta = tmp_path / "chapters.txt"
+    meta.write_text(
+        ";FFMETADATA1\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=First slide\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=5000\ntitle=Second, with comma\n",
+        encoding="utf-8",
+    )
+    chaptered = tmp_path / "chaptered.mp4"
+    subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(video),
+                    "-i", str(meta), "-map_metadata", "1", "-c", "copy", str(chaptered)],
+                   capture_output=True, timeout=120, check=True)
+
+    # A host with no ffprobe: nothing can find one, here or in a subprocess.
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    assert video_importer.get_video_chapters(chaptered) == [
+        {"start": 0.0, "end": 2.0, "title": "First slide"},
+        {"start": 2.0, "end": 5.0, "title": "Second, with comma"},
+    ]
+    assert video_importer.get_video_chapters(video) == [], "no chapters, no guesses"
+    assert video_importer.get_video_duration(video) == pytest.approx(5.0, abs=0.2)
+
+
+# -- F1 fix round: the length must be the PICTURE's, and never an absurd one --
+
+def test_pad_seconds_takes_the_larger_and_never_a_junk_number(tmp_path, monkeypatch):
+    """The rule, without a binary: the picture is measured, the caller's number
+    may only RAISE that measurement, and anything unusable on either side is
+    ignored rather than padded to.
+
+    The asymmetry is the point. A pad longer than the picture costs one
+    ``-shortest`` trim; a pad shorter than it deletes picture silently.
+    """
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"mp4")
+
+    def probes(seconds):
+        monkeypatch.setattr(video_creator, "_probe_duration", lambda path: seconds)
+
+    probes(10.0)
+    assert video_creator.pad_seconds(source, None) == 10.0, "measured"
+    assert video_creator.pad_seconds(source, 6.014) == 10.0, (
+        "the audio's length must not shorten a longer picture - the G1 regression"
+    )
+    assert video_creator.pad_seconds(source, 20.0) == 20.0, "a longer belt still raises it"
+    assert video_creator.pad_seconds(source, float("inf")) == 10.0
+    assert video_creator.pad_seconds(source, video_creator.MAX_MEDIA_SECONDS + 1) == 10.0
+
+    probes(None)
+    assert video_creator.pad_seconds(source, 6.014) == 6.014, "unmeasurable: the belt holds"
+    assert video_creator.pad_seconds(source, None) is None
+    assert video_creator.pad_seconds(source, -3) is None
+
+
+@pytest.mark.parametrize("value, expected", [
+    (video_creator.MAX_MEDIA_SECONDS, video_creator.MAX_MEDIA_SECONDS),
+    (video_creator.MAX_MEDIA_SECONDS - 0.5, video_creator.MAX_MEDIA_SECONDS - 0.5),
+    (video_creator.MAX_MEDIA_SECONDS + 0.001, None),
+    (2147483647.99, None),          # what the metadata line used to yield
+    (7200.0, 7200.0),               # a two-hour recording, the longest real one here
+])
+def test_usable_duration_refuses_an_absurd_length(value, expected):
+    """A week is the bound: a real file is never longer, and a number past it
+    is a mis-parse or a caller's bug. Rejecting it HERE closes the stall class
+    for every future path that hands the mux a bad number, wherever it came
+    from - the belt to the probe's anchored regex."""
+    assert video_creator.usable_duration(value) == expected
+
+
+# ffmpeg's real header for a 10 s file tagged with a duration-shaped comment,
+# captured from the SHIPPED binary (both builds print it identically).
+TAGGED_HEADER = """\
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'clip.mp4':
+  Metadata:
+    major_brand     : isom
+    comment         : Duration: 596523:14:07.99
+  Duration: 00:00:10.00, start: 0.000000, bitrate: 87 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 320x240, 30 fps
+At least one output file must be specified
+"""
+
+
+def test_a_duration_shaped_metadata_value_is_not_the_duration(monkeypatch):
+    """ffmpeg prints the input's Metadata block BEFORE its own ``Duration:``
+    line, so an unanchored search read ``comment: Duration: 596523:14:07.99``
+    out of a 10 s file and put ``apad=whole_dur=2147483647.990`` into the mux -
+    the shipped stall, reached through the fixed code. ffmpeg's own line is at
+    two spaces of indent with a comma after it; metadata values are deeper."""
+    monkeypatch.setattr(video_creator, "_ffmpeg_header", lambda path: TAGGED_HEADER)
+    assert video_creator._probe_duration(Path("clip.mp4")) == 10.0
+    assert video_creator._pad_filter(10.0) == "apad=whole_dur=10.000"
+
+    # A WAV's line has no ", start:" at all - it must still be read.
+    monkeypatch.setattr(video_creator, "_ffmpeg_header",
+                        lambda path: "  Duration: 00:00:06.01, bitrate: 256 kb/s\n")
+    assert video_creator._probe_duration(Path("audio.wav")) == pytest.approx(6.01)
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ffmpeg", REAL_FFMPEGS, ids=lambda p: Path(p).parent.parent.name or "ffmpeg")
+def test_a_picture_longer_than_its_audio_keeps_all_of_its_picture(tmp_path, monkeypatch, ffmpeg):
+    """G1, end to end on the real binary: a 10 s picture whose audio stream
+    stops at 6 s, re-voiced with the number the job can actually offer.
+
+    Every length this app stores is measured on the extracted audio - the
+    ``audio.wav`` built here by the app's own ``extract_audio`` - so trusting
+    it alone padded to 6.01 s and ``-shortest`` threw four seconds of picture
+    away, with a success and no warning. The mux measures the picture itself
+    now, and the whole of it survives.
+    """
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
+    video, extracted, narration = _picture_longer_than_its_audio(ffmpeg, tmp_path)
+    told = _wav_seconds(extracted)
+    assert 5.9 < told < 6.2, f"the stored duration is the AUDIO's, not the picture's: {told}"
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kwargs: real_run(cmd, **{**kwargs, "timeout": 30}))
+
+    out = tmp_path / "revoiced.mp4"
+    assert video_creator.replace_video_audio(video, narration, out, video_duration=told) is True
+    assert b"moov" in out.read_bytes()
+    assert video_creator._probe_duration(out) == pytest.approx(10.0, abs=0.2), (
+        "the whole picture, padded with silence - not the audio's 6 s"
+    )
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ffmpeg", REAL_FFMPEGS, ids=lambda p: Path(p).parent.parent.name or "ffmpeg")
+def test_a_bogus_duration_tag_neither_fools_nor_stalls_the_mux(tmp_path, monkeypatch, ffmpeg):
+    """G2 on the real binaries: the same 10 s picture, tagged the way a
+    remuxed file often is. The probe must answer 10 s, and the mux must finish
+    - the 596,523-hour pad was still running at 60 s on the bundled 7.1."""
+    monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
+    video, _, narration = _picture_longer_than_its_audio(ffmpeg, tmp_path)
+    tagged = tmp_path / "tagged.mp4"
+    subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(video),
+                    "-c", "copy", "-metadata", "comment=Duration: 596523:14:07.99", str(tagged)],
+                   capture_output=True, timeout=120, check=True)
+
+    assert video_creator._probe_duration(tagged) == pytest.approx(10.0, abs=0.2)
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kwargs: real_run(cmd, **{**kwargs, "timeout": 30}))
+    out = tmp_path / "revoiced.mp4"
+    assert video_creator.replace_video_audio(tagged, narration, out) is True, (
+        "the mux did not finish - a metadata tag is being padded to"
+    )
+    assert b"moov" in out.read_bytes()
+
+
+def test_untitled_chapters_are_numbered_as_the_ffprobe_version_numbered_them():
+    """The parser alone, with no video: a chapter whose metadata carries no
+    title keeps the old ``Chapter N`` name, and a stream block ends a chapter's
+    metadata so a stream's own title is never stolen for it."""
+    header = (
+        "  Chapters:\n"
+        "    Chapter #0:0: start 0.000000, end 2.000000\n"
+        "      Metadata:\n"
+        "        title           : Opening\n"
+        "    Chapter #0:1: start 2.000000, end 4.500000\n"
+        "  Stream #0:0[0x1](und): Video: h264\n"
+        "      Metadata:\n"
+        "        title           : the video stream, not a chapter\n"
+    )
+    assert video_importer.parse_chapters(header) == [
+        {"start": 0.0, "end": 2.0, "title": "Opening"},
+        {"start": 2.0, "end": 4.5, "title": "Chapter 2"},
+    ]
+    assert video_importer.parse_chapters("") == []
