@@ -2567,3 +2567,79 @@ names were never needed: there is no `splitMusicAt` (a split is `cutMusic(clips,
 zero-length interval, tested for idempotence) and no `clipBounds` (`clipLength`, `clipEnd` and
 `clipAt` are what the callers wanted). `frontend/dist` is rebuilt and fingerprinted against the
 source, as `tests/test_frontend_dist.py` requires.
+
+---
+
+## 13. E5 — the rest of Camtasia's editing set (designed 2026-09-24; not yet built)
+
+§7 fixed the scope and the order on 2026-09-17: **trim handles on a piece's edges, markers, `J`/`K`/`L`, snapping of cuts to sentence pins.** E3 made the pieces (§11.4) and brought snapping to the drag; E4b brought a clip's own trim (§12.5). This section designs the four against the code as it stands after E4c (2026-09-24), in the same shape as §11 and §12: the model first, then the gesture, then the traps and the decisions. Nothing here changes the render's arithmetic (§3, §4, §12.4); the render learns one thing, chapters (13.2), and that is a remux it already knows how to do.
+
+### 13.1 Trim handles — a piece's edge is the cut, and moves
+
+**No new model.** A piece is a kept range (`pieces()` in `lib/edit.ts`); its two edges are that range's bounds in source seconds. Dragging an edge changes the bound and nothing else: the list stays ordered and non-overlapping, the output lays itself out again from zero with the holes closed, so everything after the edge moves by construction — Camtasia's ripple trim, for free, because the model was built for it (§2). The same `PUT /edit` with the new list, one per release (trap 21), the ops stack's `kind: "edit"` entry as a cut has.
+
+**Geometry.** An **in-edge** dragged right removes more from the piece's start; dragged left it **restores** source, as far as the previous range's end (or 0). An **out-edge** dragged left shortens; dragged right restores as far as the next range's start (or the source's end). A piece can never be trimmed below one frame (`FRAME_SECONDS`, 1/30 s, `lib/edit.ts`): a trim shortens, Cut removes, and the drag's label says so at the floor. The floor is the gesture's, not the server's — `validate_keep` asks only `start < end`, so a one-millisecond range is legal to store, as a one-millisecond cut always was. The picture's very first in-edge and last out-edge are the head and tail trims — the commonest edit there is, which today costs a range selection and a Cut.
+
+**At a join the two edges coincide** (the strip closes holes). The pointer zone splits as the clip's does (`clipAt`, §12.5): the 8 px — never more than a third of the piece — to the LEFT of the join is the left piece's out-edge, to the RIGHT the right piece's in-edge. The cursor is `ew-resize` in either zone, on an unlocked lane only. A locked lane has no edges (trap 19); Audio · original follows Video and has none of its own.
+
+**Two lists, one gesture.** A trim is a CUT or an UN-CUT of an output interval, applied to every unlocked track exactly as `nextEditForCut` applies a cut today:
+
+- *Shortening* is `removeRange` of the removed output interval on each unlocked track — the same call a Cut makes, under the same locks; a video-only trim with Narration locked moves no pin (trap 19).
+- *Restoring* is the inverse: on each unlocked track, the bound at that output moment moves back into that track's OWN gap, by the restored length or as much as its gap holds — none at all if the track has no join there. That is exactly the inverse of a cut made with both tracks unlocked, and it never invents narration the narration list never lost: a picture cut with Narration locked, restored later, brings the frames back and leaves the sentences where they are, which is what "locked" meant when the cut was made. (The alternative — ripple the narration by OFFSETS, one PATCH for every sentence after the point — is decision 1 below and not proposed: it is a second write in one gesture and it makes "locked" mean two things.)
+- *The music rides the picture* (§12.5, the owner's ruling): shortening is `musicAfterCut` over the removed interval; restoring is a new `musicAfterInsert(clips, locks, t, d)` — every clip at or after output moment `t` moves later by `d` when Video AND Music are unlocked, else the clips are left alone — the mirror of `cutMusic`'s ripple, in `lib/edit.ts` beside it, with the same one-rounding discipline (§12.5's As-built on the join).
+
+One helper, `nextEditForTrim(edit, locks, lane, pieceIndex, edge, newSourceBound, sourceDuration)`, returns the next lists for both tracks and the removed-or-restored output interval, so the component and the tests share it; the music follows from the interval. Any second implementation of "remove `[a, b]`" is a defect (trap 37).
+
+**Live.** The edge follows the pointer, snapped (13.4), with a label: "−1.2 s" while shortening, "+0.8 s restored" while restoring, "one frame — use Cut to remove it" at the floor. The filmstrip and the waveform re-lay on release, not per frame (the strip's drawing is from the plan; a trim in flight is drawn as the edge and a shaded stretch). Undo is E2's.
+
+### 13.2 Markers
+
+**Model.** `edit.markers`: a list of `{id, at, name}`, joining version 2 additively as `music` did (a missing key is no markers; a version-1 record reads as none). `id` as a clip's (`^[a-z0-9_-]{1,32}$`, unique, client-minted); **`at` in SOURCE seconds of the picture**, `0 ≤ at ≤ source_duration`, three decimals; `name` a trimmed string of 1–80 characters; at most 200; sorted by `at`. Read back with `timeline_at`: the projection through the picture's list, `null` when the marker sits in removed picture — a marker is a sentence with no words: a cut before it moves it with its frame, a cut over it hides it, a restore brings it back, and nothing rewrites it (the clips are the deliberate exception, §12.2, because a clip is not IN the source). Decision 2.
+
+**API.** `PUT /edit` takes `markers` under the one rule (absent = unchanged, `null`/`[]` = cleared, a list = set); `GET /edit`, the plan's `edit` block and `DELETE /edit` carry and clear it as they do the music. A marker needs no library and no source length beyond the bound; a body with markers and no tracks does not need the extracted audio (as music does not).
+
+**UI.** Flags on the ruler, the name beside each. **`M`** drops one at the playhead named "Marker N" with the name box open (the inspector's pattern: type, Enter); click selects, double-click renames, drag moves (snapped, 13.4), Delete removes the selected one; **`Ctrl+[` / `Ctrl+]`** jump to the previous / next marker (`[` `]` alone are E3's nudge and stay). Markers join every snap candidate set.
+
+**Render: markers become chapters.** A rendered or re-voiced MP4 gets the visible markers as chapters, each running to the next marker or the end, projected to output seconds — the same ffmetadata remux `core/video_creator.py::_embed_chapters` already does for a deck's slides, lifted so the re-voice path (`services/revoice.py`, after the mux) can call it; VLC and YouTube read them. The chapter's start is the marker's `timeline_at`, so a marker in removed picture is no chapter. Decision 3; it is the reason to have markers beyond navigation.
+
+### 13.3 `J` / `K` / `L`
+
+**What the audition can and cannot do.** Play is Web Audio: the sentence buffers scheduled ahead, the music beside them, the muted `<video>` seeked along (§6). Forward at 1× is today's Play. Faster forward with audio would pitch the buffers (`playbackRate` on an `AudioBufferSourceNode` has no pitch preservation); reverse audio does not exist. So the shuttle is **picture and clock above 1×, and picture-only backwards** — which is how a shuttle is used: to find a frame, not to listen.
+
+**The keys**, the NLE convention as far as that allows: **`L`** plays; pressed again while playing, 2×, 4×, 8× (the `<video>`'s `playbackRate`, the audition muted above 1×, the clock running); **`J`** shuttles backwards at 1×, 2×, 4×, 8× — the picture scrubbed on `requestAnimationFrame`, no audio; **`K`** stops. **`K` held with `J` or `L` tapped** steps one frame back or forward (Comma / Period's step, so the gesture is one place). The transport shows the direction and the speed ("◀◀ 4×"). Space stays play/pause at 1×; `L` inside a selection stops at its end as Play does; the speed resets to 1× on every stop. Decision 4.
+
+### 13.4 Snapping of cuts to sentence pins
+
+**One candidate set for every gesture that places a moment**: 0, the output's end, the playhead, every join, every sentence pin (its projected start and end), every marker's `timeline_at`, and every clip's two edges. E3's `snap` (nearest within 8 px at the current zoom, the first on a tie) already serves the block drag and E4b's clip drag with subsets of this; E5 gives the **green and red handles, the Ctrl+drag range's two ends, the trim edges (13.1) and the marker drag** the full set, built once at each gesture's start (trap 41), and shows what was caught ("sentence 12 starts", "marker: Intro", "join").
+
+**Turning it off.** Camtasia has a magnet toggle on the toolbar; so does this: on by default, remembered in `localStorage` beside the locks. Holding **Alt** during any of these drags disables it for that drag — Ctrl cannot, because Ctrl+drag IS the range gesture; the block drag keeps E3's Ctrl as a synonym. Decision 5.
+
+**The honest limit stays** (§7's list): the threshold is pixels, so at fit zoom on a long source 8 px is seconds and, with a hundred pins, nearly everything is a candidate; the toggle and zooming in are the answers, and the label always says what was caught.
+
+### 13.5 Traps this phase adds
+
+37. **A trim is a cut with a name.** The same list arithmetic, the same ripple, the same locks. A second implementation of "remove `[a, b]`" — inline in a drag handler, say — is the defect §12.5's As-built already caught once (`clipsAfterDelete`).
+38. **A restore is bounded by the gap the cut left, per track.** Restoring picture that the narration never lost cannot invent narration; the sentences stay, and the notice for `past_end` is the same one E3 wrote.
+39. **Markers live in source seconds.** Anything that draws, snaps to, or exports one projects it first (`toTimeline`), and a `null` projection is a marker in removed picture, not an error.
+40. **Above 1× the audition is silent by design.** Never let a sentence buffer run pitched; `J` never touches the audio graph.
+41. **Snap candidates are built per gesture, not per pointer move.** A hundred pins at sixty moves a second is fine as an array; re-deriving them from the plan on every move is not.
+42. **A marker is not a chapter until the render.** The chapter list is computed from the stored markers at render time, projected through the picture's list as stored then; nothing caches it.
+
+### 13.6 Build order
+
+**E5a — trims and snapping** (one gesture family: the handles, the range ends and the edges share the candidate set and the label); **E5b — markers** (model, route, ruler, keys, chapters); **E5c — `J`/`K`/`L`**. Each through Developer → Reviewer → Documentation, walked in the packaged app before it is believed; one release, **0.10.0**, with E4c and the small hygiene items folded in (README links, the desktop README's stale aside, the verify script's checkout row).
+
+### 13.7 Decisions for the owner before the build
+
+1. **Restore semantics: un-cut per track, bounded by its own gap** (proposed) — or ripple the narration by offsets (a second write per gesture; "locked" would mean two things).
+2. **Markers in source seconds** (proposed), rewritten by nothing — or on the output axis like clips, rewritten by every cut.
+3. **Markers become chapters in the rendered and re-voiced MP4** (proposed) — or navigation only, chapters later.
+4. **`J`/`K`/`L` as a shuttle, picture-only above 1× and backwards** (proposed) — or the simpler one-second steps some web editors use.
+5. **A magnet toggle on the toolbar plus Alt while dragging** (proposed); the block drag keeps Ctrl as a synonym.
+6. **A trim never removes a piece**: the floor is one frame; Cut removes.
+7. **Keys**: `M` marker at the playhead; `Ctrl+[` / `Ctrl+]` previous / next marker; no trim keys in this phase (drag only) — or `Alt+[` / `Alt+]` to trim the selected piece's start / end to the playhead.
+8. **Release: 0.10.0** when all three are walked in the packaged app, E4c and the hygiene folded in.
+
+### Critical files (E5)
+
+`frontend/src/lib/edit.ts` (`removeRange`, `splitAt`, `pieces`, `pieceAt`, `snap`, `nextEditForCut`, `musicAfterCut` — E5 adds `nextEditForTrim`, `musicAfterInsert`, the marker helpers, the candidate-set builder); `frontend/src/components/project/NarrationTimeline.tsx` (the pieces' edge zones and `ew-resize`, the ruler's flags, the transport's shuttle, the key map at ~2290–2390, the ten-row strip); `frontend/src/lib/timeline.ts` (`pixelsPerSecond`, the zoom); `services/edit.py` (`markers` beside `music` in `VERSION` 2: validate, `describe`/`payload`, `set_edit`'s merge, `DELETE`); `api/routers/edit.py` (`EditIn.markers`); `services/revoice.py` + `core/video_creator.py::_embed_chapters` (shared remux); `docs/guides/timeline.md` and the strip's rows; tests: `tests/test_edit.py`, `frontend/src/lib/edit.test.ts`, `lib/music.test.ts`, the render harness.
