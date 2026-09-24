@@ -55,19 +55,20 @@ A cut acts on a selection, and there are three ways to make one.
   becomes the selection.
 
 The handles and a Ctrl+drag's ends **snap**: within 8 px of the playhead, a
-join, a sentence's start or end, a music clip's edge, 0 or the end of the
-picture, the end you are dragging lands exactly on it and its time shows ⌖.
+join, a sentence's start or end, a music clip's edge, a marker, 0 or the end
+of the picture, the end you are dragging lands exactly on it and its time
+shows ⌖.
 Hold **Alt** while dragging to place it freely for that one drag. The
 **magnet** on the toolbar, beside Fit, turns snapping off for every drag on the
-strip — the handles, a range's ends, a piece's edge, a sentence block and a
-music clip alike — until it is switched on again; it is on by default and
+strip — the handles, a range's ends, a piece's edge, a sentence block, a
+music clip and a marker's flag alike — until it is switched on again; it is on by default and
 remembered per project in this browser, like the locks. A block and a clip
 still take Ctrl as well as Alt for a free drag.
 
 **Shift+,** and **Shift+.** grow the selection a frame at a time;
 **Ctrl+Shift+Home** and **Ctrl+Shift+End** stretch it to the start or the end
 of the picture. **Escape** gives up whatever is selected, in that order — the
-music clip first, then the sentence blocks, then the range — and a double-click
+marker first, then the music clip, then the sentence blocks, then the range — and a double-click
 on the playhead's head clears the range outright. A selection lives on the
 picture: nothing past the end of the video can be selected, and so nothing
 there can be cut.
@@ -91,8 +92,9 @@ or drag the sentence earlier.
 
 ## Undo and redo
 
-**Ctrl+Z** undoes the last edit — a cut, a split, a drag, a nudge, a reset, or
-anything done to the Music lane — and **Ctrl+Y** (or **Ctrl+Shift+Z**) redoes
+**Ctrl+Z** undoes the last edit — a cut, a split, a drag, a nudge, a reset,
+anything done to the Music lane, or a marker dropped, moved, renamed or
+removed — and **Ctrl+Y** (or **Ctrl+Shift+Z**) redoes
 it. The toolbar has both buttons.
 
 Undo is for **this visit**. The app stores the current cut and the current
@@ -178,6 +180,42 @@ clip at or after the edge later by what the picture got back (a clip lying
 across the edge stays where it is, unsplit). With either lane locked the clips
 do not move, and a trim of the Narration lane moves them only as far as the
 picture itself changed. Undo takes a trim back like any other edit.
+
+## Markers
+
+Press **M** to drop a marker at the playhead: a flag appears on the ruler with
+its name box open — type a name and press Enter (or click elsewhere), or
+press Escape to keep the default "Marker N". Nothing is saved while the box
+is open: the marker is stored when the box closes, in one save, so a page
+reload with the box still open loses it. Click a flag to select it, double-click it to rename it,
+and drag it along the ruler to move it: it snaps like everything else (Alt
+turns that off for the drag) and its label shows the moment it will land on.
+Delete or Backspace removes the selected marker. **Ctrl+[** and **Ctrl+]**
+move the playhead to the previous and the next marker (plain **[** and **]**
+still nudge the selected sentence blocks). The flag's tooltip is the name and
+the time.
+
+A marker is a moment of the **picture** — it lives in the source's seconds,
+like a sentence, not on the output like a music clip. So a cut before a marker
+moves it with its frame, a cut over it hides it (the flag disappears; the
+marker is still there, waiting), a restore brings it back, and no cut, split
+or trim ever changes where a marker is. A marker cannot be dropped or dragged
+into removed picture, because the ruler only shows kept frames.
+
+**Markers become chapters.** When you render, every marker the ruler shows
+becomes a chapter in the MP4, running from its moment to the next marker's
+(or to the end) and titled with its name; a marker in removed picture is no
+chapter. With no markers the render is exactly what it was, and the file
+keeps whatever chapters the source video had. Two things about readers, said
+plainly: the stretch before the first marker belongs to no chapter, and a
+player built on ffmpeg's reader (mpv, ffprobe) shows the first chapter as
+starting at 0:00 whatever its true start — the file's own chapter list, which
+VLC reads, holds the moment you set.
+
+Selecting a marker gives up a selected music clip, and selecting a clip gives
+up the marker. Delete removes the selected marker first, then a selected clip,
+then the range; Escape gives them up in that order. Every marker change is one
+save, and Undo takes it back like any other edit.
 
 ## Re-timing a sentence
 
@@ -333,13 +371,15 @@ open.
 | **Ctrl+Home** / **Ctrl+End** | Jump to the start or the end |
 | **Shift+,** / **Shift+.** | Grow the selection a frame at its start or its end |
 | **Ctrl+Shift+Home** / **Ctrl+Shift+End** | Stretch the selection to the start or the end of the picture |
-| **Delete**, **Backspace**, **Ctrl+Delete**, **Ctrl+X** | Cut the selection — or remove the selected music clip |
+| **Delete**, **Backspace**, **Ctrl+Delete**, **Ctrl+X** | Cut the selection — or remove the selected marker, else the selected music clip |
 | **S** | Split the unlocked lanes at the playhead |
 | **Ctrl+Shift+S** | Split every lane, locks and all |
+| **M** | Drop a marker at the playhead, its name box open |
+| **Ctrl+[** / **Ctrl+]** | Jump to the previous / next marker |
 | **[** / **]** | Nudge the selected blocks 0.05 s (Shift: 0.25 s) |
-| **Alt** (held while dragging) | No snapping for that drag — a handle, a range's end, a piece's edge, a block or a clip (Ctrl does the same for a block or a clip) |
+| **Alt** (held while dragging) | No snapping for that drag — a handle, a range's end, a piece's edge, a block, a clip or a marker (Ctrl does the same for a block or a clip) |
 | **Ctrl+Z** / **Ctrl+Y** | Undo / redo (Ctrl+Shift+Z redoes as well) |
-| **Escape** | Give up the clip, then the blocks, then the range |
+| **Escape** | Give up the marker, then the clip, then the blocks, then the range |
 | **Ctrl+Shift+D** | Clear the selection |
 | **Ctrl+Shift+=** / **Ctrl+Shift+−** | Zoom in or out (Ctrl+wheel does it at the pointer) |
 | **Ctrl+Shift+7** / **8** / **9** | Fit the whole edit / fill the strip with the selection / zoom all the way in |

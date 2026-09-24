@@ -73,5 +73,12 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     exclude: ["e2e/**", "node_modules/**", "dist/**"],
+    // Vitest blanks every `.css` request by default - a `?raw` import of the
+    // stylesheet came back as "" - and one pin needs the stylesheet's text
+    // (E5b, the Reviewer's MINOR 3: which element of a marker's flag takes
+    // the pointer is CSS, which no static render can compute). With CSS
+    // processed, Vite's own `?raw` handling gives the text; nothing under
+    // test imports a stylesheet (only main.tsx does), so nothing else changes.
+    css: true,
   },
 });

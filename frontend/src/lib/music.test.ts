@@ -24,6 +24,9 @@ import { QueryClient } from "@tanstack/react-query";
 // components/project/NarrationTimeline.render.test.tsx.
 import timelineSource from "../components/project/NarrationTimeline.tsx?raw";
 import librarySource from "../components/project/MusicLibrary.tsx?raw";
+// The stylesheet as text, for the one rule a static render cannot compute:
+// which element takes the pointer (E5b's flag, the Reviewer's MINOR 3).
+import themeSource from "../styles/theme.css?raw";
 import { libraryChangeKeys, musicLibraryKey, narrationPlanKey } from "./timeline";
 import {
   CLIP_EDGE_PX,
@@ -631,30 +634,30 @@ describe("the body a commit sends (spec §12.6, decision 2)", () => {
   const bed = clip({ id: "m1" });
 
   it("says a whole track with `null` instead of deleting the edit", () => {
-    const body = editBody({ video: WHOLE, narration: null, music: [bed] }, { music: [bed] }, SOURCE);
+    const body = editBody({ video: WHOLE, narration: null, music: [bed], markers: [] }, { music: [bed], markers: [] }, SOURCE);
     expect(body).toEqual({ video: null, narration: null });
     // A whole-source SPLIT is still a list: its boundary is the point.
-    expect(editBody({ video: [[0, 6], [6, 12]], narration: null, music: [] }, { music: [] }, SOURCE).video)
+    expect(editBody({ video: [[0, 6], [6, 12]], narration: null, music: [], markers: [] }, { music: [], markers: [] }, SOURCE).video)
       .toEqual([[0, 6], [6, 12]]);
   });
 
   it("leaves the `music` key OUT when the operation does not change the clips", () => {
-    const body = editBody({ video: CUT, narration: CUT, music: [bed] }, { music: [bed] }, SOURCE);
+    const body = editBody({ video: CUT, narration: CUT, music: [bed], markers: [] }, { music: [bed], markers: [] }, SOURCE);
     expect("music" in body).toBe(false);
     expect(body).toEqual({ video: CUT, narration: CUT });
     // The read-back's derived keys are not a change.
     const read = clip({ id: "m1", file_duration: 10, missing: false });
-    expect("music" in editBody({ video: CUT, narration: null, music: [read] }, { music: [bed] }, SOURCE)).toBe(false);
+    expect("music" in editBody({ video: CUT, narration: null, music: [read], markers: [] }, { music: [bed], markers: [] }, SOURCE)).toBe(false);
   });
 
   it("sends the clips when they change, as the eight stored keys", () => {
     const moved = clip({ id: "m1", at: 9, file_duration: 10, missing: false });
-    const body = editBody({ video: null, narration: null, music: [moved] }, { music: [bed] }, SOURCE);
+    const body = editBody({ video: null, narration: null, music: [moved], markers: [] }, { music: [bed], markers: [] }, SOURCE);
     expect(body.music).toEqual([
       { id: "m1", file: "bed.mp3", at: 9, in: 0, out: 4, gain: 0.15, fade_in: 1, fade_out: 2 },
     ]);
     // Clearing the lane is an empty list, which the server takes as "no music".
-    expect(editBody({ video: null, narration: null, music: [] }, { music: [bed] }, SOURCE).music).toEqual([]);
+    expect(editBody({ video: null, narration: null, music: [], markers: [] }, { music: [bed], markers: [] }, SOURCE).music).toEqual([]);
   });
 
   it("lets a cut through on a lane whose file has gone, because it sends no `music` key", () => {
@@ -663,7 +666,7 @@ describe("the body a commit sends (spec §12.6, decision 2)", () => {
     // an ABSENT key, which is what keeps the picture editable while a clip
     // names a file the library has lost (the server refuses to store one).
     const lost = clip({ id: "m1", file: "gone.mp3", missing: true, file_duration: null });
-    const body = editBody({ video: CUT, narration: CUT, music: [lost] }, { music: [lost] }, SOURCE);
+    const body = editBody({ video: CUT, narration: CUT, music: [lost], markers: [] }, { music: [lost], markers: [] }, SOURCE);
     expect("music" in body).toBe(false);
     expect(body).toEqual({ video: CUT, narration: CUT });
   });
@@ -688,9 +691,9 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(timeline).not.toMatch(/api\.delete[^\n]*\/edit/);
   });
 
-  it("carries the music on every undo entry, so an undone cut puts the clips back", () => {
-    expect(timeline).toMatch(/type EditState = TrackEdit & \{ music: MusicClip\[\] \}/);
-    expect(timeline).toMatch(/committedRef\.current = \{ video: op\.video, narration: op\.narration, music: op\.music \}/);
+  it("carries the music and the markers on every undo entry, so an undone cut puts the clips back", () => {
+    expect(timeline).toMatch(/type EditState = TrackEdit & \{ music: MusicClip\[\]; markers: Marker\[\] \}/);
+    expect(timeline).toMatch(/committedRef\.current = \{ video: op\.video, narration: op\.narration, music: op\.music, markers: op\.markers \}/);
   });
 
   it("ripples the clips only when the PICTURE's list changed (the owner's rule)", () => {
@@ -788,10 +791,11 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     );
     expect(handler("snapTargetsNow")).toMatch(/pins: sentencesRef\.current\.flatMap\(\(s\) => \[s\.pinned_start, s\.pinned_start \+ \(s\.end - s\.start\)\]\)/);
     expect(handler("snapTargetsNow")).toMatch(/joins: \[\.\.\.joinsRef\.current, \.\.\.narrationJoinsRef\.current\]/);
-    // The handle / range branch and the trim branch snap through `drag.snapTo`
-    // unless the magnet is off or Alt is held - the same line in both.
+    // The handle / range branch, the trim branch and (E5b) the marker branch
+    // snap through `drag.snapTo` unless the magnet is off or Alt is held -
+    // the same line in all three.
     const free = timeline.match(/const free = !snappingRef\.current \|\| event\.altKey;\s*const landed = free \|\| !drag\.snapTo \? \{ t, snapped: null \} : snap\(t, drag\.snapTo, SNAP_PX \/ ppsRef\.current\);/g) ?? [];
-    expect(free).toHaveLength(2);
+    expect(free).toHaveLength(3);
     // The handle's label gains ⌖ from `paint`, off the drag, on the moving end.
     expect(handler("paint")).toMatch(/const caught = drag && drag\.moved && drag\.snapped !== null && drag\.snapped !== undefined \? drag\.snapEnd : undefined;/);
     expect(handler("paint")).toMatch(/\$\{caught === "start" \? " ⌖" : ""\}/);
@@ -815,9 +819,10 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(up).toMatch(/if \(cancelled \|\| editLockedRef\.current \|\| !now \|\| lane === undefined \|\| index === undefined \|\| edge === undefined\) return;/);
     expect(up).toMatch(/const outcome = nextEditForTrim\(before, held, lane, index, edge, now\.toSource, sourceDurationRef\.current\);/);
     expect(up).toMatch(/const music = musicAfterTrim\(before\.music, held, outcome\.picture\);/);
-    expect(up).toMatch(/commitEdit\(\{ \.\.\.outcome\.next, music \}\);/);
+    // The markers ride along UNCHANGED (E5b, trap 39): a trim rewrites no marker.
+    expect(up).toMatch(/commitEdit\(\{ \.\.\.outcome\.next, music, markers: before\.markers \}\);/);
     expect(up.indexOf("nextEditForTrim(")).toBeLessThan(up.indexOf("musicAfterTrim("));
-    expect(up.indexOf("musicAfterTrim(")).toBeLessThan(up.indexOf("commitEdit({ ...outcome.next, music })"));
+    expect(up.indexOf("musicAfterTrim(")).toBeLessThan(up.indexOf("commitEdit({ ...outcome.next, music, markers: before.markers })"));
     // A shortening across a MISSING clip is refused before the PUT, as the cut's is.
     expect(up).toMatch(/if \(picture\?\.kind === "cut" && !held\.music && !held\.video\) \{\s*const across = missingAcross\(before\.music, picture\.a, picture\.b\);\s*if \(across\.length > 0\) \{\s*setRefusal\(missingAcrossRefusal\("trim", across, picture\.a, picture\.b\)\);\s*return;/);
     // The gesture begins only from an edge `pieceEdgeAt` answers, on an unlocked lane, outside the commit lock.
@@ -1432,5 +1437,101 @@ describe("the Render line, with music under it", () => {
     expect(line).toContain("Mixes 3 music clips under the narration");
     expect(line).toContain("refuse while 2 music clips name a file that is not in the library (gone.mp3): "
       + "remove those clips or upload the file again.");
+  });
+});
+
+describe("the markers on the strip (E5b), pinned in the component's own source", () => {
+  // The rules are lib/edit.ts's (edit.test.ts holds their tables); these pin
+  // that the component calls them where the design says - the keys, the
+  // Delete precedence, the one PUT, the candidate set, the drag's release -
+  // and no more. The live walk is the owner's.
+  const timeline = timelineSource;
+  const handler = (name: string): string => {
+    const from = timeline.indexOf(`const ${name} = useCallback(`);
+    expect(from, `${name} not found`).toBeGreaterThan(-1);
+    return timeline.slice(from, timeline.indexOf("\n  }, [", from));
+  };
+
+  it("drops one on M, jumps on Ctrl+[ / Ctrl+], and gives Delete to the marker before the clip and the range", () => {
+    expect(timeline).toMatch(/if \(code === "KeyM" \|\| key === "m"\) \{ if \(once\) dropMarker\(\); return true; \}/);
+    // Ctrl alone with a bracket, in the Ctrl branch: plain [ ] stay E3's
+    // nudge, and so does AltGr's Ctrl+Alt (the nudge's own guard, untouched).
+    expect(timeline).toMatch(/if \(bracket !== 0 && \(!ctrl \|\| event\.altKey\)\) \{/);
+    expect(timeline).toMatch(/if \(ctrl && !shift\) \{\s*(\/\/[^\n]*\n\s*)*if \(bracket !== 0\) \{ jumpToMarker\(bracket\); return true; \}/);
+    expect(handler("jumpToMarker")).toMatch(/markerNeighbours\(drawnMarkers\(markersRef\.current\), positionRef\.current\)/);
+    // Delete / Backspace and Ctrl+Delete / Ctrl+X: the marker, else the clip, else the range - the same three lines in both branches.
+    const precedence = timeline.match(
+      /if \(selectedMarkerRef\.current !== null\) removeMarker\(\);\s*else if \(selectedClipRef\.current !== null\) removeClip\(\);\s*else cutSelection\(\);/g,
+    ) ?? [];
+    expect(precedence).toHaveLength(2);
+    // Escape gives the marker up first, then the clip.
+    expect(timeline).toMatch(/if \(key === "Escape"\) \{\s*if \(selectedMarkerRef\.current !== null\) \{ setSelectedMarker\(null\); return true; \}\s*if \(selectedClipRef\.current !== null\)/);
+  });
+
+  it("sends the markers through the one editBody only when they changed, and carries them UNCHANGED through a cut, a split and a trim (trap 39)", () => {
+    expect(timeline).toMatch(/editBody\(op, committedRef\.current, sourceDurationRef\.current\)/);
+    expect(handler("commitEdit")).toMatch(/sameMarkers\(next\.markers, before\.markers\)/);
+    expect(handler("cutSelection")).toMatch(/commitEdit\(\{ \.\.\.outcome\.next, music, markers: before\.markers \}\)/);
+    expect(handler("splitAtPlayhead")).toMatch(/commitEdit\(\{ \.\.\.tracks, music, markers: before\.markers \}\)/);
+    expect(handler("commitMusic")).toMatch(/music: clips, markers: before\.markers/);
+    expect(handler("commitMarkers")).toMatch(/commitEdit\(\{ video: before\.video, narration: before\.narration, music: before\.music, markers: list \}\)/);
+    expect(handler("commitMarkers")).toMatch(/if \(editLockedRef\.current\) return;/);
+    // Every marker gesture goes through `commitMarkers`, never a PUT of its own.
+    for (const name of ["finishNameBox", "removeMarker"]) expect(handler(name)).toMatch(/commitMarkers\(/);
+    expect(handler("removeMarker")).toMatch(/markersAfterDelete\(markersRef\.current, id\)/);
+  });
+
+  it("includes the drawn markers in the one candidate set, and a dragged marker leaves its own moment out", () => {
+    expect(handler("snapTargetsNow")).toMatch(
+      /markers: drawnMarkers\(markersRef\.current\)\.filter\(\(marker\) => marker\.id !== exclude\)\.map\(\(marker\) => marker\.timeline_at\)/,
+    );
+    expect(handler("onMarkerPointerDown")).toMatch(
+      /beginDrag\(event, "marker", marker\.timeline_at, marker\.timeline_at, \{ marker, snapTo: snapTargetsNow\(marker\.id\) \}\)/,
+    );
+    // The drag: the magnet and Alt as every drag, clamped to the picture, ⌖
+    // after the clamp, and on release `at = toSource(landed, keep)` through
+    // `moveMarker`, nothing sent for a no-op.
+    const move = handler("onBodyPointerMove");
+    expect(move).toMatch(/if \(drag\.kind === "marker"\) \{[\s\S]*?const free = !snappingRef\.current \|\| event\.altKey;[\s\S]*?const at = clampTime\(landed\.t, durationRef\.current\);\s*drag\.markerNow = at;/);
+    expect(move).toMatch(/paintMarker\(drag, at, caughtAfterClamp\(at, landed\.snapped\)\)/);
+    const up = handler("onBodyPointerUp");
+    expect(up).toMatch(
+      /const next = moveMarker\(markersRef\.current, base\.id, at, keepRef\.current, sourceDurationRef\.current\);\s*if \(sameMarkers\(next, markersRef\.current\)\) \{\s*clearMarkerDrag\(\);\s*return;\s*\}\s*commitMarkers\(next\);/,
+    );
+  });
+
+  it("lands a dropped marker in ONE PUT when its name box closes, with the typed name or the default; a rename only when the name changed", () => {
+    expect(handler("dropMarker")).toMatch(/newMarker\(markersRef\.current, positionRef\.current, keepRef\.current, sourceDurationRef\.current\)/);
+    expect(handler("dropMarker")).toMatch(/setNameBox\(\{ id: marker\.id, draft: marker\.name \}\)/);
+    const finish = handler("finishNameBox");
+    // The typed text is sanitised (a paste's control characters dropped) on both paths.
+    expect(finish).toMatch(/const name = keep \? sanitizeMarkerName\(box\.draft\) \|\| held\.name : held\.name;/);
+    expect(finish).toMatch(/commitMarkers\(sortMarkers\(\[\.\.\.markersRef\.current, \{ \.\.\.held, name \}\]\)\)/);
+    expect(finish).toMatch(/const next = renameMarker\(markersRef\.current, box\.id, sanitizeMarkerName\(box\.draft\)\);\s*if \(next === markersRef\.current\) return;/);
+    // A job that took the project while the box was open is SAID on both paths, never swallowed (the Reviewer's NIT 3).
+    expect(finish).toMatch(/setRefusal\("The marker was not added — wait for the last edit to be saved, then press M again\."\)/);
+    expect(finish).toMatch(/if \(editLockedRef\.current\) \{\s*setRefusal\("The name was not saved — wait for the last edit to be saved, then rename it again\."\);\s*return;\s*\}\s*commitMarkers\(next\);/);
+    // The box: Enter keeps, Escape reverts, a click elsewhere keeps; 80 characters.
+    expect(timeline).toMatch(/if \(event\.key === "Enter"\) \{ event\.preventDefault\(\); finishNameBox\(true\); \}/);
+    expect(timeline).toMatch(/else if \(event\.key === "Escape"\) \{ event\.preventDefault\(\); finishNameBox\(false\); \}/);
+    expect(timeline).toMatch(/onBlur=\{\(\) => finishNameBox\(true\)\}/);
+    expect(timeline).toMatch(/maxLength=\{MAX_MARKER_NAME\}/);
+    // A flag's press never reaches the ruler's scrub; selecting a marker gives up the clip, and a clip the marker.
+    expect(handler("onMarkerPointerDown")).toMatch(/event\.stopPropagation\(\);/);
+    expect(handler("onMarkerClick")).toMatch(/setSelectedMarker\(marker\.id\);\s*setSelectedClip\(null\);/);
+    expect(handler("onClipClick")).toMatch(/setSelectedClip\(clip\.id\);\s*setSelectedMarker\(null\);/);
+    expect(handler("onMarkerDoubleClick")).toMatch(/setNameBox\(\{ id: marker\.id, draft: marker\.name \}\)/);
+  });
+
+  it("makes the flag's button the glyph alone and the name a label that takes no pointer, so the ruler under a name still seeks and scrubs (the Reviewer's MINOR 3)", () => {
+    // The harness proves the markup; the stylesheet says who takes the
+    // pointer, and a static render cannot compute that - so the rule is
+    // pinned on the CSS text: the button 12 px wide, the name absolutely
+    // positioned beside it with `pointer-events: none`.
+    expect(themeSource).toMatch(/\.os-tl-marker \{[^}]*\bwidth: 12px;[^}]*\}/);
+    expect(themeSource).toMatch(/\.os-tl-marker-name \{[^}]*position: absolute;[^}]*pointer-events: none;[^}]*\}/);
+    expect(themeSource).toMatch(/\.os-tl-marker-name \{[^}]*left: 12px;[^}]*\}/);
+    // The name sits INSIDE the button (its only content), so the drag's transform carries it with the glyph.
+    expect(timeline).toMatch(/onDoubleClick=\{\(event\) => onMarkerDoubleClick\(event, held\)\}\s*>\s*<span className="os-tl-marker-name">\{held\.name\}<\/span>\s*<\/button>/);
   });
 });

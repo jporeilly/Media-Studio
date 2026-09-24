@@ -62,7 +62,7 @@ const GONE2 = { ...GONE, id: "m3", at: 11 };
 type Locks = { video: boolean; narration: boolean; music: boolean };
 
 /** The component's markup, with the plan, the peaks and the studio settings already in the cache. */
-function markup(over: { music?: unknown[]; locks?: Locks; snapping?: boolean } = {}): string {
+function markup(over: { music?: unknown[]; markers?: unknown[]; locks?: Locks; snapping?: boolean } = {}): string {
   if (over.locks) stored.set(`ms:tl-locks:${PID}`, JSON.stringify(over.locks));
   else stored.delete(`ms:tl-locks:${PID}`);
   if (over.snapping !== undefined) stored.set(`ms:tl-snap:${PID}`, JSON.stringify(over.snapping));
@@ -76,6 +76,8 @@ function markup(over: { music?: unknown[]; locks?: Locks; snapping?: boolean } =
       video: { keep: [[0, 6], [7.5, 12]], output_duration: 10.5 },
       narration: { keep: null, output_duration: 12 },
       music: over.music ?? [LIVE],
+      // Left out unless a test gives some: a backend before E5b sends no key.
+      ...(over.markers ? { markers: over.markers } : {}),
       source_duration: 12, output_duration: 10.5,
     },
   });
@@ -331,24 +333,28 @@ describe("the strip's summary is a list of the basic gestures, and the rest is a
     expect(terms.length).toBe(meanings.length);
     expect(terms.length).toBeGreaterThanOrEqual(9);
     // The basics the owner listed: a range, the cut, (E5a) the trim, the
-    // split, the channel and the lock - one row since E5a, so the trim's row
-    // keeps the list at ten - a block, the library, a clip, the eye, undo.
+    // split, (E5b) the marker, the channel and the lock - one row since E5a,
+    // so the trim's row kept the list at ten and the marker's makes eleven -
+    // a block, the library, a clip, the eye, undo.
     expect(terms).toEqual([
       "Drag the green or red handle, or Ctrl+drag",
       "Scissors, or Delete",
       "Drag a piece&#x27;s edge",
       "S",
+      "M",
       "A lane&#x27;s name, or its lock",
       "Drag a sentence block",
       "The + on Music",
-      "Drag a clip, or either of its ends",
+      "Drag a clip, or either end",
       "The eye on Music",
       "Ctrl+Z",
     ]);
-    expect(terms).toHaveLength(10);
-    // The handle row says it snaps and how to stop it for one drag; the trim row says what a piece's edge does.
+    expect(terms).toHaveLength(11);
+    // The handle row says it snaps and how to stop it for one drag; the trim
+    // row says what a piece's edge does; the marker row names the jump keys.
     expect(meanings[0]).toBe("Select a range; snaps to pins and joins, Alt: no snap");
     expect(meanings[2]).toBe("Trim the cut; drag it back out to restore");
+    expect(meanings[4]).toBe("Drop a marker at the playhead; Ctrl+[ / ] jump between them");
   });
 
   it("points at the Timeline document for everything else", () => {
@@ -476,5 +482,72 @@ describe("the clips themselves", () => {
     const html = markup({ music: [LIVE] });
     expect(html).toContain("os-tl-clip-edge in");
     expect(html).toContain("os-tl-clip-edge out");
+  });
+});
+
+/** The ruler's markup: from its opening tag to the first pieces layer under it. */
+function ruler(html: string): string {
+  const at = html.indexOf('class="os-tl-ruler"');
+  expect(at, "the ruler is not in the markup").toBeGreaterThan(-1);
+  return html.slice(at, html.indexOf('class="os-tl-pieces', at));
+}
+/** Every flag's opening tag, in order. */
+const flags = (html: string): string[] => [...ruler(html).matchAll(/<button[^>]*class="os-tl-marker[^"]*"[^>]*>/g)].map((m) => m[0]);
+
+describe("the markers on the ruler (E5b)", () => {
+  // The fixture's cut is 6.0–7.5 of a 12 s source (see `markup`): a marker at
+  // 6.5 sits in removed picture and the server projects it to `null`.
+  const INTRO = { id: "k1", at: 1, name: "Intro", timeline_at: 1 };
+  const HIDDEN = { id: "k2", at: 6.5, name: "In the hole", timeline_at: null };
+  const LATER = { id: "k3", at: 9, name: "Wrap = up", timeline_at: 7.5 };
+
+  it("draws a flag per DRAWN marker in the ruler, the name beside it and a title of name — time", () => {
+    const html = markup({ markers: [INTRO, HIDDEN, LATER] });
+    expect(ruler(html)).toContain('class="os-tl-markers"');
+    const drawn = flags(html);
+    expect(drawn).toHaveLength(2);
+    expect(drawn[0]).toContain('title="Intro — 0:01.000');
+    expect(drawn[0]).toContain('aria-label="Marker Intro at 0:01.000"');
+    expect(drawn[1]).toContain('title="Wrap = up — 0:07.500');
+    expect(ruler(html)).toContain('<span class="os-tl-marker-name">Intro</span>');
+    expect(ruler(html)).toContain('<span class="os-tl-marker-name">Wrap = up</span>');
+    // Both are flags (the class) and neither is selected until clicked.
+    for (const flag of drawn) {
+      expect(flag).toContain('type="button"');
+      expect(flag).toContain('aria-pressed="false"');
+      expect(flag).not.toContain("selected");
+      expect(flag).not.toContain("pending");
+    }
+    // The button is the glyph alone: its only content is the name label
+    // (which the stylesheet makes take no pointer - pinned in
+    // lib/music.test.ts), so a click or a drag under the name reaches the ruler.
+    const body = ruler(html);
+    const first = body.slice(body.indexOf(drawn[0]), body.indexOf("</button>", body.indexOf(drawn[0])) + "</button>".length);
+    expect(first).toMatch(/^<button[^>]*>\s*<span class="os-tl-marker-name">Intro<\/span>\s*<\/button>$/);
+  });
+
+  it("draws none for a marker in removed picture (a null timeline_at), and none at all without markers", () => {
+    const html = markup({ markers: [INTRO, HIDDEN, LATER] });
+    expect(html).not.toContain("In the hole");
+    expect(flags(markup({ markers: [] }))).toHaveLength(0);
+    expect(flags(markup({ markers: [HIDDEN] }))).toHaveLength(0);
+    // A backend before E5b sends no key: still a ruler, still no flags, no name box.
+    const older = markup();
+    expect(flags(older)).toHaveLength(0);
+    expect(ruler(older)).toContain('class="os-tl-markers"');
+  });
+
+  it("has no name box until a marker is being named, and the ruler's own title names M", () => {
+    const html = markup({ markers: [INTRO] });
+    expect(html).not.toContain("os-tl-marker-name-box");
+    expect(ruler(html)).toContain('title="Click to seek, drag to scrub, Ctrl+drag to select a range; M drops a marker at the playhead"');
+    // The drag's label is there, hidden, for the move to paint through its ref.
+    expect(ruler(html)).toContain('class="os-tl-marker-label"');
+  });
+
+  it("says on the flag what it does, and that markers become chapters", () => {
+    const [flag] = flags(markup({ markers: [INTRO] }));
+    expect(flag).toContain("Click to select; double-click to rename; drag to move it (Alt: no snapping); Delete removes it.");
+    expect(flag).toContain("Ctrl+[ and Ctrl+] jump between markers. Markers become the rendered video&#x27;s chapters.");
   });
 });

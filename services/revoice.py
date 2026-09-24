@@ -34,6 +34,17 @@ truthfully describes the voice-only render it left behind, rather than the
 previous render's ``music_rendered`` over bytes that no longer carry it. A
 mix that succeeds stamps again - the bytes changed once more, and the page's
 cache token with them.
+
+**The markers become chapters LAST** (E5b, spec §13.2, decision 3): once the
+file the job records is final - after the mux, and after the music pass when
+there is one - the drawn markers (``services.edit.chapters_for``: the stored
+markers projected through the picture's list as stored NOW, trap 42) are
+written into it as chapters by one stream-copy remux
+(``core.video_creator.embed_chapters``), so they are on the file the user
+downloads. No drawn markers, no remux: the file keeps whatever chapters the
+source had, as it always did. A remux that fails logs and leaves the
+un-chaptered file; it never fails the job, exactly as the deck path treats
+its own chapters.
 """
 
 import shutil
@@ -42,6 +53,9 @@ from datetime import datetime, timezone
 from services import edit, jobs, narration, waveform
 from services import music as music_library
 from services import projects as store
+from utils.logger import get_logger
+
+logger = get_logger("REVOICE")
 
 MISSING_MUSIC = "music file '{name}' is missing — remove the clip or upload the file again"
 
@@ -117,7 +131,8 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     # transcript itself (the same objects, untouched) when there is no edit,
     # or it keeps everything, or only the picture is cut. The source's length
     # is the WAV header's, as everywhere.
-    applied = edit.apply(record, stored, waveform.duration_for(pid))
+    source_duration = waveform.duration_for(pid)
+    applied = edit.apply(record, stored, source_duration)
     segments = applied.sentences
     if not narration.count_spoken(segments):
         # No spoken sentence means no audio at all, and _revoice_video answers
@@ -360,6 +375,40 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         # How many clips this file carries, for the page.
         current["music_rendered"] = len(music_clips)
         store.save_project(current)
+
+    # The chapters, on the FINAL file - after the mux and after the music
+    # pass, which rewrote it in place - so they are on the file the user
+    # downloads. Computed here and now from the record the job is rendering
+    # (trap 42: the stored markers projected through the picture's list AS
+    # STORED at render time; the same ``record`` the picture was cut from,
+    # so the chapters and the cut cannot disagree about the list - and
+    # ``require_idle`` holds every edit off while this job runs). No drawn
+    # markers, no remux. A remux that fails logs and leaves the file as it
+    # was; it never fails the job, as the deck path never lets its chapters
+    # fail a render.
+    chapters = edit.chapters_for(record, source_duration)
+    if not chapters and source_duration is None and applied.markers:
+        # Reachable only when audio.wav went after the markers were stored
+        # (the PUT that stores them needs it): with no length the last
+        # chapter has no end, so the render carries none - said once here
+        # rather than silently (the Reviewer's NIT 7).
+        count = len(applied.markers)
+        logger.warning(
+            "Project %s has %d marker%s but its extracted audio is missing, so none became chapters",
+            pid, count, "" if count == 1 else "s",
+        )
+    if chapters:
+        from core import video_creator
+
+        count = len(chapters)
+        _report(0.98, f"Writing {count} chapter{'' if count == 1 else 's'}…")
+        if video_creator.embed_chapters(out, chapters):
+            # The bytes changed again, so the page's cache token does too,
+            # and the edit stamp with it: the output differs from an
+            # unedited render whether or not a track was cut.
+            current["revoiced_at"] = datetime.now(timezone.utc).isoformat()
+            current["edit_rendered_at"] = current["revoiced_at"]
+            store.save_project(current)
     if failed:
         _report(1.0, f"Re-voiced - {failed} sentence{'' if failed == 1 else 's'} could not be synthesised")
     return {"video": out.name, "language": language or None, "failed_sentences": failed}

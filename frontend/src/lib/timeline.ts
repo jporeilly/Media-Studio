@@ -19,7 +19,7 @@
  * delete, the ruler and the zoom scale — is in lib/edit.ts.
  */
 
-import type { Keep, MusicClip } from "./edit";
+import type { Keep, Marker, MusicClip } from "./edit";
 
 /** One sentence of `GET /api/projects/{pid}/narration/plan`. */
 export interface PlanSentence {
@@ -65,9 +65,11 @@ export interface EditTrack {
  * (the filmstrip, the waveform, the transport's seeks), `narration` the
  * sentences' — each in SOURCE seconds with `null` meaning everything; the
  * music lane's clips, each as `stored_music` reads it back (with the
- * library's `file_duration` and whether the file has gone); the source's
- * length from the WAV header, `null` before transcription; and the output's,
- * which is the PICTURE's.
+ * library's `file_duration` and whether the file has gone); the markers,
+ * each as `stored_markers` reads it back (with `timeline_at`, where it lands
+ * through the video list, `null` in removed picture); the source's length
+ * from the WAV header, `null` before transcription; and the output's, which
+ * is the PICTURE's.
  */
 export interface EditPayload {
   version: number;
@@ -75,6 +77,8 @@ export interface EditPayload {
   narration: EditTrack;
   /** E4: the clips on the output axis, `[]` when there are none. A backend before E4a sends no key at all. */
   music?: MusicClip[];
+  /** E5b: the markers in SOURCE seconds with their projection, `[]` when there are none. A backend before E5b sends no key. */
+  markers?: Marker[];
   source_duration: number | null;
   output_duration: number | null;
 }

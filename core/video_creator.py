@@ -79,6 +79,97 @@ def chapter_spans(
     return spans
 
 
+def _ffmeta_escape(text: str) -> str:
+    """A metadata value as ffmpeg's ffmetadata file wants it: the format's
+    own rule is that ``=``, ``;``, ``#``, ``\\`` and a newline in a key or a
+    value are escaped with a backslash, and a chapter's title is user-typed
+    (a marker's name), so every one of the five is. The backslash goes
+    first, or the escapes just added would be escaped again. Measured on the
+    machine's 8.0.1 and the bundled 7.1 alike (2026-09-24): unescaped, the
+    parser happens to forgive ``=``, ``;`` and ``#`` inside a value, eats a
+    backslash and cuts the title at a newline; escaped, all five come back
+    from ``ffprobe -show_chapters`` exactly as typed."""
+    out = text.replace("\\", "\\\\")
+    for char in ("=", ";", "#"):
+        out = out.replace(char, "\\" + char)
+    return out.replace("\n", "\\\n")
+
+
+def embed_chapters(video_path: Path, chapters: List[Tuple[int, int, str]]) -> bool:
+    """Write ``chapters`` - ``(start_ms, end_ms, title)`` each - into the MP4
+    at ``video_path``, in place: an ffmetadata file beside it, one stream-copy
+    remux into ``<stem>_chaptered.mp4`` and a rename over the original. The
+    deck's ``_embed_chapters`` computes its spans and calls this; the re-voice
+    job calls it with the markers' chapters (``services.edit.chapters_for``)
+    on the FINAL file it records, after the mux and the music pass, so the
+    chapters are on the file the user downloads.
+
+    ``True`` when the file now carries the chapters; ``False`` - logged, the
+    file left exactly as it was, the metadata file and any partial output
+    removed - when there is nothing to write, no ffmpeg, or the remux failed.
+    Never raises: a chapter is worth a warning, not a failed job. The
+    RESOLVED ``FFMPEG_PATH``, never the bare name (trap 3), and the same
+    ``-map_metadata 1 -codec copy`` remux the deck path has always run,
+    plus ``-map_chapters 1``: without it ffmpeg takes the chapters from the
+    FIRST input that has any, and a re-voiced file already has the source
+    video's (``replace_video_audio`` copies them along with the picture),
+    so the markers' list was silently ignored on any source that carried
+    chapters of its own (a Camtasia export, say) - measured on 8.0.1 and
+    the bundled 7.1, 2026-09-24. The deck's input never has chapters, so
+    for the deck path the explicit map is exactly the default it always got.
+    """
+    from utils.config import FFMPEG_PATH
+    if not chapters:
+        return False
+    if not FFMPEG_PATH:
+        logger.warning("FFmpeg not found, skipping chapter embedding")
+        return False
+
+    meta_path = video_path.with_suffix(".chapters.txt")
+    temp_output = video_path.with_stem(video_path.stem + "_chaptered")
+    try:
+        # Write FFmpeg metadata file
+        with open(meta_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(";FFMETADATA1\n")
+            for start_ms, end_ms, title in chapters:
+                f.write(
+                    f"\n[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\nEND={end_ms}\n"
+                    f"title={_ffmeta_escape(title)}\n"
+                )
+
+        # Remux video with chapter metadata - the chapters mapped from the
+        # metadata file EXPLICITLY, or a source that has its own would keep them.
+        cmd = [
+            FFMPEG_PATH, "-i", str(video_path), "-i", str(meta_path),
+            "-map_metadata", "1", "-map_chapters", "1", "-codec", "copy",
+            "-y", str(temp_output),
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, timeout=60,
+            creationflags=0x08000000 if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+        )
+        if result.returncode == 0 and temp_output.exists():
+            temp_output.replace(video_path)
+            logger.info("Embedded %d chapters", len(chapters))
+            return True
+        logger.warning("ffmpeg failed: %s", result.stderr.decode(errors="replace")[:200])
+        if temp_output.exists():
+            temp_output.unlink()
+        return False
+    except Exception as e:
+        logger.error("Error embedding chapters: %s", e)
+        try:
+            if temp_output.exists():
+                temp_output.unlink()
+        except OSError:
+            pass
+        return False
+    finally:
+        # Clean up metadata file
+        if meta_path.exists():
+            meta_path.unlink()
+
+
 def _configured_title_font() -> Optional[str]:
     """The ``title_font`` config value (a font file path), if any."""
     from utils.config import config
@@ -1522,14 +1613,11 @@ class VideoCreator:
     def _embed_chapters(self, video_path: Path, slide_clips: List[SlideClipInfo], slide_titles: List[str]):
         """Embed chapter markers into the MP4 using ffmpeg metadata.
 
-        Creates a metadata file with chapter info and remuxes the video to
-        embed it. Players like VLC and YouTube recognize these chapters.
+        Computes the deck's spans - one chapter per slide - and hands them to
+        :func:`embed_chapters`, which writes the metadata file and remuxes
+        the video to embed it. Players like VLC and YouTube recognize these
+        chapters.
         """
-        from utils.config import FFMPEG_PATH
-        if not FFMPEG_PATH:
-            logger.warning("FFmpeg not found, skipping chapter embedding")
-            return
-
         try:
             # Each slide's on-screen time: its narration plus the voice start
             # delay (the master track opens every narrated slide with that
@@ -1561,35 +1649,7 @@ class VideoCreator:
             if not chapters:
                 return
 
-            # Write FFmpeg metadata file
-            meta_path = video_path.with_suffix(".chapters.txt")
-            with open(meta_path, "w", encoding="utf-8") as f:
-                f.write(";FFMETADATA1\n")
-                for start_ms, end_ms, title in chapters:
-                    f.write(f"\n[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\nEND={end_ms}\ntitle={title}\n")
-
-            # Remux video with chapter metadata
-            temp_output = video_path.with_stem(video_path.stem + "_chaptered")
-            cmd = [
-                FFMPEG_PATH, "-i", str(video_path), "-i", str(meta_path),
-                "-map_metadata", "1", "-codec", "copy",
-                "-y", str(temp_output),
-            ]
-            result = subprocess.run(
-                cmd, capture_output=True, timeout=60,
-                creationflags=0x08000000 if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
-            )
-            if result.returncode == 0 and temp_output.exists():
-                temp_output.replace(video_path)
-                logger.info("Embedded %d chapters", len(chapters))
-            else:
-                logger.warning("ffmpeg failed: %s", result.stderr.decode()[:200])
-                if temp_output.exists():
-                    temp_output.unlink()
-
-            # Clean up metadata file
-            if meta_path.exists():
-                meta_path.unlink()
+            embed_chapters(video_path, chapters)
 
         except Exception as e:
             logger.error("Error embedding chapters: %s", e)

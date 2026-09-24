@@ -460,7 +460,7 @@ p { margin: 0 0 8px; }
 .os-tl-panel {
   --tl-bg: #1b1b1b; --tl-row: #252525; --tl-header: #202020; --tl-line: #0e0e0e; --tl-text: #d4d4d4; --tl-muted: #8f8f8f;
   --tl-audio: #9fb8a4; --tl-music: #a78bfa; --tl-select: rgba(59, 130, 246, 0.26); --tl-select-edge: #60a5fa; --tl-in: #22c55e; --tl-out: #ef4444;
-  --tl-playhead: #f5f5f5; --tl-join: #f59e0b; --tl-hover: rgba(255, 255, 255, 0.09); --tl-ruler-h: 28px; --tl-lane-h: 68px;
+  --tl-playhead: #f5f5f5; --tl-join: #f59e0b; --tl-marker: #22d3ee; --tl-hover: rgba(255, 255, 255, 0.09); --tl-ruler-h: 28px; --tl-lane-h: 68px;
   display: grid; background: var(--tl-bg); color: var(--tl-text); border-radius: var(--radius-sm); overflow: hidden;
   box-shadow: inset 0 0 0 1px #000; color-scheme: dark;
 }
@@ -541,6 +541,31 @@ p { margin: 0 0 8px; }
 .os-tl-sel-label.in { margin-left: -16px; }
 .os-tl-sel-label.out { margin-left: 17px; }
 .os-tl-sel-label:empty { display: none; }
+/* The markers (E5b): a flag per DRAWN marker on the ruler - a 2 px stem at its moment, a pennant at the top and the
+   name beside it - in a colour of their own (--tl-marker), so a marker reads as neither a join nor a handle. A marker
+   in removed picture has no `timeline_at` and is not drawn. The flag is a button: click selects, double-click opens
+   the name box, a drag moves it along the ruler by a transform written to the DOM (as a clip's is), and the layer
+   itself takes no pointer, so the ruler still scrubs between the flags. The BUTTON is the 12 px glyph alone; the
+   name is a label positioned beside it INSIDE the button that takes no pointer either, so a click or a drag on the
+   ruler under a name seeks or scrubs as everywhere (the Reviewer's MINOR 3) while the drag's transform still moves
+   the name with the glyph. */
+.os-tl-markers { position: absolute; inset: 0; pointer-events: none; }
+.os-tl-marker { position: absolute; top: 0; bottom: 0; left: 0; width: 12px; margin-left: -1px; padding: 0; border: 0; background: none; color: var(--tl-marker); font: inherit; font-size: 10px; line-height: 14px; text-align: left; white-space: nowrap; overflow: visible; cursor: grab; pointer-events: auto; touch-action: none; will-change: transform; z-index: 4; }
+.os-tl-marker::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px; background: var(--tl-marker); }
+.os-tl-marker::after { content: ""; position: absolute; top: 2px; left: 2px; width: 8px; height: 9px; background: var(--tl-marker); clip-path: polygon(0 0, 100% 50%, 0 100%); }
+.os-tl-marker:active { cursor: grabbing; }
+.os-tl-marker-name { position: absolute; top: 0; left: 12px; max-width: 140px; padding: 0 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75); pointer-events: none; }
+.os-tl-marker:hover .os-tl-marker-name { color: #fff; }
+/* The selected flag: a lit stem and a pale plate under the name, the same reading as a selected clip's ring. */
+.os-tl-marker.selected::before { width: 3px; box-shadow: 0 0 0 1px #fff; }
+.os-tl-marker.selected .os-tl-marker-name { color: #fff; padding: 0 4px; background: color-mix(in srgb, var(--tl-marker) 22%, transparent); border-radius: 0 3px 3px 0; }
+/* The one `M` has just dropped and not yet sent: drawn a little paler until the plan has it. */
+.os-tl-marker.pending { opacity: 0.8; }
+/* The name box, on the flag being named: a light field so the typed name reads against the dark ruler. */
+.os-tl-marker-name-box { position: absolute; top: 3px; left: 0; z-index: 6; margin-left: 12px; width: 150px; height: 20px; padding: 0 5px; border: 0; border-radius: 3px; background: #fff; color: #111; font: inherit; font-size: 11px; line-height: 20px; box-shadow: 0 0 0 1px var(--tl-marker), 0 2px 6px rgba(0, 0, 0, 0.5); }
+.os-tl-marker-name-box:focus { outline: none; box-shadow: 0 0 0 2px var(--tl-marker), 0 2px 6px rgba(0, 0, 0, 0.5); }
+/* The dragged flag's moment, painted through its ref while the pointer moves - never through state. */
+.os-tl-marker-label { position: absolute; top: 14px; left: 0; z-index: 6; padding: 1px 4px; border-radius: 3px; background: rgba(8, 145, 178, 0.92); color: #fff; font-size: 10px; line-height: 1.2; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; will-change: transform; }
 /* The lanes. Video: the filmstrip; audio: the waveform in Camtasia's pale audio colour, not the brand's - it is the
    original, reference only; narration: the blocks, in the brand colour, because that is the lane being edited. */
 .os-tl-film { display: flex; height: var(--tl-lane-h); overflow: hidden; background: var(--tl-row); border-bottom: 1px solid var(--tl-line); }

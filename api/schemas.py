@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, StringConstraints, field_validator
 
 from core.tone_adapter import get_available_tones
 from core.translator import get_available_languages
@@ -184,23 +184,49 @@ class MusicClipIn(BaseModel):
     fade_out: Number
 
 
+class MarkerIn(BaseModel):
+    """One marker of ``EditIn.markers`` (spec §13.2): a named moment of the
+    PICTURE's source. ``id`` is the client's own handle (``^[a-z0-9_-]{1,32}$``,
+    unique in the list); ``at`` where it sits in SOURCE seconds - never the
+    output's, so a cut moves it with its frame and nothing rewrites it (trap
+    39); ``name`` its text. Exactly these three keys: an unknown one is a
+    422 (``extra="forbid"``), ``at`` is strict so a boolean is not coerced,
+    and ``name`` is strict text so a number is not turned into a name.
+    Every bound - the id, ``at`` inside the source, the name trimmed to 1-80
+    characters - is ``services.edit.validate_markers``'s to refuse, with a
+    400 that names the marker and the field.
+
+    The list is sent whole, as the music is: ``EditIn.markers`` replaces the
+    stored markers, and a body that does not name ``markers`` leaves them
+    alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    at: Number
+    name: StrictStr
+
+
 class EditIn(BaseModel):
     """PUT /api/projects/{pid}/edit: the kept ranges of the source, in source
-    seconds, one list per track - ``video`` and ``narration`` -, and the
-    music lane's clips.
+    seconds, one list per track - ``video`` and ``narration`` -, the music
+    lane's clips, and the markers.
 
-    **One rule for all three keys** (trap 32): a key the body does not name
+    **One rule for all four keys** (trap 32): a key the body does not name
     is UNCHANGED - whatever is stored stays -, ``null`` clears it (a track
-    keeps everything again, the music is gone), and a list replaces it;
-    ``[]`` clears the music too, while an empty track list is a refusal. That
-    is what lets a cut send its tracks and no ``music`` without dropping the
-    clips, and a clip commit send ``music`` and no tracks without dropping
-    the picture's cut. The route tells "not named" from "null" by
-    ``model_fields_set``; a body that names nothing changes nothing.
+    keeps everything again, the music is gone, the markers are gone), and a
+    list replaces it; ``[]`` clears the music and the markers too, while an
+    empty track list is a refusal. That is what lets a cut send its tracks
+    and no ``music`` or ``markers`` without dropping either, a clip commit
+    send ``music`` and no tracks without dropping the picture's cut, and a
+    marker commit send ``markers`` alone. The route tells "not named" from
+    "null" by ``model_fields_set``; a body that names nothing changes
+    nothing.
 
     ``keep`` is the version-1 body and means BOTH tracks, for curl and any
-    older client; the route refuses it beside ``video``, ``narration`` or
-    ``music`` with a 400.
+    older client; the route refuses it beside ``video``, ``narration``,
+    ``music`` or ``markers`` with a 400.
 
     The numbers are strict so a boolean is not coerced to 1.0 (an int is still
     fine), and an unknown key is a 422 - ``extra="forbid"``, the lesson
@@ -208,8 +234,9 @@ class EditIn(BaseModel):
     silently. Everything else about a range - its order, an overlap, a bound
     past the source, NaN and infinity (which JSON lets through and a strict
     float accepts) - is ``services.edit.validate_keep``'s to refuse, with a
-    400 that names the track and the range; and everything about a clip
-    beyond its shape is ``validate_music``'s.
+    400 that names the track and the range; everything about a clip beyond
+    its shape is ``validate_music``'s, and about a marker
+    ``validate_markers``'s.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -218,6 +245,7 @@ class EditIn(BaseModel):
     video: Ranges | None = None
     narration: Ranges | None = None
     music: list[MusicClipIn] | None = None
+    markers: list[MarkerIn] | None = None
 
 
 class OffsetIn(BaseModel):

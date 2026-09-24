@@ -28,6 +28,7 @@ Four things these tests hold in place:
 
 import contextlib
 import json
+import math
 import threading
 import wave
 from pathlib import Path
@@ -134,15 +135,16 @@ def _put_tracks(client, pid, **tracks):
     return client.put(f"/api/projects/{pid}/edit", json=tracks)
 
 
-def _payload(video, narration, source=12.0, music=()):
+def _payload(video, narration, source=12.0, music=(), markers=()):
     """The version-2 answer the routes and the plan carry, for a source of
     ``source`` seconds: a whole track reports the source's length; ``music``
-    is the clips as read back (with ``file_duration`` and ``missing``)."""
+    is the clips as read back (with ``file_duration`` and ``missing``);
+    ``markers`` the markers as read back (with ``timeline_at``)."""
     def track(keep):
         return {"keep": keep, "output_duration": edit.output_duration(keep) if keep else source}
     picture = track(video)
     return {"version": 2, "video": picture, "narration": track(narration), "music": list(music),
-            "source_duration": source, "output_duration": picture["output_duration"]}
+            "markers": list(markers), "source_duration": source, "output_duration": picture["output_duration"]}
 
 
 def _plan(client, pid, **params):
@@ -435,6 +437,7 @@ def test_a_project_with_no_edit_keeps_everything(client):
         "video": {"keep": None, "output_duration": 12.0},
         "narration": {"keep": None, "output_duration": 12.0},
         "music": [],
+        "markers": [],
         "source_duration": 12.0,
         "output_duration": 12.0,
     }
@@ -448,6 +451,7 @@ def test_without_extracted_audio_there_is_no_length_to_report(client):
         "video": {"keep": None, "output_duration": None},
         "narration": {"keep": None, "output_duration": None},
         "music": [],
+        "markers": [],
         "source_duration": None,
         "output_duration": None,
     }
@@ -463,6 +467,7 @@ def test_put_stores_the_ranges_and_get_reads_them_back(client):
         "video": {"keep": [[0.0, 6.0], [7.5, 12.0]], "output_duration": 10.5},
         "narration": {"keep": [[0.0, 6.0], [7.5, 12.0]], "output_duration": 10.5},
         "music": [],
+        "markers": [],
         "source_duration": 12.0,
         "output_duration": 10.5,
     }
@@ -711,6 +716,7 @@ def test_an_edit_whose_audio_has_gone_is_read_back_but_not_applied(client):
         "video": {"keep": KEEP, "output_duration": 10.5},
         "narration": {"keep": KEEP, "output_duration": 10.5},
         "music": [],
+        "markers": [],
         "source_duration": None,
         "output_duration": 10.5,
     }
@@ -1758,3 +1764,351 @@ def test_a_stored_music_list_that_cannot_be_read_refuses_a_clip_commit_and_clear
     assert client.put(f"/api/projects/{pid}/edit", json={"music": []}).status_code == 200
     assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}}
     assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B]}).status_code == 200
+
+
+# ── the markers (E5b): named moments of the picture's source ─────────────────
+#
+# A marker's ``at`` is in SOURCE seconds and nothing rewrites it (trap 39):
+# it is read back with ``timeline_at``, its projection through the PICTURE's
+# list, ``None`` in removed picture. The list joins version 2 as the music
+# did, under the one rule, and at render time the drawn markers are the
+# chapters (``chapters_for``, trap 42).
+
+def _marker(**over) -> dict:
+    """A valid marker; ``over`` replaces fields, and a value of ``...`` removes one."""
+    marker = {"id": "k1", "at": 2.0, "name": "Intro"}
+    for key, value in over.items():
+        if value is ...:
+            marker.pop(key)
+        else:
+            marker[key] = value
+    return marker
+
+
+def _drawn(marker: dict, timeline_at) -> dict:
+    """A stored marker as the routes and the plan report it."""
+    return {**marker, "timeline_at": timeline_at}
+
+
+# Three markers against KEEP (6.0–7.5 removed): before the cut, inside it, after it.
+MARK_A = _marker(id="a", at=1.0, name="Intro")
+MARK_B = _marker(id="b", at=6.5, name="In the hole")
+MARK_C = _marker(id="c", at=9.0, name="Wrap-up")
+MARKS = [MARK_A, MARK_B, MARK_C]
+
+
+def test_valid_markers_come_back_rounded_typed_trimmed_and_sorted_by_at():
+    out = edit.validate_markers(
+        [_marker(id="b", at=5), _marker(id="a", at=1.00049, name="  Intro  "), _marker(id="c", at=12)], 12.0,
+    )
+    assert out == [{"id": "a", "at": 1.0, "name": "Intro"}, {"id": "b", "at": 5.0, "name": "Intro"}, {"id": "c", "at": 12.0, "name": "Intro"}]
+    assert all(isinstance(marker["at"], float) for marker in out)
+    assert edit.validate_markers([], 12.0) == []
+    # Stable: equal moments keep their order.
+    assert [m["id"] for m in edit.validate_markers([_marker(id="y", at=3), _marker(id="x", at=3)], 12.0)] == ["y", "x"]
+    # The edges of the bound, and the name's limit, exactly.
+    assert [m["at"] for m in edit.validate_markers([_marker(at=0), _marker(id="k2", at=12.0)], 12.0)] == [0.0, 12.0]
+    assert len(edit.validate_markers([_marker(name="x" * 80)], 12.0)[0]["name"]) == 80
+    # A control character at either END is whitespace to the strip; inside, a refusal (the table).
+    assert edit.validate_markers([_marker(name="\tIntro\n")], 12.0)[0]["name"] == "Intro"
+    # Anything printable rides through: accents, symbols, an em dash, CJK.
+    assert edit.validate_markers([_marker(name="Q&A: très bien — 日本 ✓")], 12.0)[0]["name"] == "Q&A: très bien — 日本 ✓"
+    # -0.0004 rounds to a plain 0.0, never a negative zero.
+    assert repr(edit.validate_markers([_marker(at=-0.0004)], 12.0)[0]["at"]) == "0.0"
+    # ``None`` skips the upper bound only (a read-back), never the rest.
+    assert edit.validate_markers([_marker(at=99)], None)[0]["at"] == 99.0
+    with pytest.raises(ValueError):
+        edit.validate_markers([_marker(at=-1)], None)
+
+
+@pytest.mark.parametrize("markers, message", [
+    ("nope", "The markers must be a list of {id, at, name} objects."),
+    ({"id": "k1"}, "The markers must be a list of {id, at, name} objects."),
+    ([1], "marker 1 must be an object with id, at, name."),
+    ([_marker(name=...)], "marker 1 (k1): missing name; a marker has exactly id, at, name."),
+    ([_marker(colour="red")], "marker 1 (k1): unknown colour; a marker has exactly id, at, name."),
+    ([_marker(at=..., colour="red")], "marker 1 (k1): missing at and unknown colour; a marker has exactly id, at, name."),
+    ([_marker(id="K1")], "marker 1: id must be 1-32 characters of a-z, 0-9, _ or -."),
+    ([_marker(id="")], "marker 1: id must be 1-32 characters of a-z, 0-9, _ or -."),
+    ([_marker(id="x" * 33)], "marker 1: id must be 1-32 characters of a-z, 0-9, _ or -."),
+    ([_marker(id=7)], "marker 1: id must be 1-32 characters of a-z, 0-9, _ or -."),
+    ([_marker(), _marker(at=3)], "marker 2 (k1): id 'k1' is already used by marker 1."),
+    ([_marker(at=True)], "marker 1 (k1): at must be a number."),
+    ([_marker(at="2")], "marker 1 (k1): at must be a number."),
+    ([_marker(at=None)], "marker 1 (k1): at must be a number."),
+    ([_marker(at=math.nan)], "marker 1 (k1): at must be a finite number."),
+    ([_marker(at=math.inf)], "marker 1 (k1): at must be a finite number."),
+    ([_marker(at=10 ** 400)], "marker 1 (k1): at must be a finite number."),
+    ([_marker(at=-0.001)], "marker 1 (k1): at (-0.001) is before 0."),
+    ([_marker(at=12.001)], "marker 1 (k1): at (12.001) is past the end of the source, which is 12.000 s long."),
+    ([_marker(name=3)], "marker 1 (k1): name must be text."),
+    ([_marker(name=None)], "marker 1 (k1): name must be text."),
+    ([_marker(name="   ")], "marker 1 (k1): name must not be empty."),
+    ([_marker(name="x" * 81)], "marker 1 (k1): name is 81 characters; the limit is 80."),
+    ([_marker(name=" " + "x" * 81 + " ")], "marker 1 (k1): name is 81 characters; the limit is 80."),
+    ([_marker(name="a\nb")], "marker 1 (k1): name must not contain control characters."),
+    ([_marker(name="a\tb")], "marker 1 (k1): name must not contain control characters."),
+    ([_marker(name="a\x00b")], "marker 1 (k1): name must not contain control characters."),
+    ([_marker(name="a\x7fb")], "marker 1 (k1): name must not contain control characters."),
+    ([_marker(name="a\rb")], "marker 1 (k1): name must not contain control characters."),
+])
+def test_a_bad_marker_is_refused_by_position_id_and_field(markers, message):
+    with pytest.raises(ValueError) as caught:
+        edit.validate_markers(markers, 12.0)
+    assert str(caught.value) == message
+
+
+def test_a_marker_list_long_enough_to_be_an_attack_on_the_record_is_refused():
+    many = [_marker(id=f"k{i}", at=i / 100) for i in range(edit.MAX_MARKERS + 1)]
+    with pytest.raises(ValueError) as caught:
+        edit.validate_markers(many, 12.0)
+    assert str(caught.value) == "The markers are limited to 200; this edit has 201."
+    assert len(edit.validate_markers(many[:-1], 12.0)) == 200
+
+
+@pytest.mark.parametrize("length", [0, -1, math.nan, math.inf, "twelve"])
+def test_an_unknown_source_length_cannot_check_markers(length):
+    with pytest.raises(ValueError) as caught:
+        edit.validate_markers([_marker()], length)
+    assert str(caught.value) == "The source's length is unknown, so the markers cannot be checked against it."
+
+
+def test_stored_markers_reads_absent_none_and_a_version_1_record_as_none():
+    assert edit.stored_markers({}, None) == []
+    assert edit.stored_markers({"edit": {"version": 2, "video": {"keep": KEEP}}}, KEEP) == []
+    assert edit.stored_markers({"edit": {"version": 2, "markers": None}}, None) == []
+    assert edit.stored_markers({"edit": {"version": 2, "markers": []}}, None) == []
+    assert edit.stored_markers({"edit": {"version": 1, "keep": KEEP}}, KEEP) == [], "a version-1 record never wrote one"
+
+
+def test_stored_markers_project_through_the_pictures_list_and_hide_one_in_removed_picture():
+    """Trap 39: a cut before a marker moves it with its frame, a cut over it
+    hides it, a restore brings it back - and the stored ``at`` is the same
+    number throughout."""
+    record = {"edit": {"version": 2, "markers": [MARK_C, MARK_A, MARK_B]}}
+    # A whole picture: where it lands is where it is.
+    assert edit.stored_markers(record, None) == [_drawn(MARK_A, 1.0), _drawn(MARK_B, 6.5), _drawn(MARK_C, 9.0)]
+    # KEEP removes 6.0–7.5: before it unmoved, over it hidden, after it 1.5 s earlier.
+    assert edit.stored_markers(record, KEEP) == [_drawn(MARK_A, 1.0), _drawn(MARK_B, None), _drawn(MARK_C, 7.5)]
+    # Both edges of the cut are the join: the same output instant.
+    edges = [_marker(id="e1", at=6.0), _marker(id="e2", at=7.5)]
+    assert [m["timeline_at"] for m in edit.stored_markers({"edit": {"version": 2, "markers": edges}}, KEEP)] == [6.0, 6.0]
+    # The picture restored to 7.0: the hidden marker is back, 0.5 s before where it was spoken... at its own frame.
+    assert edit.stored_markers(record, [[0.0, 7.0], [7.5, 12.0]])[1] == _drawn(MARK_B, 6.5)
+    # A head cut: everything moves earlier.
+    assert [m["timeline_at"] for m in edit.stored_markers(record, [[0.5, 12.0]])] == [0.5, 6.0, 8.5]
+    # Sorted as read, whatever order they were stored in.
+    assert [m["id"] for m in edit.stored_markers(record, None)] == ["a", "b", "c"]
+
+
+def test_a_broken_marker_list_is_refused_on_read_naming_the_marker():
+    with pytest.raises(ValueError) as caught:
+        edit.stored_markers({"edit": {"version": 2, "markers": [_marker(at=-1)]}}, None)
+    assert str(caught.value) == (
+        "This project's markers cannot be read (marker 1 (k1): at (-1.000) is before 0.); "
+        "clear the edit and place them again."
+    )
+    with pytest.raises(ValueError, match="cannot be read"):
+        edit.stored_markers({"edit": {"version": 2, "markers": "nope"}}, None)
+
+
+def test_apply_carries_the_markers_through_the_video_list_and_changes_nothing_else():
+    record = {"edit": {"version": 2, "video": {"keep": KEEP}, "markers": MARKS}}
+    applied = edit.apply(record, SEGMENTS, 12.0)
+    assert applied.markers == [_drawn(MARK_A, 1.0), _drawn(MARK_B, None), _drawn(MARK_C, 7.5)]
+    assert applied.cut and not applied.projected and applied.sentences is SEGMENTS
+    # Through the VIDEO list, never the narration's (trap 18): a narration-only edit moves no marker.
+    narrated = edit.apply({"edit": {"version": 2, "narration": {"keep": KEEP}, "markers": MARKS}}, SEGMENTS, 12.0)
+    assert [m["timeline_at"] for m in narrated.markers] == [1.0, 6.5, 9.0]
+    # No edit at all, and a markers-only edit, both carry them at their own moments.
+    assert edit.apply({}, SEGMENTS, 12.0).markers == []
+    alone = edit.apply({"edit": {"version": 2, "markers": MARKS}}, SEGMENTS, 12.0)
+    assert [m["timeline_at"] for m in alone.markers] == [1.0, 6.5, 9.0]
+    assert not alone.cut and not alone.projected and alone.sentences is SEGMENTS and alone.output_duration == 12.0
+
+
+def test_put_stores_the_markers_and_the_get_and_the_plan_carry_them(client):
+    pid = _video()
+    r = client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_B, MARK_A]})
+    assert r.status_code == 200, r.text
+    expected = _payload(None, None, markers=[_drawn(MARK_A, 1.0), _drawn(MARK_B, 6.5)])
+    assert r.json() == expected
+    assert store.get_project(pid)["edit"] == {"version": 2, "markers": [MARK_A, MARK_B]}, "sorted, three keys, no timeline_at"
+    assert _get(client, pid).json() == expected
+    assert _plan(client, pid)["edit"] == expected
+    detail = _edit_rows()[0]["detail"]
+    assert detail == "video: whole; narration: whole; markers: 2"
+    assert "Intro" not in detail and "6.5" not in detail, "never a name or a moment"
+
+
+def test_the_one_rule_holds_for_the_markers_as_it_does_for_the_music(client, library):
+    """Absent = unchanged, null or [] = cleared, a list = set (trap 32): a
+    cut never drops the markers, a marker commit never drops the cut - and
+    the third leg, which E4b's Reviewer once found broken for the music
+    (§12.6's As-built, MINOR 4) and E5b's found unpinned: a markers-only
+    body keeps the MUSIC, and a music-only body keeps the markers."""
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_A]}).status_code == 200
+    assert _put_tracks(client, pid, video=KEEP).status_code == 200
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "markers": [MARK_A]}, "a cut keeps them"
+    assert _put(client, pid, KEEP).status_code == 200
+    assert store.get_project(pid)["edit"]["markers"] == [MARK_A], "so does the version-1 body"
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B]}).status_code == 200
+    assert store.get_project(pid)["edit"]["markers"] == [MARK_A], "and so does a clip commit"
+
+    r = client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_C, MARK_B]})
+    assert r.status_code == 200 and r.json()["markers"] == [_drawn(MARK_B, None), _drawn(MARK_C, 7.5)]
+    assert r.json()["music"] == [_read_back(CLIP_B)]
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": KEEP}, "music": [CLIP_B], "markers": [MARK_B, MARK_C],
+    }, "a markers-only commit keeps the cut AND the music"
+
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": []})
+    assert r.status_code == 200 and r.json()["music"] == [] and r.json()["markers"] == [_drawn(MARK_B, None), _drawn(MARK_C, 7.5)]
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": KEEP}, "markers": [MARK_B, MARK_C],
+    }, "clearing the music keeps the markers"
+
+    r = client.put(f"/api/projects/{pid}/edit", json={"narration": None, "markers": None})
+    assert r.status_code == 200 and r.json()["markers"] == []
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}}, "null clears; the video list is not this body's business"
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_A]}).status_code == 200
+    r = client.put(f"/api/projects/{pid}/edit", json={"markers": []})
+    assert r.status_code == 200 and store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}}, "[] clears"
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_A]}).status_code == 200
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": None, "markers": None})
+    assert r.status_code == 200 and "edit" not in store.get_project(pid), "the last key cleared takes the edit with it"
+
+    # Nothing but markers, cleared, on a project that never had an edit: nothing stored, nothing recorded.
+    fresh = _video()
+    r = client.put(f"/api/projects/{fresh}/edit", json={"markers": []})
+    assert r.status_code == 200 and r.json() == _payload(None, None) and "edit" not in store.get_project(fresh)
+    # ``keep`` beside ``markers`` is the version-1 body beside a version-2 key.
+    r = client.put(f"/api/projects/{fresh}/edit", json={"keep": KEEP, "markers": [MARK_A]})
+    assert r.status_code == 400 and r.json()["detail"] == "Send either keep (both tracks) or video / narration / music / markers, not both."
+    details = [row["detail"] for row in _edit_rows() if "markers" in row["detail"]]
+    assert details and all(d.endswith("markers: 1") or d.endswith("markers: 2") for d in details)
+
+
+def test_a_marker_body_is_strict(client):
+    pid = _video()
+    before = _record_bytes(pid)
+    for body in (
+        {"markers": [{**MARK_A, "colour": "red"}]},   # an unknown key
+        {"markers": [{"id": "k1", "at": True, "name": "x"}]},   # a bool is not a second
+        {"markers": [{"id": "k1", "at": 1.0, "name": 5}]},   # a number is not a name
+        {"markers": [{"id": 5, "at": 1.0, "name": "x"}]},
+        {"markers": [{"id": "k1", "name": "x"}]},   # a missing key
+        {"markers": {"id": "k1", "at": 1.0, "name": "x"}},   # not a list
+    ):
+        r = client.put(f"/api/projects/{pid}/edit", json=body)
+        assert r.status_code == 422, (body, r.text)
+    # The bounds are the service's, with a 400 that names the marker and the field.
+    r = client.put(f"/api/projects/{pid}/edit", json={"markers": [{"id": "k1", "at": 13, "name": "x"}]})
+    assert r.status_code == 400 and r.json()["detail"] == "marker 1 (k1): at (13.000) is past the end of the source, which is 12.000 s long."
+    r = client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_A, {**MARK_B, "id": "a"}]})
+    assert r.status_code == 400 and r.json()["detail"] == "marker 2 (a): id 'a' is already used by marker 1."
+    r = client.put(f"/api/projects/{pid}/edit", json={"markers": [{"id": "k1", "at": 1.0, "name": "  "}]})
+    assert r.status_code == 400 and r.json()["detail"] == "marker 1 (k1): name must not be empty."
+    assert _record_bytes(pid) == before, "a refused list stores nothing"
+
+
+def test_markers_need_the_sources_length_but_clearing_them_does_not(client):
+    """A marker is measured against the source's length exactly as a range
+    is, so a list with no extracted audio is the same 409; ``null`` and
+    ``[]`` measure nothing."""
+    from services import waveform
+
+    pid = _video(audio_seconds=None)
+    r = client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_A]})
+    assert r.status_code == 409 and r.json()["detail"] == waveform.NO_AUDIO_MESSAGE
+    assert "edit" not in store.get_project(pid)
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": []}).status_code == 200
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": None}).status_code == 200
+    assert _get(client, pid).json()["markers"] == []
+
+
+def test_delete_clears_the_markers_too(client):
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"video": KEEP, "markers": [MARK_A]}).status_code == 200
+    r = client.delete(f"/api/projects/{pid}/edit")
+    assert r.status_code == 200 and r.json() == _payload(None, None)
+    assert "edit" not in store.get_project(pid)
+
+
+def test_a_cut_moves_a_marker_with_its_frame_hides_one_over_it_and_a_restore_brings_it_back(client):
+    """Trap 39 through the routes: the stored moments never change; only
+    where each lands does."""
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": MARKS}).status_code == 200
+    stored_before = json.dumps(store.get_project(pid)["edit"]["markers"])
+    assert [m["timeline_at"] for m in _get(client, pid).json()["markers"]] == [1.0, 6.5, 9.0]
+    assert _put_tracks(client, pid, video=KEEP).status_code == 200
+    assert [m["timeline_at"] for m in _get(client, pid).json()["markers"]] == [1.0, None, 7.5]
+    assert [m["timeline_at"] for m in _plan(client, pid)["edit"]["markers"]] == [1.0, None, 7.5]
+    # The cut narrowed - the picture restored to 7.0: the hidden marker is back at its own frame.
+    assert _put_tracks(client, pid, video=[[0.0, 7.0], [7.5, 12.0]]).status_code == 200
+    assert [m["timeline_at"] for m in _get(client, pid).json()["markers"]] == [1.0, 6.5, 8.5]
+    # Back to a whole picture: every marker where it was.
+    assert _put_tracks(client, pid, video=None).status_code == 200
+    assert [m["timeline_at"] for m in _get(client, pid).json()["markers"]] == [1.0, 6.5, 9.0]
+    assert json.dumps(store.get_project(pid)["edit"]["markers"]) == stored_before, "nothing rewrote a marker"
+
+
+def test_a_version_1_record_reads_as_no_markers_and_a_marker_commit_writes_it_back_as_version_2(client):
+    pid = _video()
+    record = store.get_project(pid)
+    record["edit"] = {"version": 1, "keep": KEEP}
+    store.save_project(record)
+    assert _get(client, pid).json() == _payload(KEEP, KEEP)
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": [MARK_A]}).status_code == 200
+    assert store.get_project(pid)["edit"] == {
+        "version": 2, "video": {"keep": KEEP}, "narration": {"keep": KEEP}, "markers": [MARK_A],
+    }, "the version-1 cut survives a call that names neither track"
+
+
+def test_an_unreadable_marker_list_is_a_400_on_the_get_and_refuses_a_cut_before_it_is_written(client):
+    """E1's rule for the markers: never a silent nothing. Clearing them is the way out the wording names."""
+    pid = _video()
+    record = store.get_project(pid)
+    record["edit"] = {"version": 2, "markers": [{"id": "k1", "at": -1, "name": "x"}]}
+    store.save_project(record)
+    before = _record_bytes(pid)
+    wording = "This project's markers cannot be read (marker 1 (k1): at (-1.000) is before 0.); clear the edit and place them again."
+    r = _get(client, pid)
+    assert r.status_code == 400 and r.json()["detail"] == wording
+    r = _put_tracks(client, pid, video=KEEP)
+    assert r.status_code == 400 and r.json()["detail"] == wording
+    assert _record_bytes(pid) == before, "refused before the write"
+    r = client.get(f"/api/projects/{pid}/narration/plan")
+    assert r.status_code == 400 and r.json()["detail"] == wording
+    assert client.put(f"/api/projects/{pid}/edit", json={"markers": []}).status_code == 200
+    assert "edit" not in store.get_project(pid)
+
+
+def test_chapters_for_runs_each_marker_to_the_next_and_the_last_to_the_outputs_end():
+    """Decision 3, trap 42: computed from the record as it stands, through
+    the picture's list as stored, in whole milliseconds."""
+    cut = {"edit": {"version": 2, "video": {"keep": KEEP}, "markers": MARKS}}
+    assert edit.chapters_for(cut, 12.0) == [(1000, 7500, "Intro"), (7500, 10500, "Wrap-up")], (
+        "the hidden marker is no chapter; the last runs to the cut picture's end"
+    )
+    # A whole picture: the last runs to the source's end.
+    assert edit.chapters_for({"edit": {"version": 2, "markers": [MARK_C, MARK_A]}}, 12.0) == [(1000, 9000, "Intro"), (9000, 12000, "Wrap-up")]
+    # Nothing to write: no edit, no markers, only hidden markers.
+    assert edit.chapters_for({}, 12.0) == []
+    assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}}}, 12.0) == []
+    assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}, "markers": [MARK_B]}}, 12.0) == []
+    # Whole milliseconds, rounded: 1.0004 → 1000, 2.9996 → 3000.
+    close = [_marker(id="p", at=1.0004, name="P"), _marker(id="q", at=2.9996, name="Q")]
+    assert edit.chapters_for({"edit": {"version": 2, "markers": close}}, 12.0) == [(1000, 3000, "P"), (3000, 12000, "Q")]
+    # No chapter of no length: a marker at the output's very end, or two on
+    # the same instant (either side of a cut both land on the join).
+    edges = [_marker(id="e1", at=6.0, name="Left"), _marker(id="e2", at=7.5, name="Right"), _marker(id="e3", at=12.0, name="End")]
+    assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}, "markers": edges}}, 12.0) == [(6000, 10500, "Right")]
+    # Computed NOW from the record given, never cached: the same markers, another list, another answer.
+    later = {"edit": {"version": 2, "video": {"keep": [[0.0, 7.0], [7.5, 12.0]]}, "markers": MARKS}}
+    assert edit.chapters_for(later, 12.0) == [(1000, 6500, "Intro"), (6500, 8500, "In the hole"), (8500, 11500, "Wrap-up")]
+    # An unreadable edit is the same refusal the render already gives.
+    with pytest.raises(ValueError):
+        edit.chapters_for({"edit": {"version": 2, "markers": "nope"}}, 12.0)

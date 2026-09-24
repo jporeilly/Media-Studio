@@ -786,20 +786,25 @@ export function sameMusic(a: MusicClip[], b: MusicClip[]): boolean {
 }
 
 /**
- * A fresh clip id: `^[a-z0-9_-]{1,32}$`, as the server's `_CLIP_ID_RE` wants,
- * and not one of `taken` — never a number the list is renumbered by, because
- * the id is the handle the selection and the undo stack hold.
+ * A fresh id under `prefix`: `^[a-z0-9_-]{1,32}$`, as the server's id rule
+ * wants, and not one of `taken` — never a number the list is renumbered by,
+ * because the id is the handle the selection and the undo stack hold.
  */
-export function mintClipId(taken: Iterable<string> = [], random: () => number = Math.random): string {
+function mintId(prefix: string, taken: Iterable<string>, random: () => number): string {
   const held = new Set(taken);
   for (let attempt = 0; attempt < 64; attempt++) {
-    const id = `m${Math.floor(random() * 0xffffff).toString(36)}${attempt > 8 ? attempt.toString(36) : ""}`;
+    const id = `${prefix}${Math.floor(random() * 0xffffff).toString(36)}${attempt > 8 ? attempt.toString(36) : ""}`;
     if (!held.has(id)) return id;
   }
   // Exhausted 64 draws (a fake random that never moves): fall back to a
   // counter, so a mint always answers with a free id rather than a duplicate
   // the server would refuse.
-  for (let n = 0; ; n++) if (!held.has(`m${n.toString(36)}`)) return `m${n.toString(36)}`;
+  for (let n = 0; ; n++) if (!held.has(`${prefix}${n.toString(36)}`)) return `${prefix}${n.toString(36)}`;
+}
+
+/** A fresh clip id (`m…`), as the server's `_CLIP_ID_RE` wants and not one of `taken`. */
+export function mintClipId(taken: Iterable<string> = [], random: () => number = Math.random): string {
+  return mintId("m", taken, random);
 }
 
 /**
@@ -1116,15 +1121,19 @@ export function clipSnapTargets(args: {
 /**
  * ONE candidate set for every gesture that places a cut (E5a, spec §13.4):
  * 0, the output's end, the playhead, every join, every sentence pin — each
- * block's drawn start and end, `pins`, which the component passes — and every
- * clip's two edges. The green and red handles, a Ctrl+drag range's ends and a
- * piece's trimmed edge all snap to this, built once at the gesture's start
- * (trap 41), through `snap` unchanged. Deduplicated at the stored precision
- * and sorted, so a hundred pins is a small array and a tie is the earlier
- * moment. The block and clip drags keep their own subsets
- * (`clipSnapTargets`, and the block's gathered in the component).
+ * block's drawn start and end, `pins`, which the component passes —, every
+ * clip's two edges and (E5b) every DRAWN marker's `timeline_at`, `markers`.
+ * The green and red handles, a Ctrl+drag range's ends, a piece's trimmed
+ * edge and a dragged marker all snap to this, built once at the gesture's
+ * start (trap 41), through `snap` unchanged. Deduplicated at the stored
+ * precision and sorted, so a hundred pins is a small array and a tie is the
+ * earlier moment. The block and clip drags keep their own subsets
+ * (`clipSnapTargets`, and the block's gathered in the component). A dragged
+ * marker's own moment is left out by the caller, as a dragged clip's is.
  */
-export function snapTargets(args: { playhead: number; duration: number; joins: number[]; pins: number[]; clips: MusicClip[] }): number[] {
+export function snapTargets(args: {
+  playhead: number; duration: number; joins: number[]; pins: number[]; clips: MusicClip[]; markers?: number[];
+}): number[] {
   const out = new Set<number>([0, round3(Math.max(0, args.duration)), round3(Math.max(0, args.playhead))]);
   for (const at of args.joins) out.add(round3(at));
   for (const pin of args.pins) out.add(round3(pin));
@@ -1132,7 +1141,166 @@ export function snapTargets(args: { playhead: number; duration: number; joins: n
     out.add(round3(clip.at));
     out.add(clipEnd(clip));
   }
+  for (const at of args.markers ?? []) out.add(round3(at));
   return [...out].sort((x, y) => x - y);
+}
+
+// ── the markers: named moments of the picture's SOURCE (E5b, spec §13.2) ────
+
+/**
+ * One marker, exactly as the record stores it and `PUT /edit` takes it: `at`
+ * in SOURCE seconds of the picture — like a sentence's `start`, unlike a
+ * clip's `at` — so a cut before it moves it with its frame, a cut over it
+ * hides it, a restore brings it back, and nothing rewrites it (trap 39: the
+ * clips are the deliberate exception, because a clip is not IN the source).
+ * `timeline_at` is the READ-BACK's projection through the picture's list
+ * (`services/edit.py::stored_markers`), `null` for a marker in removed
+ * picture, and is never sent — `markersBody` strips it, because `EditIn`
+ * forbids an unknown key.
+ *
+ * `id` is client-minted and unique in the list (`mintMarkerId`): the
+ * selection, the undo stack and the name box need a handle that survives
+ * re-sorting, and the server never renumbers.
+ */
+export interface Marker {
+  id: string;
+  at: number;
+  name: string;
+  /** Read-back only: where it lands in the output, `null` in removed picture. */
+  timeline_at?: number | null;
+}
+/** A marker the ruler draws: its `timeline_at` is a number. */
+export type DrawnMarker = Marker & { timeline_at: number };
+
+/** `services/edit.py::MAX_MARKERS` and `MAX_MARKER_NAME`. */
+export const MAX_MARKERS = 200;
+export const MAX_MARKER_NAME = 80;
+
+/** A fresh marker id (`k…`), under the same rule as a clip's and not one of `taken`. */
+export function mintMarkerId(taken: Iterable<string> = [], random: () => number = Math.random): string {
+  return mintId("k", taken, random);
+}
+
+/** A name as the server stores it: trimmed and no longer than `MAX_MARKER_NAME`; `""` when nothing is left. */
+export function markerName(name: string): string {
+  return name.trim().slice(0, MAX_MARKER_NAME).trim();
+}
+
+/**
+ * What the name box hands the server: `markerName` of the typed text with
+ * every control character (below U+0020, and U+007F) removed first — a
+ * pasted name can carry a tab or a newline the box cannot show, the server
+ * refuses one inside a name (a chapter title is cut at it by ffmpeg's own
+ * reader), and the user should never meet that refusal for a paste.
+ */
+export function sanitizeMarkerName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return markerName(name.replace(/[\u0000-\u001f\u007f]/g, ""));
+}
+
+/** A SOURCE moment as the server will accept it: rounded, within `[0, sourceDuration]`. */
+function clampSource(at: number, sourceDuration: number): number {
+  return Math.min(Math.max(0, round3(at)), Math.max(0, round3(sourceDuration)));
+}
+
+/** The markers the ruler draws, in order: those the picture's list projects. */
+export function drawnMarkers(markers: Marker[]): DrawnMarker[] {
+  return markers.filter((marker): marker is DrawnMarker =>
+    typeof marker.timeline_at === "number" && Number.isFinite(marker.timeline_at));
+}
+
+/** The list as the server keeps it: sorted by `at`, stable, a new array. */
+export function sortMarkers(markers: Marker[]): Marker[] {
+  return [...markers].sort((x, y) => x.at - y.at);
+}
+
+/**
+ * The marker `M` drops: at the playhead's SOURCE moment (`toSource(tOutput,
+ * keep)`, inside the source), named "Marker N" with N one more than the
+ * count, its `timeline_at` the output moment it was dropped at so the ruler
+ * can draw it before the plan has it. `null` at the cap, which the caller
+ * says rather than sending a list the server refuses.
+ */
+export function newMarker(
+  markers: Marker[], tOutput: number, keep: Keep, sourceDuration: number, mint: (taken: string[]) => string = mintMarkerId,
+): DrawnMarker | null {
+  if (markers.length >= MAX_MARKERS) return null;
+  const at = clampSource(toSource(tOutput, keep), sourceDuration);
+  const landed = toTimeline(at, keep);
+  return {
+    id: mint(markers.map((marker) => marker.id)),
+    at,
+    name: `Marker ${markers.length + 1}`,
+    timeline_at: landed === null ? round3(Math.max(0, tOutput)) : landed,
+  };
+}
+
+/**
+ * The list with `id` renamed to `name` as the server stores it (trimmed,
+ * `MAX_MARKER_NAME`): the same list when the id is not there, the name would
+ * be empty, or it is the name already, so the caller commits nothing then.
+ * Every other marker is the same object.
+ */
+export function renameMarker(markers: Marker[], id: string, name: string): Marker[] {
+  const next = markerName(name);
+  const held = markers.find((marker) => marker.id === id);
+  if (!held || !next || next === held.name) return markers;
+  return markers.map((marker) => (marker.id === id ? { ...marker, name: next } : marker));
+}
+
+/**
+ * The list with `id` moved to the OUTPUT moment `tOutput`: its `at` becomes
+ * `toSource(tOutput, keep)` — a marker cannot land in removed picture, since
+ * the output axis only shows kept frames —, inside the source, and the list
+ * is re-sorted. The same list when the marker is not there or did not move.
+ */
+export function moveMarker(markers: Marker[], id: string, tOutput: number, keep: Keep, sourceDuration: number): Marker[] {
+  const held = markers.find((marker) => marker.id === id);
+  if (!held) return markers;
+  const at = clampSource(toSource(tOutput, keep), sourceDuration);
+  if (at === round3(held.at)) return markers;
+  return sortMarkers(markers.map((marker) => (marker.id === id ? { ...marker, at, timeline_at: toTimeline(at, keep) } : marker)));
+}
+
+/**
+ * The list a DELETE leaves: the named marker goes and the rest are the same
+ * objects in the same order; an id that is not there leaves the list alone,
+ * so a stale selection clears nothing.
+ */
+export function markersAfterDelete(markers: Marker[], id: string): Marker[] {
+  if (!markers.some((marker) => marker.id === id)) return markers;
+  return markers.filter((marker) => marker.id !== id);
+}
+
+/**
+ * Where Ctrl+[ and Ctrl+] go from `t`: the nearest drawn marker's
+ * `timeline_at` STRICTLY before it and strictly after it (beyond `EPSILON`,
+ * so a playhead sitting on a marker jumps to the next one rather than
+ * staying), `null` where there is none.
+ */
+export function markerNeighbours(drawn: DrawnMarker[], t: number): { previous: number | null; next: number | null } {
+  let previous: number | null = null;
+  let next: number | null = null;
+  for (const marker of drawn) {
+    const at = marker.timeline_at;
+    if (at < t - EPSILON && (previous === null || at > previous)) previous = at;
+    if (at > t + EPSILON && (next === null || at < next)) next = at;
+  }
+  return { previous, next };
+}
+
+/**
+ * The markers as the PUT body wants them: the three stored keys and nothing
+ * else — the read-back's `timeline_at` is DERIVED, and `EditIn` forbids an
+ * unknown key —, `at` rounded and the name as the server stores it.
+ */
+export function markersBody(markers: Marker[]): { id: string; at: number; name: string }[] {
+  return markers.map((marker) => ({ id: marker.id, at: round3(marker.at), name: markerName(marker.name) }));
+}
+
+/** Whether two marker lists are the same in the body's terms — so a gesture that changed nothing commits nothing. */
+export function sameMarkers(a: Marker[], b: Marker[]): boolean {
+  return JSON.stringify(markersBody(a)) === JSON.stringify(markersBody(b));
 }
 
 /**
@@ -1266,12 +1434,14 @@ export function fadePoints(clip: MusicClip, played = 0): FadePoint[] {
 
 /**
  * One state of the edit as a client operation carries it: each track's kept
- * ranges (`null` for a track that keeps everything) and the music clips. The
- * lane is not a track — it has no kept list — but it is part of the edit, so
- * undo and redo carry it (spec §12.5, decision 10).
+ * ranges (`null` for a track that keeps everything), the music clips and
+ * (E5b) the markers. Neither is a track — they have no kept list — but both
+ * are part of the edit, so undo and redo carry them (spec §12.5, decision
+ * 10; §13.2).
  */
 export interface EditOp extends TrackEdit {
   music: MusicClip[];
+  markers: Marker[];
 }
 
 /** The body of `PUT /api/projects/{pid}/edit`: a key left out means UNCHANGED (trap 32). */
@@ -1279,6 +1449,7 @@ export interface EditBody {
   video: Keep | null;
   narration: Keep | null;
   music?: MusicClip[];
+  markers?: { id: string; at: number; name: string }[];
 }
 
 /**
@@ -1300,14 +1471,18 @@ export interface EditBody {
  * impossible on a project with one missing file. E4c keeps a stored missing
  * clip, but the rule stands on its own terms. Compared in the BODY's own
  * terms (`sameMusic`), so the read-back's `file_duration` and `missing` never
- * look like a change.
+ * look like a change. **`markers` ride exactly as `music` does** (E5b): sent
+ * only when the operation changes them, compared by `sameMarkers`, stripped
+ * of the read-back's `timeline_at` — so a cut never re-sends the markers,
+ * and a marker commit never re-sends the clips.
  */
-export function editBody(op: EditOp, committed: { music: MusicClip[] }, sourceDuration: number): EditBody {
+export function editBody(op: EditOp, committed: { music: MusicClip[]; markers: Marker[] }, sourceDuration: number): EditBody {
   const body: EditBody = {
     video: trackBody(op.video, sourceDuration),
     narration: trackBody(op.narration, sourceDuration),
   };
   if (!sameMusic(op.music, committed.music)) body.music = musicBody(op.music);
+  if (!sameMarkers(op.markers, committed.markers)) body.markers = markersBody(op.markers);
   return body;
 }
 
@@ -1343,21 +1518,22 @@ export function editRefusal(detail: string, what: "edit" | "timing"): string {
 /**
  * Every drag the strip knows: a scrub (the ruler or the head), a handle, a
  * Ctrl+drag range, a block move, a marquee, (E4) a music clip moved along
- * its lane or trimmed by one of its edges, and (E5a) a PIECE trimmed by one
- * of its edges — the cut itself, moved.
+ * its lane or trimmed by one of its edges, (E5a) a PIECE trimmed by one of
+ * its edges — the cut itself, moved — and (E5b) a marker's flag moved along
+ * the ruler.
  */
-export type DragKind = "scrub" | "in" | "out" | "range" | "move" | "marquee" | "clip" | "trim" | "piece-trim";
+export type DragKind = "scrub" | "in" | "out" | "range" | "move" | "marquee" | "clip" | "trim" | "piece-trim" | "marker";
 /**
  * What a release that never moved — a click on the thing that was pressed —
  * means per kind: `seek` (the ruler), `pick` (the piece under a marquee's
  * start or under a pressed piece edge, or a seek where the lane has one piece
- * or is locked), `click` (a block, or a music clip and its trim edges: left
- * to its own click handler, and the two handlers deliberately differ — a
- * block's chooses, selects and SEEKS, a clip's only selects, because seeking
- * would jump the playhead back every time the inspector was reached for while
- * the audition plays (the owner's ruling, 2026-09-21)), `keep-selection` (a
- * handle or a Ctrl+click: the selection as it stands), `nothing` (the head,
- * or a pointer the browser cancelled).
+ * or is locked), `click` (a block, a music clip and its trim edges, or a
+ * marker's flag: left to its own click handler, and the handlers deliberately
+ * differ — a block's chooses, selects and SEEKS, a clip's and a marker's only
+ * select, because seeking would jump the playhead back every time the
+ * inspector was reached for while the audition plays (the owner's ruling,
+ * 2026-09-21)), `keep-selection` (a handle or a Ctrl+click: the selection as
+ * it stands), `nothing` (the head, or a pointer the browser cancelled).
  *
  * A piece edge pressed and released without moving is a click ON THE PIECE,
  * so it picks as a click beside the edge would: the edge is a zone of the
@@ -1370,7 +1546,7 @@ export function unmovedRelease(kind: DragKind, seekOnClick: boolean, cancelled: 
   switch (kind) {
     case "scrub": return seekOnClick ? "seek" : "nothing";
     case "marquee": case "piece-trim": return "pick";
-    case "move": case "clip": case "trim": return "click";
+    case "move": case "clip": case "trim": case "marker": return "click";
     default: return "keep-selection";
   }
 }
@@ -1379,10 +1555,10 @@ export function unmovedRelease(kind: DragKind, seekOnClick: boolean, cancelled: 
  * Whether the click the browser fires after a release must be ignored: a
  * real drag happened, or the release itself was the click's meaning (a scrub
  * seeks, a marquee picks, a piece edge picks). A block's, a music clip's, a
- * clip edge's or a handle's unmoved release lets the click through — the
- * element's own handler is where a click is a click, and those handlers
- * deliberately differ: a block's seeks, a clip's only selects (the owner's
- * ruling, 2026-09-21).
+ * clip edge's, a marker's or a handle's unmoved release lets the click
+ * through — the element's own handler is where a click is a click, and those
+ * handlers deliberately differ: a block's seeks, a clip's and a marker's only
+ * select (the owner's ruling, 2026-09-21).
  *
  * The pointer is captured LAZILY, only once a drag has really moved: capture
  * on pointer-down would retarget that click (and a double-click) to the

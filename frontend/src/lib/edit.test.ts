@@ -5,6 +5,8 @@ import fixture from "../../../tests/fixtures/edit_projection.json";
 import {
   EPSILON,
   FRAME_SECONDS,
+  MAX_MARKERS,
+  MAX_MARKER_NAME,
   MAX_OFFSET,
   MAX_PPS,
   anchoredScrollLeft,
@@ -13,8 +15,17 @@ import {
   clickSelectsPiece,
   describeJoin,
   dragOffsets,
+  drawnMarkers,
+  editBody,
   joins,
+  markerName,
+  markerNeighbours,
+  markersAfterDelete,
+  markersBody,
   maxZoom,
+  mintMarkerId,
+  moveMarker,
+  newMarker,
   nextEditForCut,
   nextEditForSplit,
   nextEditForTrim,
@@ -26,15 +37,19 @@ import {
   projectPeaks,
   releaseSuppressesClick,
   removeRange,
+  renameMarker,
   renderEstimate,
   renderSummary,
   restoreRange,
   round3,
   rulerLabel,
   sameEdit,
+  sameMarkers,
+  sanitizeMarkerName,
   sliderFromZoom,
   snap,
   snapTargets,
+  sortMarkers,
   splitAt,
   stepFrame,
   stepZoom,
@@ -52,7 +67,9 @@ import {
   wholeSource,
   zoomFromSlider,
   zoomToSelection,
+  type DrawnMarker,
   type Keep,
+  type Marker,
   type MusicClip,
   type TrackEdit,
   type TrimEdge,
@@ -1246,5 +1263,163 @@ describe("trimLabel — what the drag says", () => {
     expect(trimLabel({ kind: "cut", a: 6, b: 11.967 }, true)).toBe("one frame — use Cut to remove it");
     expect(trimLabel(null, true)).toBe("one frame — use Cut to remove it");
     expect(trimLabel(null, false)).toBe("no change");
+  });
+});
+
+describe("the markers — named moments of the picture's SOURCE (E5b, spec §13.2)", () => {
+  // The fixture's cut: 6.0–7.5 of a 12 s source removed, so the output is
+  // 10.5 s and output 8 is source 9.5; the join at output 6 is source 7.5
+  // (the later range wins, as `toSource` chooses).
+  const SOURCE = 12;
+  const CUT: Keep = [[0, 6], [7.5, 12]];
+  const marker = (over: Partial<Marker> = {}): Marker => ({ id: "k1", at: 2, name: "Intro", ...over });
+  const drawnAt = (id: string, timeline_at: number): DrawnMarker => ({ id, at: timeline_at, name: id, timeline_at });
+
+  it("mints an id under the server's rule, never one already in the list", () => {
+    const id = mintMarkerId(["k1"], () => 0.5);
+    expect(id).toMatch(/^[a-z0-9_-]{1,32}$/);
+    expect(id.startsWith("k")).toBe(true);
+    // A random that never moves: the mint still answers with a free id.
+    const stuck = mintMarkerId([mintMarkerId([], () => 0.25)], () => 0.25);
+    expect(stuck).not.toBe(mintMarkerId([], () => 0.25));
+    expect(stuck).toMatch(/^[a-z0-9_-]{1,32}$/);
+  });
+
+  it("trims a name to the server's rule, and an empty one is nothing", () => {
+    expect(markerName("  Intro  ")).toBe("Intro");
+    expect(markerName("   ")).toBe("");
+    expect(markerName("x".repeat(100))).toHaveLength(MAX_MARKER_NAME);
+    expect(markerName(`${"x".repeat(79)} y`)).toBe(`${"x".repeat(79)}`);
+  });
+
+  it("strips the control characters a paste can carry before the server sees the name", () => {
+    expect(sanitizeMarkerName("In\ttro\n")).toBe("Intro");
+    expect(sanitizeMarkerName("a\r\nb\u0000c\u007fd")).toBe("abcd");
+    expect(sanitizeMarkerName("  \t  ")).toBe("");
+    // Then the same trim and cap as `markerName`; anything printable rides through.
+    expect(sanitizeMarkerName("  Q&A: très bien — 日本 ✓  ")).toBe("Q&A: très bien — 日本 ✓");
+    expect(sanitizeMarkerName(`\t${"x".repeat(100)}`)).toHaveLength(MAX_MARKER_NAME);
+  });
+
+  it("draws only the markers the picture's list projects, in order", () => {
+    const list = [marker({ id: "a", timeline_at: 1 }), marker({ id: "b", timeline_at: null }), marker({ id: "c" }), marker({ id: "d", timeline_at: 7.5 })];
+    expect(drawnMarkers(list).map((held) => held.id)).toEqual(["a", "d"]);
+    expect(drawnMarkers([])).toEqual([]);
+  });
+
+  it("sorts by `at`, stably, into a new array", () => {
+    const list = [marker({ id: "b", at: 5 }), marker({ id: "a", at: 1 }), marker({ id: "c", at: 5 })];
+    const sorted = sortMarkers(list);
+    expect(sorted.map((held) => held.id)).toEqual(["a", "b", "c"]);
+    expect(sorted).not.toBe(list);
+    expect(sorted[0]).toBe(list[1]);
+  });
+
+  it("drops a marker at the playhead's SOURCE moment, named Marker N, drawn where it was dropped", () => {
+    expect(newMarker([marker()], 8, CUT, SOURCE, () => "k9")).toEqual({ id: "k9", at: 9.5, name: "Marker 2", timeline_at: 8 });
+    // At a join the later range wins, so the marker sits on the first kept
+    // frame after the cut, never in the removed stretch.
+    expect(newMarker([], 6, CUT, SOURCE, () => "k9")).toEqual({ id: "k9", at: 7.5, name: "Marker 1", timeline_at: 6 });
+    // Inside the source at either end.
+    expect(newMarker([], 99, CUT, SOURCE, () => "k9")?.at).toBe(12);
+    expect(newMarker([], -1, CUT, SOURCE, () => "k9")?.at).toBe(0);
+    // A whole picture: the source moment is the output moment.
+    expect(newMarker([], 3.2, wholeKeep(SOURCE), SOURCE, () => "k9")).toEqual({ id: "k9", at: 3.2, name: "Marker 1", timeline_at: 3.2 });
+    // The mint is handed every id in the list.
+    const taken: string[][] = [];
+    newMarker([marker({ id: "a" }), marker({ id: "b" })], 1, CUT, SOURCE, (ids) => { taken.push(ids); return "z"; });
+    expect(taken).toEqual([["a", "b"]]);
+    // The cap: nothing, which the caller says rather than sending 201.
+    const full = Array.from({ length: MAX_MARKERS }, (_, i) => marker({ id: `k${i}`, at: i / 100 }));
+    expect(newMarker(full, 1, CUT, SOURCE)).toBeNull();
+    expect(newMarker(full.slice(1), 1, CUT, SOURCE)).not.toBeNull();
+  });
+
+  it("renames through the server's rule, and hands the same list back when nothing changes", () => {
+    const list = [marker(), marker({ id: "k2", at: 5, name: "Two" })];
+    const next = renameMarker(list, "k2", "  Second  ");
+    expect(next[1]).toEqual({ id: "k2", at: 5, name: "Second" });
+    expect(next[0]).toBe(list[0]);
+    expect(renameMarker(list, "k2", "   ")).toBe(list);
+    expect(renameMarker(list, "k2", "Two")).toBe(list);
+    expect(renameMarker(list, "zz", "x")).toBe(list);
+    expect(renameMarker(list, "k1", "x".repeat(100))[0].name).toHaveLength(MAX_MARKER_NAME);
+  });
+
+  it("moves a marker by its OUTPUT moment into a SOURCE moment through the picture's list, and re-sorts", () => {
+    const list = [marker({ id: "a", at: 1, timeline_at: 1 }), marker({ id: "b", at: 9, timeline_at: 7.5 })];
+    // Output 8 is source 9.5: `a` moves past `b`, and the read-back's projection moves with it.
+    const next = moveMarker(list, "a", 8, CUT, SOURCE);
+    expect(next.map((held) => held.id)).toEqual(["b", "a"]);
+    expect(next[1]).toEqual({ id: "a", at: 9.5, name: "Intro", timeline_at: 8 });
+    expect(next[0]).toBe(list[1]);
+    // A join: output 6 is source 7.5, never 6 — a marker cannot land in removed picture.
+    expect(moveMarker(list, "a", 6, CUT, SOURCE).find((held) => held.id === "a")?.at).toBe(7.5);
+    // Clamped to the source at both ends.
+    expect(moveMarker(list, "a", 99, CUT, SOURCE).find((held) => held.id === "a")?.at).toBe(12);
+    expect(moveMarker(list, "b", -3, CUT, SOURCE).find((held) => held.id === "b")?.at).toBe(0);
+    // Nothing moved, or no such marker: the same list.
+    expect(moveMarker(list, "a", 1, CUT, SOURCE)).toBe(list);
+    expect(moveMarker(list, "zz", 3, CUT, SOURCE)).toBe(list);
+  });
+
+  it("deletes one by id and leaves the rest the same objects; a stale id changes nothing", () => {
+    const list = [marker({ id: "a" }), marker({ id: "b", at: 3 }), marker({ id: "c", at: 4 })];
+    const next = markersAfterDelete(list, "b");
+    expect(next.map((held) => held.id)).toEqual(["a", "c"]);
+    expect(next[0]).toBe(list[0]);
+    expect(next[1]).toBe(list[2]);
+    expect(markersAfterDelete(list, "zz")).toBe(list);
+    expect(markersAfterDelete([], "a")).toEqual([]);
+  });
+
+  it("finds the previous and the next drawn marker strictly either side of the playhead", () => {
+    const drawn = [drawnAt("c", 8), drawnAt("a", 1), drawnAt("b", 4)];
+    expect(markerNeighbours(drawn, 5)).toEqual({ previous: 4, next: 8 });
+    // Sitting ON a marker: strictly before and after, so Ctrl+] moves on rather than staying.
+    expect(markerNeighbours(drawn, 4)).toEqual({ previous: 1, next: 8 });
+    expect(markerNeighbours(drawn, 4.0004)).toEqual({ previous: 1, next: 8 });
+    expect(markerNeighbours(drawn, 0)).toEqual({ previous: null, next: 1 });
+    expect(markerNeighbours(drawn, 9)).toEqual({ previous: 8, next: null });
+    expect(markerNeighbours([], 3)).toEqual({ previous: null, next: null });
+  });
+
+  it("sends the three stored keys and never the read-back's timeline_at, and calls two lists the same in those terms", () => {
+    expect(markersBody([marker({ timeline_at: 2, at: 2.00049, name: " Intro " })])).toEqual([{ id: "k1", at: 2, name: "Intro" }]);
+    expect(sameMarkers([marker({ timeline_at: 2 })], [marker({ timeline_at: null })])).toBe(true);
+    expect(sameMarkers([marker()], [marker({ name: "Other" })])).toBe(false);
+    expect(sameMarkers([marker()], [marker({ at: 2.001 })])).toBe(false);
+    expect(sameMarkers([marker()], [marker({ id: "k2" })])).toBe(false);
+    expect(sameMarkers([], [marker()])).toBe(false);
+    expect(sameMarkers([], [])).toBe(true);
+  });
+
+  it("rides in the body only when the operation changes them, as the music does (editBody)", () => {
+    const held = [marker({ timeline_at: 2 })];
+    const base = { video: CUT, narration: null, music: [] as MusicClip[] };
+    expect("markers" in editBody({ ...base, markers: held }, { music: [], markers: held }, SOURCE)).toBe(false);
+    expect(editBody({ ...base, markers: [] }, { music: [], markers: held }, SOURCE).markers).toEqual([]);
+    expect(editBody({ ...base, markers: [marker({ name: "Renamed", timeline_at: 2 })] }, { music: [], markers: held }, SOURCE).markers)
+      .toEqual([{ id: "k1", at: 2, name: "Renamed" }]);
+    // The read-back's projection is not a change: a cut that hid a marker re-sends nothing.
+    expect("markers" in editBody({ ...base, markers: [marker({ timeline_at: null })] }, { music: [], markers: held }, SOURCE)).toBe(false);
+    // And a marker commit re-sends no clips.
+    const body = editBody({ ...base, markers: [] }, { music: [], markers: held }, SOURCE);
+    expect("music" in body).toBe(false);
+  });
+
+  it("joins the one snap candidate set as the drawn moments, deduplicated and sorted", () => {
+    expect(snapTargets({ playhead: 3, duration: 10.5, joins: [6], pins: [], clips: [], markers: [8, 6, 1.0004] }))
+      .toEqual([0, 1, 3, 6, 8, 10.5]);
+    // Without the key the set is E5a's.
+    expect(snapTargets({ playhead: 3, duration: 10.5, joins: [], pins: [], clips: [] })).toEqual([0, 3, 10.5]);
+  });
+
+  it("treats a flag's unmoved release as a click that selects, letting the click through", () => {
+    expect(unmovedRelease("marker", false, false)).toBe("click");
+    expect(unmovedRelease("marker", true, false)).toBe("click");
+    expect(unmovedRelease("marker", false, true)).toBe("nothing");
+    expect(releaseSuppressesClick("marker", false)).toBe(false);
+    expect(releaseSuppressesClick("marker", true)).toBe(true);
   });
 });

@@ -60,6 +60,22 @@ against the source. A file that has gone since the clip was placed is
 reported ``missing`` on read and refused by the render (trap 25), never
 rendered as silence.
 
+**Markers are named moments of the PICTURE's source** (E5b, spec §13.2)::
+
+    "markers": [{"id": "k3f9a1", "at": 12.5, "name": "Intro"}]
+
+``at`` is in SOURCE seconds, like a sentence's ``start`` and unlike a clip's
+``at`` - so a cut before a marker moves it with its frame, a cut over it
+hides it, a restore brings it back, and nothing ever rewrites it (trap 39;
+the clips are the deliberate exception, because a clip is not IN the
+source). It is read back with ``timeline_at``, the projection through the
+picture's list (``to_timeline``), ``None`` for a marker in removed picture.
+The list joins version 2 additively as the music did - absent is no
+markers - and is validated against the source's length. At render time the
+drawn markers become the MP4's chapters (:func:`chapters_for`, trap 42:
+computed then, from the stored markers projected through the picture's list
+as stored then, cached nowhere).
+
 The arithmetic here is pure and is exercised to exhaustion by
 ``tests/test_edit.py``; the two store functions at the bottom take
 ``services.projects.project_lock`` around their read-modify-write, exactly as
@@ -512,11 +528,174 @@ def stored_music(record: dict, library: dict | None = None) -> list[dict]:
     return [_annotated(clip, library) for clip in checked]
 
 
+# -- the markers ---------------------------------------------------------------
+
+# A marker's keys, exactly (spec §13.2): the id the client minted, the SOURCE
+# moment and the name. ``timeline_at`` is derived on read and never stored.
+MARKER_KEYS = ("id", "at", "name")
+
+# Client-minted, as a clip's: the selection, the undo stack and the name box
+# need a handle that survives re-sorting; the server checks it and never
+# renumbers.
+_MARKER_ID_RE = _CLIP_ID_RE
+
+# Bounds on abuse, not on use: a chapter list is a dozen entries.
+MAX_MARKERS = 200
+MAX_MARKER_NAME = 80
+
+
+def validate_markers(markers, source_duration) -> list[dict]:
+    """The markers as they will be stored, sorted by ``at`` (stable), or
+    ``ValueError`` naming the marker by position and id and the field: a
+    list of at most :data:`MAX_MARKERS` objects with exactly
+    :data:`MARKER_KEYS`; ``id`` matching ``^[a-z0-9_-]{1,32}$`` and unique;
+    ``at`` a finite number, not a bool, rounded to :data:`PRECISION`, within
+    ``[0, source_duration]``; ``name`` text, trimmed, of 1 to
+    :data:`MAX_MARKER_NAME` characters with no control character inside
+    (below U+0020, or U+007F).
+
+    ``source_duration`` is the WAV header's length (``services.waveform``),
+    checked as :func:`validate_keep` checks it. ``None`` skips the upper
+    bound only: it is for reading a stored list back, never for storing one
+    - ``set_edit`` refuses a marker list it cannot measure.
+    """
+    bound = None
+    if source_duration is not None:
+        try:
+            bound = round(float(source_duration), PRECISION)
+        except (TypeError, ValueError):
+            bound = math.nan
+        if not math.isfinite(bound) or bound <= 0:
+            raise ValueError("The source's length is unknown, so the markers cannot be checked against it.")
+    if isinstance(markers, (str, bytes, dict)) or not isinstance(markers, (list, tuple)):
+        raise ValueError("The markers must be a list of {id, at, name} objects.")
+    if len(markers) > MAX_MARKERS:
+        raise ValueError(f"The markers are limited to {MAX_MARKERS}; this edit has {len(markers)}.")
+
+    checked: list[dict] = []
+    seen: dict[str, int] = {}
+    for position, marker in enumerate(markers, start=1):
+        if not isinstance(marker, dict):
+            raise ValueError(f"marker {position} must be an object with {', '.join(MARKER_KEYS)}.")
+        ident = marker.get("id")
+        label = f"marker {position}" + (f" ({ident})" if isinstance(ident, str) and _MARKER_ID_RE.fullmatch(ident) else "")
+        keys = set(marker)
+        if keys != set(MARKER_KEYS):
+            missing = [key for key in MARKER_KEYS if key not in keys]
+            extra = sorted(keys - set(MARKER_KEYS))
+            raise ValueError(
+                f"{label}: " + " and ".join(
+                    part for part in (
+                        f"missing {', '.join(missing)}" if missing else "",
+                        f"unknown {', '.join(extra)}" if extra else "",
+                    ) if part
+                ) + f"; a marker has exactly {', '.join(MARKER_KEYS)}."
+            )
+        if not isinstance(ident, str) or not _MARKER_ID_RE.fullmatch(ident):
+            raise ValueError(f"{label}: id must be 1-32 characters of a-z, 0-9, _ or -.")
+        if ident in seen:
+            raise ValueError(f"{label}: id '{ident}' is already used by marker {seen[ident]}.")
+        seen[ident] = position
+        at = _clip_number(marker, "at", label)
+        if at < 0:
+            raise ValueError(f"{label}: at ({at:.3f}) is before 0.")
+        if bound is not None and at > bound:
+            raise ValueError(f"{label}: at ({at:.3f}) is past the end of the source, which is {bound:.3f} s long.")
+        name = marker.get("name")
+        if not isinstance(name, str):
+            raise ValueError(f"{label}: name must be text.")
+        name = name.strip()
+        if not name:
+            raise ValueError(f"{label}: name must not be empty.")
+        if len(name) > MAX_MARKER_NAME:
+            raise ValueError(f"{label}: name is {len(name)} characters; the limit is {MAX_MARKER_NAME}.")
+        # A title goes into the MP4's chapter list, where a newline or a tab
+        # is a format character and ffmpeg's own reader cuts the title at
+        # it (the Reviewer's NIT 4): refused here; the name box strips them.
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in name):
+            raise ValueError(f"{label}: name must not contain control characters.")
+        checked.append({"id": ident, "at": at, "name": name})
+    checked.sort(key=lambda marker: marker["at"])  # stable: equal moments keep their order
+    return checked
+
+
+def stored_markers(record: dict, video_keep) -> list[dict]:
+    """The record's markers as read back - each with ``timeline_at``, where
+    it lands in the output through the PICTURE's list (``video_keep``, the
+    video track's validated ``keep`` or ``None`` for a whole picture), or
+    ``None`` for a marker that sits in removed picture (trap 39: a marker is
+    projected, never rewritten) - or ``[]`` when the edit has none. A
+    version-1 record never wrote the key and reads as none.
+
+    A list that does not validate in SHAPE is a ``ValueError`` naming the
+    marker, as an unreadable track list is (E1's rule: never a silent
+    nothing); the upper bound is not checked here, since a read has no
+    length to hand and a stored moment past the source cannot be drawn
+    anyway once the picture has a list.
+    """
+    held = record.get("edit")
+    if held is None:
+        return []
+    if not isinstance(held, dict):
+        raise ValueError(UNREADABLE)
+    markers = held.get("markers")
+    if markers is None:
+        return []
+    try:
+        checked = validate_markers(markers, None)
+    except ValueError as exc:
+        raise ValueError(
+            f"This project's markers cannot be read ({exc}); clear the edit and place them again."
+        ) from None
+    return [
+        {**marker, "timeline_at": to_timeline(marker["at"], video_keep) if video_keep else marker["at"]}
+        for marker in checked
+    ]
+
+
+def chapters_for(record: dict, source_duration) -> list[tuple[int, int, str]]:
+    """The chapters a render writes into the MP4 (spec §13.2, decision 3):
+    ``(start_ms, end_ms, title)`` per DRAWN marker, each running from its
+    ``timeline_at`` to the next marker's, the last to the output's end -
+    the picture's length when it is cut, else the source's. A marker in
+    removed picture has no ``timeline_at`` and is no chapter; one that
+    projects to the output's very end, or to the same instant as the next
+    (either side of a cut both map to the join), would be a chapter of no
+    length and is left out. Titles are the names, unescaped: the writer
+    escapes them (``core.video_creator._ffmeta_escape``).
+
+    THE one place the list is computed, and computed from the record as it
+    stands when this is called (trap 42): nothing caches it, and the render
+    calls it with the record it is rendering. ``[]`` when there is nothing
+    to write, which the caller reads as "no remux".
+    """
+    video, _ = stored_tracks(record, source_duration)
+    drawn = [marker for marker in stored_markers(record, video) if marker["timeline_at"] is not None]
+    if not drawn:
+        return []
+    if video:
+        end = output_duration(video)
+    elif source_duration is not None:
+        end = round(float(source_duration), PRECISION)
+    else:
+        return []
+    chapters: list[tuple[int, int, str]] = []
+    for index, marker in enumerate(drawn):
+        start = marker["timeline_at"]
+        stop = drawn[index + 1]["timeline_at"] if index + 1 < len(drawn) else end
+        start_ms, end_ms = int(round(start * 1000)), int(round(stop * 1000))
+        if end_ms <= start_ms:
+            continue
+        chapters.append((start_ms, end_ms, marker["name"]))
+    return chapters
+
+
 # -- the record --------------------------------------------------------------
 
 # The two lists the record may carry (spec §11.1), in the order the payload
 # and the audit name them. E4's ``music`` joins the same version additively
-# and is not a track: it has no kept list, and ``stored_music`` reads it.
+# and is not a track: it has no kept list, and ``stored_music`` reads it;
+# E5b's ``markers`` likewise, read by ``stored_markers``.
 TRACKS = ("video", "narration")
 
 UNREADABLE = (
@@ -598,8 +777,10 @@ class Applied:
     sentences in the coordinates the render will use; how long the output is
     - the picture's length, which is what the render's ``-shortest`` mux
     bounds everything to - and the narration track's own length beside it;
-    and ``music``, the clips as :func:`stored_music` reads them (each with
-    ``file_duration`` and ``missing``), ``[]`` when there are none."""
+    ``music``, the clips as :func:`stored_music` reads them (each with
+    ``file_duration`` and ``missing``), ``[]`` when there are none; and
+    ``markers``, as :func:`stored_markers` reads them through the video
+    list (each with ``timeline_at``), ``[]`` when there are none."""
 
     video: list[list[float]] | None
     narration: list[list[float]] | None
@@ -609,6 +790,7 @@ class Applied:
     output_duration: float | None
     narration_duration: float | None
     music: list = field(default_factory=list)
+    markers: list = field(default_factory=list)
 
     @property
     def keep(self) -> list[list[float]] | None:
@@ -644,9 +826,12 @@ def apply(record: dict, transcript, source_duration, library: dict | None = None
     """
     video, narration = stored_tracks(record, source_duration)
     music = stored_music(record, library)
+    # Through the PICTURE's list: a marker is a moment of the picture's
+    # source, and the output axis is the picture's (trap 39).
+    markers = stored_markers(record, video)
     length = None if source_duration is None else round(float(source_duration), PRECISION)
     if video is None and narration is None:
-        return Applied(None, None, False, False, transcript, length, length, music)
+        return Applied(None, None, False, False, transcript, length, length, music, markers)
     if source_duration is None:
         raise SourceLengthUnknown(
             "This project has an edit but its extracted audio is missing, so the edit cannot be "
@@ -660,6 +845,7 @@ def apply(record: dict, transcript, source_duration, library: dict | None = None
         output_duration(video) if cut else length,
         output_duration(narration) if projected else length,
         music,
+        markers,
     )
 
 
@@ -670,16 +856,18 @@ def _track_payload(keep, length) -> dict:
     return {"keep": keep, "output_duration": output_duration(keep) if keep else length}
 
 
-def payload(video, narration, source_duration, music=()) -> dict:
+def payload(video, narration, source_duration, music=(), markers=()) -> dict:
     """The shape the routes answer with, and what the audition plan embeds as
     ``edit``: one block per track - its kept ranges in SOURCE seconds
     (``None`` = everything) and its output's length -, the music clips as
     read back (each with ``file_duration`` and ``missing``; ``[]`` when there
-    are none), the source's length to :data:`PRECISION` (``None`` before
-    transcription) and the output's, which is THE PICTURE's. The lengths are
-    rounded so a client working in the reported coordinate space can send its
-    last range's end straight back. ``music`` is what :func:`stored_music`
-    returns; a clip without the two derived keys is given them."""
+    are none), the markers as read back (each with ``timeline_at``; ``[]``
+    when there are none), the source's length to :data:`PRECISION` (``None``
+    before transcription) and the output's, which is THE PICTURE's. The
+    lengths are rounded so a client working in the reported coordinate space
+    can send its last range's end straight back. ``music`` is what
+    :func:`stored_music` returns and ``markers`` what :func:`stored_markers`
+    returns; an entry without its derived key is given it."""
     length = None if source_duration is None else round(float(source_duration), PRECISION)
     picture = _track_payload(video, length)
     return {
@@ -690,6 +878,7 @@ def payload(video, narration, source_duration, music=()) -> dict:
             {**clip, "file_duration": clip.get("file_duration"), "missing": bool(clip.get("missing"))}
             for clip in music
         ],
+        "markers": [{**marker, "timeline_at": marker.get("timeline_at")} for marker in markers],
         "source_duration": length,
         "output_duration": picture["output_duration"],
     }
@@ -697,35 +886,38 @@ def payload(video, narration, source_duration, music=()) -> dict:
 
 def describe(record: dict) -> dict:
     """``GET /{pid}/edit``: each track's stored ranges (``None`` =
-    everything), the music clips, the source's length when it is known, and
-    the output's. A version-1 record answers in the version-2 shape, cut
-    together. Reads only."""
+    everything), the music clips, the markers with where each lands, the
+    source's length when it is known, and the output's. A version-1 record
+    answers in the version-2 shape, cut together. Reads only."""
     source_duration = waveform.duration_for(record["id"])
     video, narration = stored_tracks(record, source_duration)
-    return payload(video, narration, source_duration, stored_music(record))
+    return payload(video, narration, source_duration, stored_music(record), stored_markers(record, video))
 
 
-def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) -> tuple[dict, bool]:
+def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED, markers=UNCHANGED) -> tuple[dict, bool]:
     """Store the given lists as the project's edit, and answer with the edit
     as it now stands and whether anything was given to change.
 
-    **One rule for all three keys**: :data:`UNCHANGED` (the default, and what
+    **One rule for all four keys**: :data:`UNCHANGED` (the default, and what
     the route passes for a key the body did not name) leaves that key exactly
-    as it is; ``None`` clears it - a track back to whole, the music gone -;
-    a list is validated and stored. ``[]`` clears the music too (no clips is
-    no music) while an empty track list is a refusal (E1's rule: keep at
-    least one range). So a cut sends its tracks and no ``music`` and never
-    drops the clips, and a clip commit sends ``music`` and no tracks and
-    never drops the picture's cut.
+    as it is; ``None`` clears it - a track back to whole, the music gone, the
+    markers gone -; a list is validated and stored. ``[]`` clears the music
+    and the markers too (no clips is no music; no markers is no markers)
+    while an empty track list is a refusal (E1's rule: keep at least one
+    range). So a cut sends its tracks and no ``music`` and no ``markers`` and
+    never drops the clips or the markers, a clip commit sends ``music`` and
+    no tracks and never drops the picture's cut, and a marker commit sends
+    ``markers`` alone.
 
     MERGED into the stored edit rather than written from scratch: the
-    version, the two tracks and the music are this function's to write, and
-    every other key rides through untouched, as ``stored_tracks`` promises on
-    read. A version-1 record is read as both tracks cut together (§11.1) and
-    rewritten in the version-2 shape here, so that cut survives a call that
-    names neither track. When the merge leaves nothing but the version - no
-    track list and no music - the ``edit`` key is REMOVED, as ``clear_edit``
-    removes it, so a record never carries an edit that is no edit.
+    version, the two tracks, the music and the markers are this function's
+    to write, and every other key rides through untouched, as
+    ``stored_tracks`` promises on read. A version-1 record is read as both
+    tracks cut together (§11.1) and rewritten in the version-2 shape here, so
+    that cut survives a call that names neither track. When the merge leaves
+    nothing but the version - no track list, no music, no markers - the
+    ``edit`` key is REMOVED, as ``clear_edit`` removes it, so a record never
+    carries an edit that is no edit.
 
     A call that names nothing at all is a NO-OP: nothing is written, nothing
     is forgotten, and the answer is the edit as it stands with ``False``
@@ -737,9 +929,10 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
     refused list, and a stored one this version cannot read, leave the
     project exactly as it was. Raises ``ValueError`` for a bad list (naming
     the track and the range, or the clip and the field), an unreadable stored
-    edit, or a deck; ``SourceLengthUnknown`` when a TRACK list is given and
-    the project has no extracted audio (nothing to measure it against - the
-    music is measured against the library, so a music-only call needs none);
+    edit, or a deck; ``SourceLengthUnknown`` when a TRACK list or a MARKER
+    list is given and the project has no extracted audio (nothing to measure
+    it against - the music is measured against the library, so a music-only
+    call needs none, and clearing the markers measures nothing);
     ``ProjectNotFound`` for a project that is gone. The record is re-read
     inside ``services.projects.project_lock`` immediately before it is
     written - the same lock the transcript Save and the narration editor
@@ -758,7 +951,7 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
     nothing and is the way out that wording names.
     """
     given = {name: value for name, value in zip(TRACKS, (video, narration)) if value is not UNCHANGED}
-    if not given and music is UNCHANGED:
+    if not given and music is UNCHANGED and markers is UNCHANGED:
         record = store.get_project(pid)
         if record is None:
             raise ProjectNotFound("Project not found.")
@@ -782,6 +975,16 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
         if record is None:
             raise ProjectNotFound("Project not found.")
         clips = validate_music(music, library, stored=stored_music(record, library))
+    # The markers are measured against the source's length, as a track list
+    # is: a list with no extracted audio is the same refusal, while clearing
+    # them (``None`` or ``[]``) measures nothing and needs none.
+    marks = UNCHANGED
+    if markers is None or (not isinstance(markers, (str, bytes, dict)) and hasattr(markers, "__len__") and len(markers) == 0):
+        marks = None
+    elif markers is not UNCHANGED:
+        if source_duration is None:
+            raise SourceLengthUnknown(waveform.NO_AUDIO_MESSAGE)
+        marks = validate_markers(markers, source_duration)
 
     with store.project_lock(pid):
         record = store.get_project(pid)
@@ -813,13 +1016,18 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
             merged.pop("music", None)
         elif clips is not UNCHANGED:
             merged["music"] = clips
+        if marks is None:
+            merged.pop("markers", None)
+        elif marks is not UNCHANGED:
+            merged["markers"] = marks
         # What the merged edit READS BACK as, before anything is written: a
         # stored list this version cannot read (a hand-edited record, a
         # foreign one) refuses the call instead of landing the cut and then
         # raising on the way out with the write already done.
         held_video, held_narration = stored_tracks({"edit": merged}, source_duration)
         held_music = stored_music({"edit": merged}, library)
-        if any(key in merged for key in (*TRACKS, "music")):
+        held_markers = stored_markers({"edit": merged}, held_video)
+        if any(key in merged for key in (*TRACKS, "music", "markers")):
             record["edit"] = merged
         else:
             # Nothing left to describe: the record reads as one that never
@@ -829,15 +1037,16 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
     # The edit decides which sentences are spoken, and the speaking rate is
     # measured from three of those - so the memoised rate no longer describes
     # this project. Outside the lock: it guards a different thing. (A change
-    # to the music alone moves no sentence; forgetting is still harmless.)
+    # to the music or the markers alone moves no sentence; forgetting is
+    # still harmless.)
     sentences_service.forget_baseline(pid)
-    return payload(held_video, held_narration, source_duration, held_music), True
+    return payload(held_video, held_narration, source_duration, held_music, held_markers), True
 
 
 def clear_edit(pid: str) -> tuple[dict, bool]:
     """Back to keep-everything: the key is removed, not written empty - the
-    music with it, since it is "back to no edit" - so the record reads exactly
-    as one that never had an edit. Returns the payload and whether there was
+    music and the markers with it, since it is "back to no edit" - so the
+    record reads exactly as one that never had an edit. Returns the payload and whether there was
     an edit to clear, so the route can leave a no-op out of the audit log;
     nothing is written or forgotten for a no-op."""
     with store.project_lock(pid):

@@ -843,10 +843,13 @@ def plan(pid: str, *, provider=None, voice=None, speed=None) -> dict:
         # The edit the sentences above were projected through - each track's
         # kept ranges in SOURCE seconds (null = everything), the music clips
         # (each with its file's length and whether the file has gone), the
-        # source's length and the output's - so the client draws the very
-        # edit the plan was made from rather than fetching it separately and
-        # risking a newer one.
-        "edit": edit.payload(applied.video, applied.narration, projected.source_duration, applied.music),
+        # markers (each with where it lands through the picture's list, or
+        # null in removed picture), the source's length and the output's -
+        # so the client draws the very edit the plan was made from rather
+        # than fetching it separately and risking a newer one.
+        "edit": edit.payload(
+            applied.video, applied.narration, projected.source_duration, applied.music, applied.markers,
+        ),
         "sentences": sentences,
     }
 
