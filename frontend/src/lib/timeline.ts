@@ -137,9 +137,9 @@ export const musicLibraryKey = ["music-library"];
  * The library is its own query, but a clip's `missing` is the SERVER's answer,
  * computed against that same library, and it reaches the strip only through
  * the narration plan (`plan.data.edit.music`). Invalidating the library alone
- * left the Music lane's banner insisting the lane was frozen after the user
+ * left the Music lane's banner insisting its clips were missing after the user
  * had taken the banner's OTHER way out and put the file back under its name:
- * every one of its four claims was then false, and its red "Remove the N stuck
+ * every one of its claims was then false, and its red "Remove the N stuck
  * clips" button was still armed over clips whose file had come back — pressing
  * it removed them. Nothing else would have refetched: `refetchOnWindowFocus`
  * is off and `staleTime` is 15 s (main.tsx), so closing the modal is not a

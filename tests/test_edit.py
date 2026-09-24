@@ -26,6 +26,7 @@ Four things these tests hold in place:
   edit leaves the picture whole.
 """
 
+import contextlib
 import json
 import threading
 import wave
@@ -1224,6 +1225,84 @@ def test_a_file_that_left_the_library_is_flagged_on_read_never_refused():
     assert "file 'gone.mp3' is not in the library" in str(exc.value)
 
 
+# E4c (the owner's ruling, 2026-09-24): "you may keep what you have, you may
+# not add what is not there." A stored clip whose file has gone, 4 s of it.
+GONE = _clip(id="g", file="gone.mp3", at=3.0, out=4.0)
+SLICE_CANNOT_CHANGE = (
+    "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice cannot change; "
+    "it was 0.000–4.000 of the file. Move it, level it, fade it, remove it, or put the file back under the same name."
+)
+
+
+def _stored(*clips) -> list[dict]:
+    """The record's clips as ``set_edit`` hands them to ``validate_music``:
+    what ``stored_music`` reads back, ``missing`` and all."""
+    return edit.stored_music({"edit": {"version": 2, "music": list(clips)}}, LIBRARY)
+
+
+def test_a_stored_clip_whose_file_has_gone_may_be_kept_moved_levelled_and_faded():
+    """You may keep what you have: the clip the record already holds is
+    accepted with its file gone - as it is, moved, re-levelled, re-faded -
+    because only its slice depends on a length nobody knows any more."""
+    stored = _stored(GONE, CLIP_B)
+    assert stored[0] == {**GONE, "file_duration": None, "missing": True}
+    for changed in (
+        dict(GONE),
+        {**GONE, "at": 0.0},
+        {**GONE, "at": 99.5},
+        {**GONE, "gain": 1.0},
+        {**GONE, "gain": 0.0, "fade_in": 0.0, "fade_out": 0.0},
+        {**GONE, "fade_in": 2.0, "fade_out": 2.0},  # the fades fill the 4 s slice exactly
+    ):
+        assert edit.validate_music([changed], LIBRARY, stored=stored) == [changed], changed
+    # Beside a live clip, sorted as ever; and the stored list handed in is not touched.
+    assert [c["id"] for c in edit.validate_music([CLIP_B, {**GONE, "at": 20.0}], LIBRARY, stored=stored)] == ["b", "g"]
+    assert stored[0]["missing"] is True and "missing" not in GONE
+
+
+@pytest.mark.parametrize("clip, message", [
+    ({**GONE, "in": 0.5}, SLICE_CANNOT_CHANGE),
+    ({**GONE, "out": 4.5}, "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice cannot change; it was 0.000–4.000"),
+    ({**GONE, "out": 3.5}, "so its slice cannot change"),                # shorter too: the slice is the slice
+    ({**GONE, "in": 0.5, "out": 4.5}, "so its slice cannot change"),     # the same length, elsewhere in the file
+    ({**GONE, "out": 4.0004}, "=="),                                    # rounds onto the stored slice: accepted (below)
+    ({**GONE, "in": 0.0004}, "=="),
+    ({**GONE, "id": "g2"}, "music clip 1 (g2): file 'gone.mp3' is not in the library."),        # a new id
+    ({**GONE, "file": "other.mp3"}, "music clip 1 (g): file 'other.mp3' is not in the library."),  # a stored id, another missing name
+    ({**CLIP_B, "file": "gone.mp3"}, "music clip 1 (b): file 'gone.mp3' is not in the library."),  # a stored LIVE id re-pointed
+    ({**GONE, "fade_in": 2.0, "fade_out": 2.5}, "music clip 1 (g): fade_in + fade_out (4.500 s) is longer than the clip (4.000 s)"),
+    ({**GONE, "at": -1.0}, "music clip 1 (g): at (-1.000) starts before 0"),
+])
+def test_what_a_stored_missing_clip_may_not_become(clip, message):
+    """You may not add what is not there: a new id naming the missing file,
+    a stored id re-pointed at it, or the stored clip with its slice changed
+    - longer, shorter or merely elsewhere in the file - is refused; the
+    slice's refusal says what the slice was and names the ways out. The
+    fades are still bounded by that slice, and ``at`` by 0, as ever."""
+    stored = _stored(GONE, CLIP_B)
+    if message == "==":
+        # A hair off the stored slice rounds back onto it, as every number is
+        # rounded before it is compared: the same clip, not a changed one.
+        assert edit.validate_music([clip], LIBRARY, stored=stored) == [GONE]
+        return
+    with pytest.raises(ValueError) as exc:
+        edit.validate_music([clip], LIBRARY, stored=stored)
+    assert message in str(exc.value), str(exc.value)
+
+
+def test_validate_music_with_nothing_stored_refuses_a_missing_file_exactly_as_before():
+    """Every caller and test from before E4c keeps its meaning: with no
+    stored clips given, a file the library does not have is a refusal."""
+    for kwargs in ({}, {"stored": ()}, {"stored": []}):
+        with pytest.raises(ValueError) as exc:
+            edit.validate_music([GONE], LIBRARY, **kwargs)
+        assert str(exc.value) == "music clip 1 (g): file 'gone.mp3' is not in the library."
+    # A stored clip of ONE missing file is no licence for another.
+    with pytest.raises(ValueError) as exc:
+        edit.validate_music([GONE, _clip(id="h", file="also-gone.mp3")], LIBRARY, stored=_stored(GONE))
+    assert str(exc.value) == "music clip 2 (h): file 'also-gone.mp3' is not in the library."
+
+
 def test_a_broken_clip_list_is_refused_on_read_naming_the_clip():
     """As an unreadable track list is (E1's rule): never a silent no-music."""
     with pytest.raises(ValueError) as exc:
@@ -1507,9 +1586,175 @@ def test_a_file_that_left_the_library_is_reported_missing_by_the_get_and_the_pla
     gone = {**CLIP_A, "file_duration": None, "missing": True}
     assert _get(client, pid).json()["music"] == [gone, _read_back(CLIP_B)]
     assert _plan(client, pid)["edit"]["music"] == [gone, _read_back(CLIP_B)]
-    # Sending the list back as it is - the missing clip included - is refused
-    # (checked to exist at write time); dropping the clip is accepted.
+    # Sending the list back as it is - the missing clip included - is
+    # accepted (E4c: the clip is already stored) and the clip is still
+    # missing on read; dropping the clip is accepted too.
     r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]})
-    assert r.status_code == 400 and "file 'sting.wav' is not in the library" in r.json()["detail"]
+    assert r.status_code == 200, r.text
+    assert r.json()["music"] == [gone, _read_back(CLIP_B)]
     assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B]}).status_code == 200
     assert _get(client, pid).json()["music"] == [_read_back(CLIP_B)]
+
+
+# E4c through the API: the lane is no longer frozen by a file that has gone.
+
+def _lose_sting(monkeypatch) -> dict:
+    """``sting.wav`` leaves the library after CLIP_A was placed on it; the
+    clip as the routes now report it."""
+    monkeypatch.setattr(music, "library", lambda: {"bed.mp3": 30.0})
+    return {**CLIP_A, "file_duration": None, "missing": True}
+
+
+def _record_bytes(pid: str) -> bytes:
+    return (store.PROJECTS_DIR / pid / "project.json").read_bytes()
+
+
+def test_a_stored_missing_clip_is_kept_moved_levelled_and_faded_with_its_fades_still_inside_its_slice(client, library, monkeypatch):
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
+    gone = _lose_sting(monkeypatch)
+
+    # Moved: `at` is the output's axis and needs no file.
+    moved = {**CLIP_A, "at": 7.25}
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [moved, CLIP_B]})
+    assert r.status_code == 200, r.text
+    assert r.json()["music"] == [{**gone, "at": 7.25}, _read_back(CLIP_B)]
+    assert store.get_project(pid)["edit"]["music"] == [moved, CLIP_B], "stored moved, nothing derived stored"
+    # Levelled and faded, the fades filling the 4.5 s slice exactly.
+    shaped = {**moved, "gain": 0.6, "fade_in": 2.0, "fade_out": 2.5}
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [shaped, CLIP_B]})
+    assert r.status_code == 200, r.text
+    assert _get(client, pid).json()["music"][0] == {**shaped, "file_duration": None, "missing": True}
+    assert _plan(client, pid)["edit"]["music"][0]["missing"] is True, "still missing: the render will still refuse"
+    # ... but the fades are bounded by the slice, which is known even now.
+    before = _record_bytes(pid)
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [{**shaped, "fade_out": 2.501}, CLIP_B]})
+    assert r.status_code == 400 and "fade_in + fade_out (4.501 s) is longer than the clip (4.500 s)" in r.json()["detail"]
+    assert _record_bytes(pid) == before, "nothing written"
+    assert [row["detail"] for row in _edit_rows()][0] == "video: whole; narration: whole; music: 2 clips"
+
+
+def test_a_stored_missing_clips_slice_cannot_change(client, library, monkeypatch):
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
+    _lose_sting(monkeypatch)
+    before = _record_bytes(pid)
+    said = ("music clip 1 (a): file 'sting.wav' is not in the library, so its slice cannot change; "
+            "it was 0.000–4.500 of the file. Move it, level it, fade it, remove it, or put the file back under the same name.")
+
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [{**CLIP_A, "in": 1.0}, CLIP_B]})
+    assert r.status_code == 400 and r.json()["detail"] == said, r.text
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [{**CLIP_A, "out": 4.0}, CLIP_B]})
+    assert r.status_code == 400 and r.json()["detail"] == said, r.text
+    # The position in the message is the SENT list's, as ever.
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B, {**CLIP_A, "out": 9.0}]})
+    assert r.status_code == 400 and r.json()["detail"].startswith("music clip 2 (a): file 'sting.wav' is not in the library, so its slice")
+    assert _record_bytes(pid) == before, "nothing written"
+
+
+def test_a_missing_file_can_still_not_be_added(client, library, monkeypatch):
+    """You may not add what is not there: a new clip of the missing file, a
+    stored id re-pointed at it, and the stored clip re-pointed at another
+    missing name are all the existing refusal."""
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
+    _lose_sting(monkeypatch)
+    before = _record_bytes(pid)
+    for body, detail in (
+        ([CLIP_A, CLIP_B, {**CLIP_A, "id": "a2", "at": 6.0}], "music clip 3 (a2): file 'sting.wav' is not in the library."),
+        ([CLIP_A, {**CLIP_B, "file": "sting.wav", "out": 4.5}], "music clip 2 (b): file 'sting.wav' is not in the library."),
+        ([{**CLIP_A, "file": "never.mp3"}, CLIP_B], "music clip 1 (a): file 'never.mp3' is not in the library."),
+    ):
+        r = client.put(f"/api/projects/{pid}/edit", json={"music": body})
+        assert r.status_code == 400 and r.json()["detail"] == detail, r.text
+    assert _record_bytes(pid) == before
+
+
+def test_the_same_bed_laid_twice_and_missing_can_lose_one_half(client, library, monkeypatch):
+    """The spec's own ordinary case (there is no looping): removing one half
+    used to be refused by the other's name."""
+    pid = _video()
+    twice = [CLIP_A, {**CLIP_A, "id": "a2", "at": 6.0}]
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": twice}).status_code == 200
+    gone = _lose_sting(monkeypatch)
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [twice[1]]})
+    assert r.status_code == 200, r.text
+    assert r.json()["music"] == [{**gone, "id": "a2", "at": 6.0}], "the other half kept, still missing"
+    assert store.get_project(pid)["edit"]["music"] == [twice[1]]
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": []}).status_code == 200
+    assert "edit" not in store.get_project(pid)
+
+
+def test_a_live_clip_moves_beside_a_missing_one(client, library, monkeypatch):
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
+    gone = _lose_sting(monkeypatch)
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, {**CLIP_B, "at": 5.0}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["music"] == [gone, _read_back({**CLIP_B, "at": 5.0})]
+
+
+def test_a_cut_of_the_picture_ripples_a_missing_clip_with_the_others(client, library, monkeypatch):
+    """The lane unlocked, the picture cut at 6.0-7.5: the client's ripple
+    moves every clip after the cut 1.5 s earlier and sends the whole list
+    with the video's - the missing clip included, which the server accepts
+    because only its `at` changed."""
+    pid = _video()
+    late_a, late_b = {**CLIP_A, "at": 8.0}, {**CLIP_B, "at": 9.0}
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [late_a, late_b]}).status_code == 200
+    gone = _lose_sting(monkeypatch)
+    rippled = [{**late_a, "at": 6.5}, {**late_b, "at": 7.5}]
+    r = client.put(f"/api/projects/{pid}/edit", json={"video": KEEP, "music": rippled})
+    assert r.status_code == 200, r.text
+    assert r.json() == _payload(KEEP, None, music=[{**gone, "at": 6.5}, _read_back(rippled[1])])
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}, "music": rippled}
+    assert [row["detail"] for row in _edit_rows()][0] == "video: 2 ranges kept, 1.5 s removed; narration: whole; music: 2 clips"
+
+
+def test_a_missing_clip_is_checked_against_the_record_under_the_lock(client, library, monkeypatch):
+    """"Stored" is what the record holds when it is WRITTEN. The list passes
+    against the record read before the lock, a commit that lands in between
+    removes the stored clip, and the re-check inside the lock refuses the
+    now-new clip rather than storing a file nobody may add."""
+    pid = _video()
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
+    _lose_sting(monkeypatch)
+    real_lock = store.project_lock
+    landed: list[str] = []
+
+    def racing_lock(project_id):
+        @contextlib.contextmanager
+        def held():
+            with real_lock(project_id):
+                if not landed:  # the concurrent commit: CLIP_A removed, once
+                    record = store.get_project(project_id)
+                    record["edit"]["music"] = [CLIP_B]
+                    store.save_project(record)
+                    landed.append(project_id)
+                yield
+        return held()
+
+    monkeypatch.setattr(store, "project_lock", racing_lock)
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [{**CLIP_A, "at": 7.0}, CLIP_B]})
+    assert r.status_code == 400 and r.json()["detail"] == "music clip 1 (a): file 'sting.wav' is not in the library.", r.text
+    assert landed == [pid] and store.get_project(pid)["edit"]["music"] == [CLIP_B], "the other commit stands; this one wrote nothing"
+
+
+def test_a_stored_music_list_that_cannot_be_read_refuses_a_clip_commit_and_clearing_is_the_way_out(client, library):
+    """E4c reads the stored clips to know what may be kept, so a stored
+    list this version cannot read is ``stored_music``'s refusal on a clip
+    commit too - not a quiet "nothing stored" that would refuse every
+    missing clip by the wrong sentence, and not weakened into a replace.
+    Clearing the music reads nothing, which is the way out that wording names."""
+    pid = _video()
+    record = store.get_project(pid)
+    record["edit"] = {"version": 2, "video": {"keep": KEEP}, "music": [{"id": "x"}]}
+    store.save_project(record)
+    before = _record_bytes(pid)
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B]})
+    assert r.status_code == 400 and "This project's music cannot be read" in r.json()["detail"], r.text
+    assert "clear the edit" in r.json()["detail"]
+    assert _record_bytes(pid) == before
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": []}).status_code == 200
+    assert store.get_project(pid)["edit"] == {"version": 2, "video": {"keep": KEEP}}
+    assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B]}).status_code == 200

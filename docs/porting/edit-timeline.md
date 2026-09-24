@@ -980,11 +980,11 @@ v2 list (§9 keeps mixing and ducking the *original* audio). **Designed in §12 
 BUILT, in both halves: E4a — the library, the model and the render pass — on 2026-09-21, and
 E4b — the lane, the gestures, the inspector and the audition — on 2026-09-22; the two blocks
 after this sketch record them. Both are unreleased: 0.9.0 ships them together.** E4 is therefore
-complete except **E4c**, the one question the build raised and did not answer — whether the
-server should keep an already-stored clip whose file has gone, so that only the render refuses
-and the lane stays editable (§12.5's *As built*; it is the owner's call). The sketch below stands
-as the outline of the whole phase — a second lane on the same timeline, which fits the per-track
-shape E3 gave the edit.
+complete: **E4c**, the one question the build raised and did not answer — whether the server
+should keep an already-stored clip whose file has gone, so that only the render refuses and the
+lane stays editable — was the owner's call, taken and built on 2026-09-24 (§12.5's *As built —
+E4c*). The sketch below stands as the outline of the whole phase — a second lane on the same
+timeline, which fits the per-track shape E3 gave the edit.
 
 - **The model.** `edit.version` 2 gains `"music": [{file, at, in, out, gain, fade_in,
   fade_out}]` — `file` a name in the music **library**, `at` where the clip starts in
@@ -2147,6 +2147,57 @@ you may not add what is not there" — so the lane stays editable and only the r
 is all trap 25 ever claimed. Until that is taken, `missing` is a modelled state the editor can
 leave only by deleting.
 
+***As built* — E4c, taken and built 2026-09-24: the server keeps what is stored.** The owner
+took the question above in exactly those words — *"you may keep what you have, you may not add
+what is not there"* — and `services/edit.py::_check_music` now reads them literally. Storing a
+music list (`validate_music`, from `set_edit`, from `PUT /edit`) accepts a clip whose file the
+library has lost **iff the record already holds a clip with the same `id`, the same `file` and
+the same `in` and `out`**. Everything else about it — `at` (a move, or a cut's ripple), `gain`,
+the two fades — may change and is checked as a live clip's is, the fades against the slice's own
+length, which is known. The slice cannot change because the file it slices cannot be measured:
+`out` could run past a length nobody knows, and a longer slice of an absent file is as much
+"adding what is not there" as a new clip of it. Refused, by position and id as ever: a new id
+naming a missing file, and a stored id re-pointed at one, with the old sentence (*file 'x' is not
+in the library*); a stored missing clip whose `in` or `out` differs, with a new one that says the
+file is not in the library **so its slice cannot change**, what the slice was (*it was
+0.000–4.500 of the file*) and the ways out (*move it, level it, fade it, remove it, or put the
+file back under the same name*). "Stored" is what the record holds when it is **written**:
+`set_edit` checks the list against the record read before the lock, so a refused list writes
+nothing, and **again against the record re-read inside it** — a commit landing in between may
+have removed the very clip the first check let through, and a test races exactly that. A stored
+list this version cannot read is `stored_music`'s error on a clip commit now too (the check has
+to read it to know what may be kept; before E4c a clip commit replaced such a list unread);
+clearing the music reads nothing and is the way out that wording names. The render's refusal
+(trap 25) and the read-back are untouched, and `validate_music` with no `stored` given refuses
+exactly as before, so every earlier caller keeps its meaning. On the client the lane is no longer
+frozen: the banner keeps its place and its button but says what is true now — the render will
+refuse until the clips are removed or the files put back, and the clips can be moved, levelled
+and faded but not trimmed; **Delete takes one clip**, missing or not (`clipsAfterDelete` is the
+plain rule again), and the banner's button has a rule of its own (`withoutMissing`, which hands
+back the same array when nothing is missing, so trap 37's guard is `kept === clips`);
+`editRefusal` lost its frozen-lane paragraph and, with it, `aboutTheLibrary`; and **a missing
+clip has a body and no edges** — `clipAt` answers "body" wherever it is pressed and the strip
+draws no edge overlays on it, so no `ew-resize` cursor promises a trim the server would refuse.
+`trimClip` is left exactly as it was: the only path to it is a drag whose zone `clipAt` chose,
+and it never chooses an edge on a missing clip. The ripple is unchanged — a missing clip after
+the cut moves with the others, which the server accepts. One consequence is worth knowing: a cut
+or a split whose interval falls **across** a missing clip trims or splits it, which changes its
+slice or mints a new id, and the server refuses that with the sentences above. As first built the
+client did not guard it, and the server's slice sentence reached the user for a gesture it does not
+describe — the Reviewer's M1, fixed the same day: `lib/edit.ts::missingAcross` names the missing
+clips a cut or a split would slice, by `cutMusic`'s own arithmetic (a remnant the slicer would drop
+is not named, so the guard never refuses what the server would take; a property test over random
+cuts holds the two together), and `cutSelection` and `splitAtPlayhead` refuse before the PUT —
+under the locks the slicing itself reads, so never for a harmless gesture: the cut only with
+Video and Music both unlocked (`musicAfterCut` passes the list through otherwise), the split
+with Music unlocked or by Ctrl+Shift+S, which splits regardless of the locks — in the strip's
+own words: the gesture and where, the file, why, and both ways out with the one that keeps the
+clip first, *lock the Music lane and cut the picture alone, or remove the clip first* — the
+banner saying so before the gesture, and the server's sentence left behind it as the backstop.
+The brief for this build also named inspector `in`/`out` boxes to disable — there are none; the
+inspector shows the slice as text, and that text now says why the clip cannot be trimmed. Trap 35
+is closed by this.
+
 ***As built* — the ripple rounds the cut's bounds ONCE, so a clip lands ON the join.** `cutMusic`
 first rounded its intermediate subtractions as well as its results, and a millisecond fell out of
 the gap: on a real Ctrl+drag cut of the output at `[9.9856, 13.3144]` — a gesture whose bounds
@@ -2406,8 +2457,10 @@ once the banner 35 describes was actually used.)*
     out. Whenever a state is modelled as "broken but stored", ask the question in the same
     breath: *what is the gesture that leaves it, and can the user reach it?* A validator that
     treats "keep what is already stored" and "add something new" alike will answer no. (E4b
-    ships the client's way out — one button that removes them all in a single commit — and
-    §12.5's As-built note records the server-side fix as **E4c**, open.)
+    shipped the client's way out — one button that removes them all in a single commit — and
+    **E4c closed the trap on 2026-09-24**: the validator keeps a stored clip whose file has
+    gone, with the slice it has, and refuses only what would add — a new clip of the file, or
+    a changed slice of it. §12.5's *As built — E4c* records the rule.)
 36. **One rectangle cannot express a per-lane truth.** A band that means "this applies here",
     drawn as a single box with `top` and `bottom` offsets, can only ever skip rows at the
     ENDS: the moment the thing it describes is per-row and a middle row opts out, the box

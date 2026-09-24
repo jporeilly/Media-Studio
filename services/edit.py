@@ -352,17 +352,30 @@ def _clip_number(clip: dict, key: str, label: str) -> float:
     return round(number, PRECISION) + 0.0
 
 
-def _check_music(clips, library: dict, *, flag_missing: bool) -> list[dict]:
+def _check_music(clips, library: dict, *, flag_missing: bool, stored=()) -> list[dict]:
     """The clips as they will be stored, sorted by ``at`` (stable), or
     ``ValueError`` naming the clip by position and id and the field.
-    ``library`` is ``{name: duration}``. A file not in it is a refusal when
-    storing (``flag_missing`` False) and merely unbounded when reading back
-    (True: the clip is kept and :func:`stored_music` marks it missing)."""
+    ``library`` is ``{name: duration}``. A file not in it is merely unbounded
+    when reading back (``flag_missing`` True: the clip is kept and
+    :func:`stored_music` marks it missing) and, when storing (False), a
+    refusal - unless the clip is already STORED (E4c, the owner's ruling of
+    2026-09-24: "you may keep what you have, you may not add what is not
+    there"). ``stored`` is the record's own clips as :func:`stored_music`
+    reads them; a clip whose file has gone is accepted iff a stored clip
+    with the same ``id`` names the same ``file`` and the same slice (``in``
+    and ``out``). Everything else about it may change - ``at`` (a move, or
+    a cut's ripple), ``gain``, the fades - and is checked exactly as a live
+    clip's is, the fades against the slice's own length, which is known. The
+    slice cannot change because the file it slices cannot be measured: a
+    longer slice of an absent file is as much "adding what is not there" as
+    a new clip of it. With nothing stored every missing file is a refusal,
+    exactly as before E4c."""
     if isinstance(clips, (str, bytes, dict)) or not isinstance(clips, (list, tuple)):
         raise ValueError("The music must be a list of clips.")
     if len(clips) > MAX_CLIPS:
         raise ValueError(f"The music is limited to {MAX_CLIPS} clips; this edit has {len(clips)}.")
 
+    kept = {clip["id"]: clip for clip in stored}
     checked: list[dict] = []
     seen: dict[str, int] = {}
     for position, clip in enumerate(clips, start=1):
@@ -391,12 +404,24 @@ def _check_music(clips, library: dict, *, flag_missing: bool) -> list[dict]:
         if not isinstance(name, str) or not name:
             raise ValueError(f"{label}: file must be the name of a library file.")
         duration = library.get(name)
-        if duration is None and not flag_missing:
+        # E4c: a file the library has lost is kept only under a stored id
+        # that names it - a new id, or a stored id re-pointed at it, is
+        # adding what is not there.
+        held = kept.get(ident) if duration is None and not flag_missing else None
+        if duration is None and not flag_missing and (held is None or held.get("file") != name):
             raise ValueError(f"{label}: file '{name}' is not in the library.")
 
         numbers = {key: _clip_number(clip, key, label) for key in _CLIP_NUMBERS}
         at, start, end, gain, fade_in, fade_out = (numbers[key] for key in _CLIP_NUMBERS)
         length = round(end - start, PRECISION)
+        if held is not None:
+            was_in, was_out = (round(float(held[key]), PRECISION) for key in ("in", "out"))
+            if start != was_in or end != was_out:
+                raise ValueError(
+                    f"{label}: file '{name}' is not in the library, so its slice cannot change; "
+                    f"it was {was_in:.3f}–{was_out:.3f} of the file. Move it, level it, fade it, "
+                    "remove it, or put the file back under the same name."
+                )
         if at < 0:
             raise ValueError(f"{label}: at ({at:.3f}) starts before 0.")
         if start < 0:
@@ -425,17 +450,22 @@ def _check_music(clips, library: dict, *, flag_missing: bool) -> list[dict]:
     return checked
 
 
-def validate_music(clips, library: dict) -> list[dict]:
+def validate_music(clips, library: dict, *, stored=()) -> list[dict]:
     """The clips as they will be stored, or ``ValueError`` naming the one
     that is wrong: a list of at most :data:`MAX_CLIPS` objects with exactly
     :data:`CLIP_KEYS`; ``id`` matching ``^[a-z0-9_-]{1,32}$`` and unique;
-    ``file`` in ``library`` (``{name: duration}``); the numbers finite, not
-    bool, rounded to :data:`PRECISION`; ``at >= 0``; ``0 <= in < out <=``
-    the file's length with ``out - in >= MIN_CLIP_SECONDS``; ``0 <= gain <=
-    1``; the fades ``>= 0`` and together no longer than the clip. Sorted by
-    ``at``. Overlapping clips are allowed and sum (two beds cross-fading by
-    hand is the ordinary use)."""
-    return _check_music(clips, library, flag_missing=False)
+    ``file`` in ``library`` (``{name: duration}``) - or, with ``stored``
+    given (the record's clips as :func:`stored_music` reads them), a file
+    the library has lost under a stored id that names it with the same
+    ``in`` and ``out`` (E4c: you may keep what you have, you may not add
+    what is not there); the numbers finite, not bool, rounded to
+    :data:`PRECISION`; ``at >= 0``; ``0 <= in < out <=`` the file's length
+    with ``out - in >= MIN_CLIP_SECONDS``; ``0 <= gain <= 1``; the fades
+    ``>= 0`` and together no longer than the clip. Sorted by ``at``.
+    Overlapping clips are allowed and sum (two beds cross-fading by hand is
+    the ordinary use). With no ``stored`` clips a missing file is always a
+    refusal."""
+    return _check_music(clips, library, flag_missing=False, stored=stored)
 
 
 def _annotated(clip: dict, library: dict) -> dict:
@@ -714,6 +744,18 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
     inside ``services.projects.project_lock`` immediately before it is
     written - the same lock the transcript Save and the narration editor
     take - so neither of them is overwritten with a stale copy.
+
+    **A music list is checked against the record's STORED clips** (E4c):
+    a clip whose file the library has lost is accepted iff the record
+    already holds it - same id, same file, same slice - so a lost file no
+    longer freezes the lane; see :func:`validate_music`. "Stored" is what
+    the record holds at write time, so the list is checked against the
+    record read before the lock (a refused list writes nothing) and AGAIN
+    against the record re-read inside it, which is the one being written
+    - a commit that landed in between may have changed what is stored. A
+    stored music list this version cannot read is :func:`stored_music`'s
+    error on either read; clearing the music (``[]`` or ``None``) reads
+    nothing and is the way out that wording names.
     """
     given = {name: value for name, value in zip(TRACKS, (video, narration)) if value is not UNCHANGED}
     if not given and music is UNCHANGED:
@@ -736,7 +778,10 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
         clips = None
     elif music is not UNCHANGED:
         library = music_service.library()
-        clips = validate_music(music, library)
+        record = store.get_project(pid)
+        if record is None:
+            raise ProjectNotFound("Project not found.")
+        clips = validate_music(music, library, stored=stored_music(record, library))
 
     with store.project_lock(pid):
         record = store.get_project(pid)
@@ -744,6 +789,10 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED) ->
             raise ProjectNotFound("Project not found.")
         if record.get("kind") not in sentences_service.NARRATION_KINDS:
             raise ValueError("Only video projects can be cut.")
+        if clips is not None and clips is not UNCHANGED:
+            # Against the record being written, not the one read before the
+            # lock: what is stored decides which missing files may stay.
+            clips = validate_music(music, library, stored=stored_music(record, library))
         held = record.get("edit")
         merged = dict(held) if isinstance(held, dict) else {}
         if merged.get("version") == 1 and "keep" in merged:

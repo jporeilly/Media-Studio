@@ -720,29 +720,92 @@ export function musicAfterCut(clips: MusicClip[], locks: LaneLocks, a: number, b
 }
 
 /**
- * The clips a DELETE leaves. One rule for the inspector's button, for the
- * Delete key with a clip selected, and for the banner's "Remove the N stuck
- * clips" alike — the last is the same gesture aimed at a stuck clip, not a
- * second rule beside this one.
+ * The MISSING clips a cut of `[a, b]` — or a split, `a === b` — would SLICE,
+ * by `cutMusic`'s own arithmetic: the two bounds rounded once, at the top,
+ * and a piece counted only when `cutMusic` would keep it
+ * (`MIN_CLIP_SECONDS`). A clip is sliced when a surviving head is shortened
+ * (the cut begins inside it) or a surviving tail is advanced (the cut ends
+ * inside it) — either is a changed slice, and both together is a second id.
+ * Not named: a clip wholly before or after the interval (it only ripples),
+ * one wholly inside (it goes whole), one whose every remnant `cutMusic`
+ * would drop (it goes whole too), one ending exactly at the cut's start or
+ * starting exactly at its end (not sliced), and any LIVE clip.
  *
- * **A missing clip cannot go alone.** Every music commit sends the WHOLE list
- * and the server refuses to store any list still naming a file the library has
- * lost (`services/edit.py::_check_music`), so in the spec's own ordinary case
- * — the same bed laid twice (§12.2: there is no looping) — taking out one half
- * leaves the other in the body and the call is refused by the name of the clip
- * nobody touched. A missing clip therefore takes EVERY missing clip with it,
- * which is the only body the server will take; any other clip goes alone and
- * the missing ones are left exactly where they are, still freezing the lane
- * and still described by the banner.
+ * Why (the Reviewer's M1, 2026-09-24): the server keeps a stored clip whose
+ * file has gone but refuses a changed slice of it (E4c), and a slice is
+ * exactly what a cut or a split across it makes. Left to the server, the
+ * refusal spoke of a slice the user never touched and named none of the
+ * ways out that keep the clip. The strip therefore refuses BEFORE the PUT,
+ * in the gesture's own words (`missingAcrossRefusal`); the server's
+ * sentence stays behind it as the backstop.
+ */
+export function missingAcross(clips: MusicClip[], a: number, b: number): MusicClip[] {
+  const lo = round3(Math.max(0, Math.min(a, b)));
+  const hi = round3(Math.max(0, Math.max(a, b)));
+  return clips.filter((clip) => {
+    if (!clip.missing) return false;
+    const start = clip.at;
+    const end = clipEnd(clip);
+    const head = Math.min(end, lo) - start >= MIN_CLIP_SECONDS - EPSILON;
+    const tail = end - Math.max(start, hi) >= MIN_CLIP_SECONDS - EPSILON;
+    return (head && lo < end) || (tail && hi > start);
+  });
+}
+
+/** `a.mp3`; `a.mp3 and b.mp3`; `a.mp3, b.mp3 and c.mp3`. */
+function listed(names: string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/**
+ * What the strip says when a cut or a split would slice a missing clip
+ * (`missingAcross`): the gesture and where, in the strip's own timecode, the
+ * file or files, why, and BOTH ways out — the one that keeps the clip first.
+ * `b` is the cut's other bound; a split has only `a`.
+ */
+export function missingAcrossRefusal(gesture: "cut" | "split", across: MusicClip[], a: number, b = a): string {
+  const files = [...new Set(across.map((clip) => clip.file))];
+  const oneFile = files.length === 1;
+  const where = gesture === "split"
+    ? `That split at ${timecode(a)}`
+    : `That cut (${timecode(Math.min(a, b))} – ${timecode(Math.max(a, b))})`;
+  return `${where} would cut into ${listed(files)}, but ${oneFile ? "its file is" : "their files are"} no longer in`
+    + ` the library, so ${across.length === 1 ? "its slice" : "their slices"} cannot change — lock the Music lane and ${gesture}`
+    + ` the picture alone, or remove the ${across.length === 1 ? "clip" : "clips"} first.`;
+}
+
+/**
+ * The clips a DELETE leaves: the named clip goes, missing or not, and the
+ * rest are the same objects in the same order. One rule for the inspector's
+ * button and for the Delete key with a clip selected.
  *
- * An id that is not in the list leaves the list alone: a stale selection, or a
- * banner whose plan has refetched since the file came back, must not clear the
- * lane.
+ * Under E4b a missing clip took every other missing clip with it, because the
+ * server refused to store any list still naming a file the library had lost
+ * and so the only body it would take was the list minus all of them. Since
+ * E4c the server keeps a clip it already holds ("you may keep what you have,
+ * you may not add what is not there" — `services/edit.py::_check_music`), so
+ * a missing clip is deleted like any other, and clearing the lane of every
+ * missing clip is the banner's own gesture, `withoutMissing`.
+ *
+ * An id that is not in the list leaves the list alone: a stale selection must
+ * not clear the lane.
  */
 export function clipsAfterDelete(clips: MusicClip[], id: string): MusicClip[] {
-  const held = clips.find((clip) => clip.id === id);
-  if (!held) return clips;
-  return held.missing ? clips.filter((clip) => !clip.missing) : clips.filter((clip) => clip.id !== id);
+  if (!clips.some((clip) => clip.id === id)) return clips;
+  return clips.filter((clip) => clip.id !== id);
+}
+
+/**
+ * The clips the banner's button leaves: every clip whose file the library
+ * has lost goes, in one commit, and the rest are the same objects in the same
+ * order. A different gesture from Delete since E4c — Delete takes one clip —
+ * so it has a rule of its own. A list with nothing missing comes back as it
+ * is (the caller commits nothing then: the file came back and the plan
+ * refetched, trap 37).
+ */
+export function withoutMissing(clips: MusicClip[]): MusicClip[] {
+  return clips.some((clip) => clip.missing) ? clips.filter((clip) => !clip.missing) : clips;
 }
 
 /**
@@ -787,12 +850,19 @@ export function snapClip(
  * all: it could be trimmed and never moved, at any zoom that drew it that
  * small. The CSS edge overlays follow the same rule (`min(8px, 33%)`), so the
  * `ew-resize` cursor never promises a trim where this answers "body".
+ *
+ * **A missing clip has a body and no edges.** Its file cannot be measured, so
+ * the server keeps it only with the slice it has (E4c: `in` and `out` cannot
+ * change while the file is gone); a press anywhere on it is a move, never a
+ * trim, and the strip draws no edge overlays on it, so no `ew-resize` cursor
+ * promises what the server would refuse.
  */
 export function clipAt(clips: MusicClip[], t: number, edgeSeconds: number): { clip: MusicClip; zone: ClipZone } | null {
   for (let i = clips.length - 1; i >= 0; i--) {
     const clip = clips[i];
     const end = clipEnd(clip);
     if (t < clip.at || t > end) continue;
+    if (clip.missing) return { clip, zone: "body" };
     const grab = Math.min(Math.max(0, edgeSeconds), clipLength(clip) / 3);
     const zone: ClipZone = t <= clip.at + grab ? "in" : t >= end - grab ? "out" : "body";
     return { clip, zone };
@@ -913,11 +983,13 @@ export interface EditBody {
  *
  * **`music` is sent only when this operation CHANGES it**, because absent
  * means unchanged for every key (trap 32). A cut that leaves the clips alone
- * must not re-send them — the server refuses to store a clip whose file has
- * left the library, so re-sending an unchanged list would make every
- * unrelated edit impossible on a project with one missing file. Compared in
- * the BODY's own terms (`sameMusic`), so the read-back's `file_duration` and
- * `missing` never look like a change.
+ * must not re-send them: a list the server did not need is a list it has to
+ * check, and under E4b — when it still refused any list naming a file the
+ * library had lost — re-sending an unchanged one made every unrelated edit
+ * impossible on a project with one missing file. E4c keeps a stored missing
+ * clip, but the rule stands on its own terms. Compared in the BODY's own
+ * terms (`sameMusic`), so the read-back's `file_duration` and `missing` never
+ * look like a change.
  */
 export function editBody(op: EditOp, committed: { music: MusicClip[] }, sourceDuration: number): EditBody {
   const body: EditBody = {
@@ -929,21 +1001,6 @@ export function editBody(op: EditOp, committed: { music: MusicClip[] }, sourceDu
 }
 
 /**
- * The server's own words for the one refusal the frozen-lane sentence
- * explains: `services/edit.py::_check_music` answers "music clip 2 (sting):
- * file 'musicB.mp3' is not in the library." The phrase is matched rather than
- * the whole sentence, because the position and the id in front of it are the
- * parts that vary — and case-insensitively, so a re-worded capital does not
- * silently drop the paragraph.
- */
-const NOT_IN_LIBRARY = "not in the library";
-
-/** Whether the server's own sentence says the refusal is the missing files'. */
-function aboutTheLibrary(detail: string): boolean {
-  return detail.toLowerCase().includes(NOT_IN_LIBRARY);
-}
-
-/**
  * What the panel says when a commit is refused: the user's terms first, the
  * server's sentence after them.
  *
@@ -951,31 +1008,23 @@ function aboutTheLibrary(detail: string): boolean {
  * clip 2 (sting): file 'musicB.mp3' is not in the library." — which is a
  * handle the user never chose and a number they cannot see. That is the
  * second half of the answer, not the first: what they need to read is that
- * nothing was saved and what to do next. The detail is KEPT rather than
- * replaced, because a refusal this client does not recognise must still reach
- * the user whole, and no rule of the server's is restated here — the one
- * extra sentence describes what THIS client does (it sends the whole lane)
- * and points at the button that clears it.
+ * nothing was saved. The detail is KEPT rather than replaced, because a
+ * refusal this client does not recognise must still reach the user whole,
+ * and no rule of the server's is restated here.
  *
- * That extra sentence is gated on the refusal REALLY being about the library,
- * not merely on a clip's file being gone: a clip whose file has left the
- * library is a state the project can sit in for a whole session, and while it
- * did, every other 400 — a job holding the project, a range the server would
- * not take — had the frozen-lane paragraph appended and blamed the missing
- * clips for something they had nothing to do with.
+ * Under E4b a refusal about the library gained a paragraph saying the lane
+ * was frozen and pointing at the banner's button. Since E4c the lane is not
+ * frozen — the server keeps a stored clip whose file has gone — and its own
+ * sentences say what may not be done and what to do instead (a missing file
+ * cannot be added; a missing clip's slice cannot change: move it, level it,
+ * fade it, remove it, or put the file back), so nothing is added to them.
  */
-export function editRefusal(detail: string, what: "edit" | "timing", missingClips = 0): string {
+export function editRefusal(detail: string, what: "edit" | "timing"): string {
   const lead = what === "timing"
     ? "That timing was not saved — the blocks are back where the last saved plan puts them."
     : "That edit was not saved — the strip still shows the cut and the clips the server holds.";
-  const stuck = what === "edit" && missingClips > 0 && aboutTheLibrary(detail)
-    ? ` Every change to the Music lane sends the whole list, and ${missingClips === 1
-      ? "one clip names a file" : `${missingClips} clips name files`} the library no longer has, so nothing`
-      + ` on the lane can be changed until ${missingClips === 1 ? "it is" : "they are"} removed`
-      + " — the button above does it in one go."
-    : "";
   const said = detail.trim() ? ` The server said: ${detail.trim()}` : "";
-  return `${lead}${stuck}${said}`;
+  return `${lead}${said}`;
 }
 
 // ── the pointer gestures ────────────────────────────────────────────────────

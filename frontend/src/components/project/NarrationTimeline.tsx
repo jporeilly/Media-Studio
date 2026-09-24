@@ -74,6 +74,8 @@ import {
   laneLocks,
   maxZoom,
   mintClipId,
+  missingAcross,
+  missingAcrossRefusal,
   moveClip,
   newMusicClip,
   nextEditForCut,
@@ -96,6 +98,7 @@ import {
   trimClip,
   unmovedRelease,
   wholeKeep,
+  withoutMissing,
   zoomFromSlider,
   zoomToSelection,
   type ClipZone,
@@ -247,7 +250,7 @@ const NO_MUSIC: MusicClip[] = [];
 /**
  * The stored locks. A value written before the Music lane existed has two
  * keys, and a missing key reads as UNLOCKED (`laneLocks`) — a project last
- * edited under E3 must not come back with its music frozen.
+ * edited under E3 must not come back with its Music lane locked.
  */
 function readLocks(projectId: string): Locks {
   try {
@@ -393,13 +396,13 @@ export function NarrationTimeline({
   const musicRef = useRef(storedMusic);
   musicRef.current = storedMusic;
   /**
-   * The clips whose file the library has lost. The server refuses to STORE a
-   * clip naming a file that is not there (`services/edit.py::_check_music`),
-   * and every music commit sends the whole list, so one missing clip freezes
-   * the WHOLE lane - a move of an unrelated clip is refused by the name of
-   * this one. They are therefore removed together, by the banner's button and
-   * by Delete on any one of them, and until they are gone the banner and the
-   * refusal say so.
+   * The clips whose file the library has lost. The server keeps a clip it
+   * already holds with its file gone (E4c: "you may keep what you have, you
+   * may not add what is not there" - `services/edit.py::_check_music`), so
+   * such a clip can still be moved, levelled, faded and deleted; what it
+   * cannot be is trimmed, because its slice is of a length nobody knows, and
+   * the render refuses while any is there. The banner names them, offers to
+   * remove them all in one commit, and says the file can be put back instead.
    */
   const missingMusic = storedMusic.filter((clip) => clip.missing);
   // What the server holds, as far as this client knows: the plan's lists,
@@ -1594,11 +1597,7 @@ export function NarrationTimeline({
    * does not recognise still reaches the user whole.
    */
   const editError = refusal ?? (commit.isError
-    ? editRefusal(
-      errorMessage(commit.error),
-      commit.variables?.op.kind === "offsets" ? "timing" : "edit",
-      missingMusic.length,
-    )
+    ? editRefusal(errorMessage(commit.error), commit.variables?.op.kind === "offsets" ? "timing" : "edit")
     : null);
   /** Nothing to cut or split into: every lane is locked. */
   const allLocked = LANES.every((lane) => locks[lane]);
@@ -1672,8 +1671,8 @@ export function NarrationTimeline({
   /**
    * Delete / Backspace with a clip selected: the clip goes, not the range
    * selection. The rule for WHAT goes is `clipsAfterDelete` (lib/edit.ts),
-   * where it is tested — a missing clip takes every missing clip with it,
-   * because that is the only list the server will store.
+   * where it is tested — the one clip, missing or not, since E4c lets the
+   * server keep the other missing clips it already holds.
    */
   const removeClip = useCallback(() => {
     const id = selectedClipRef.current;
@@ -1682,20 +1681,20 @@ export function NarrationTimeline({
   }, [commitMusic]);
 
   /**
-   * The banner's button: every clip whose file has gone, in one PUT — the
-   * lane's way out of the frozen state. It is not a second rule but the SAME
-   * gesture aimed at a stuck clip: `clipsAfterDelete` on the first of them
-   * takes them all. The guard is what keeps it honest once the user has taken
-   * the banner's other way out and put the file back — the plan refetches (the
-   * library's own mutations invalidate it, `libraryChangeKeys`), nothing is
-   * missing any more, and this does nothing rather than removing live clips.
+   * The banner's button: every clip whose file has gone, in one PUT. A
+   * different gesture from Delete since E4c, with a rule of its own
+   * (`withoutMissing`, lib/edit.ts). The guard is what keeps it honest once
+   * the user has taken the banner's other way out and put the file back — the
+   * plan refetches (the library's own mutations invalidate it,
+   * `libraryChangeKeys`), nothing is missing any more, and this does nothing
+   * rather than removing live clips (trap 37).
    */
   const removeMissingClips = useCallback(() => {
     if (editLockedRef.current || locksRef.current.music) return;
     const clips = musicRef.current;
-    const stuck = clips.find((clip) => clip.missing);
-    if (!stuck) return;
-    commitMusic(clipsAfterDelete(clips, stuck.id));
+    const kept = withoutMissing(clips);
+    if (kept === clips) return;
+    commitMusic(kept);
   }, [commitMusic]);
 
   /** The inspector's boxes: one field of one clip, with the fades kept legal whatever is typed. */
@@ -1741,6 +1740,18 @@ export function NarrationTimeline({
       setRefusal(`Keep at least one range — that selection would remove the whole ${track}.`);
       return;
     }
+    // A cut ACROSS a missing clip would change its slice, which the server
+    // refuses (E4c) in words that describe a trim, not this gesture (the
+    // Reviewer's M1): refused here first, before anything is sent, naming
+    // the gesture, the file and both ways out. Only where the ripple applies
+    // at all - the same two locks `musicAfterCut` reads.
+    if (!held.music && !held.video) {
+      const across = missingAcross(before.music, sel.start, sel.end);
+      if (across.length > 0) {
+        setRefusal(missingAcrossRefusal("cut", across, sel.start, sel.end));
+        return;
+      }
+    }
     // THE MUSIC RIDES THE PICTURE (the owner's ruling, 2026-09-21): the rule
     // and its reasons are `musicAfterCut` in lib/edit.ts, where a table over
     // all eight lock combinations tests it rather than a regex over this file.
@@ -1769,6 +1780,18 @@ export function NarrationTimeline({
     // clips under the playhead become two, and nothing moves (`cutMusic`).
     // Unaffected by the picture rule the cut follows: a split changes no
     // clip's `at`, so it cannot put the music out of step with the frames.
+    // A split THROUGH a missing clip would change its slice, which the
+    // server refuses (E4c) in words that describe a trim, not this gesture
+    // (the Reviewer's M1): refused here first, before anything is sent,
+    // wherever the music would be split at all - the lane unlocked, or
+    // Ctrl+Shift+S, which splits regardless of the locks.
+    if (all || !locksRef.current.music) {
+      const across = missingAcross(before.music, at, at);
+      if (across.length > 0) {
+        setRefusal(missingAcrossRefusal("split", across, at));
+        return;
+      }
+    }
     const music = !all && locksRef.current.music ? before.music : cutMusic(before.music, at, at);
     if (music.length > MAX_CLIPS) {
       setRefusal(`That split would make ${music.length} music clips, past the limit of ${MAX_CLIPS} — `
@@ -2549,21 +2572,22 @@ export function NarrationTimeline({
         </div>
       )}
 
-      {/* A missing file freezes the WHOLE lane, not just its own clip: every
-          music commit sends the whole list and the app will not store a clip
-          whose file has gone, so a move of an untouched clip is refused by
-          this one's name. The way out is one button that removes them all in
-          a single PUT — the same thing Delete on a missing clip does — and
-          the copy says the lane cannot be edited until it is pressed. */}
+      {/* A missing file costs the render, not the lane (E4c): the server
+          keeps a clip it already holds with its file gone, so the clip can
+          still be moved, levelled, faded and removed - only its slice is
+          fixed, because the file's length is unknown now. The banner names
+          the files, says the render will refuse until the clips go or the
+          files come back, and carries the button that removes them all in
+          one PUT. */}
       {missingMusic.length > 0 && (
         <div className="os-muted os-small">
           {missingMusic.length === 1 ? "A music clip names a file" : `${missingMusic.length} music clips name files`}
           {" "}that {missingMusic.length === 1 ? "is" : "are"} no longer in the library
-          ({[...new Set(missingMusic.map((held) => held.file))].join(", ")}), so the render will refuse — and
-          because every change to the lane sends the whole list, nothing on the Music lane can be moved, trimmed,
-          added or removed while {missingMusic.length === 1 ? "it is" : "they are"} there. Take{" "}
-          {missingMusic.length === 1 ? "it" : "them"} out here, or put the file back in the library under the
-          same name.{" "}
+          ({[...new Set(missingMusic.map((held) => held.file))].join(", ")}), so the render will refuse until{" "}
+          {missingMusic.length === 1 ? "it is removed or the file is" : "they are removed or the files are"} put back in
+          the library under the same name. {missingMusic.length === 1 ? "It" : "They"} can still be moved, levelled
+          and faded here, but not trimmed, and a cut or split across {missingMusic.length === 1 ? "it" : "one"} is
+          refused until the lane is locked or the clip removed.{" "}
           <Button
             size="sm"
             variant="danger"
@@ -2571,7 +2595,8 @@ export function NarrationTimeline({
             disabled={editLocked || locks.music}
             title={locks.music
               ? "The Music lane is locked — unlock it to remove the clips"
-              : editLocked ? "Wait for the last edit to be saved" : "Remove them in one go and unfreeze the lane"}
+              : editLocked ? "Wait for the last edit to be saved"
+                : `Remove ${missingMusic.length === 1 ? "it" : "them all"} in one save`}
             onClick={removeMissingClips}
           >
             {missingMusic.length === 1 ? "Remove the stuck clip" : `Remove the ${missingMusic.length} stuck clips`}
@@ -3028,9 +3053,9 @@ export function NarrationTimeline({
                         + `, fades ${held.fade_in.toFixed(1)} s in / ${held.fade_out.toFixed(1)} s out`
                         + (held.missing
                           ? "\n\nMISSING: this file is no longer in the library, so it is silent here and the"
-                            + " render will refuse — and nothing on the lane can be changed until it is gone."
-                            + " Delete takes it out (with every other clip whose file is missing, which is the"
-                            + " only list the app will store), or upload the file again under the same name."
+                            + " render will refuse. Drag to move it, set its level and fades, or Delete to remove"
+                            + " it — it cannot be trimmed while the file is gone. Or upload the file again under"
+                            + " the same name."
                           : "\n\nDrag to move it (Ctrl: no snapping); drag an end to trim it; Delete removes it.")}
                       style={{ left: held.at * pps, width }}
                       onPointerDown={(event) => onClipPointerDown(event, held)}
@@ -3055,9 +3080,16 @@ export function NarrationTimeline({
                       <span className="os-tl-clip-name">{held.missing ? `${held.file} — missing` : held.file}</span>
                       {/* The trim zones: the cursor only - the pointer-down
                           bubbles to the clip, which asks `clipAt` which end
-                          it has. */}
-                      <span className="os-tl-clip-edge in" aria-hidden="true" />
-                      <span className="os-tl-clip-edge out" aria-hidden="true" />
+                          it has. A missing clip has a body and no edges
+                          (E4c: its slice cannot change), so it gets no
+                          zones and no ew-resize cursor - `clipAt` answers
+                          "body" for it wherever it is pressed. */}
+                      {!held.missing && (
+                        <>
+                          <span className="os-tl-clip-edge in" aria-hidden="true" />
+                          <span className="os-tl-clip-edge out" aria-hidden="true" />
+                        </>
+                      )}
                     </button>
                   );
                 })}
@@ -3116,10 +3148,16 @@ export function NarrationTimeline({
       {inspected && (
         <div className="os-tl-inspector">
           <span className="os-tl-clip-file" title={inspected.file}>{inspected.file}</span>
-          <span className="os-tl-status">
+          <span
+            className="os-tl-status"
+            title={inspected.missing
+              ? "This file is no longer in the library, so the clip cannot be trimmed: its slice is of a length "
+                + "nobody knows now. Move it, set its level and fades, remove it, or put the file back under the same name."
+              : undefined}
+          >
             at {timecode(inspected.at)} · {timecode(inspected.in)}–{timecode(inspected.out)} of the file
             {" "}· {clipLength(inspected).toFixed(2)} s
-            {inspected.missing && " · the file is missing"}
+            {inspected.missing && " · the file is missing, so it cannot be trimmed"}
           </span>
           <label className="os-tl-inspector-field">
             Level
@@ -3183,13 +3221,10 @@ export function NarrationTimeline({
             type="button"
             className="os-tl-btn text"
             disabled={editLocked || locks.music}
-            title={inspected.missing
-              ? "Remove this clip, and every other clip whose file is missing — the only list the app will "
-                + "store while one of them is there (Delete)"
-              : "Remove this clip from the Music lane (Delete)"}
+            title="Remove this clip from the Music lane (Delete)"
             onClick={removeClip}
           >
-            <Trash2 size={13} /> {inspected.missing && missingMusic.length > 1 ? "Remove stuck clips" : "Remove clip"}
+            <Trash2 size={13} /> Remove clip
           </button>
         </div>
       )}

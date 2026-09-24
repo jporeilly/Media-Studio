@@ -240,15 +240,23 @@ project's clips are marked **missing**: they are hatched on the lane, they are
 silent in the audition, and the render refuses on them rather than quietly
 producing a video without them.
 
-While any clip is missing the whole lane is frozen. Every change to the Music
-lane sends the entire list of clips, and the server will not store a list that
-names a file it does not have — so moving an untouched clip is refused by the
-name of one nobody touched. There are two ways out, and the banner above the
-strip carries both:
+The lane itself stays yours. A missing clip can be **moved**, its **level** and
+**fades** set, and it can be **deleted** on its own, exactly like any other:
+the app keeps a clip it already holds, it just will not take a *new* one on a
+file it does not have. The one thing a missing clip cannot do is be
+**trimmed**. Nobody knows how long the file is any more, so its slice stays
+what it was — the clip has no trim zones, and the inspector says so. A cut of
+the picture still ripples it along with the rest; a cut or a split that falls
+*across* it would change its slice, so the strip refuses it before anything is
+sent, in a sentence that names the gesture and the file — lock the Music lane
+and cut the picture alone, or remove the clip first.
+
+The render is what refuses, and it refuses until the clips are gone or the
+file is back. The banner above the strip names the files and carries both ways
+out:
 
 - **Remove the stuck clips** — one button, which takes out every clip whose
-  file is missing in a single go, because that is the only list the app can
-  store while one of them is there;
+  file is missing in a single save (Delete on one of them takes just that one);
 - put the file back in the library **under the same name**, which restores the
   clips exactly as they were.
 

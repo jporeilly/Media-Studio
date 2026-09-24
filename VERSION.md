@@ -23,8 +23,7 @@ place from an older installer still does, and says so at every start) —, and t
 which serves the user-facing documents and a full guide to the Timeline inside the app —
 the prober and the Docs page in 0.9.1 (released 2026-09-23) —;
 see CHANGELOG.md). Still to come: the rest of the edit timeline (E5's trim
-handles, markers, J/K/L and snapping of cuts; E4c, so that a music file leaving the library
-leaves the editor usable rather than only the render honest), and the
+handles, markers, J/K/L and snapping of cuts), and the
 rest of the administration work — notifications,
 a branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
 Enterprise remains the shipping product until parity.
