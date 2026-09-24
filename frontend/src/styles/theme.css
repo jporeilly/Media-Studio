@@ -622,6 +622,24 @@ p { margin: 0 0 8px; }
 .os-tl-clip-edge.in { left: 0; }
 .os-tl-clip-edge.out { right: 0; }
 .os-tl-music.locked .os-tl-clip-edge { cursor: default; }
+/* A piece's trim zones (E5a): the CURSOR only, as a clip's are - the pointer-down bubbles to the pieces layer, which
+   asks `pieceEdgeAt` which edge it has, capped at a third of the piece like `clipAt`. Rendered on an unlocked lane's
+   Video and Narration pieces only: a locked lane has no edges, and Audio · original follows Video. */
+.os-tl-piece-edge { position: absolute; top: 0; bottom: 0; width: min(8px, 33%); cursor: ew-resize; }
+.os-tl-piece-edge.in { left: 0; }
+.os-tl-piece-edge.out { right: 0; }
+/* A trim in flight: the stretch between the edge's old and new positions - hatched red where it will be removed,
+   tinted green where it comes back - with the live edge as a bright line on the side the pointer is on. Painted
+   through refs inside the trimmed lane's pieces layer(s), never through state; the strip re-lays on release. */
+.os-tl-trim { position: absolute; top: 0; bottom: 0; z-index: 3; pointer-events: none; }
+.os-tl-trim.cut { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--tl-out) 45%, transparent) 0 5px, transparent 5px 10px); }
+.os-tl-trim.restore { background: color-mix(in srgb, var(--tl-in) 30%, transparent); }
+.os-tl-trim::after { content: ""; position: absolute; top: 0; bottom: 0; width: 2px; background: var(--tl-playhead); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6); }
+.os-tl-trim.right::after { right: -1px; }
+.os-tl-trim.left::after { left: -1px; }
+.os-tl-trim-label { position: absolute; top: 0; left: 0; z-index: 3; padding: 1px 4px; border-radius: 3px; background: rgba(0, 0, 0, 0.85); color: #fff; font-size: 10px; line-height: 1.2; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; will-change: transform; }
+/* The magnet (E5a): lit while snapping is on, as a pressed toggle. */
+.os-tl-magnet[aria-pressed="true"] { color: var(--tl-select-edge); background: rgba(255, 255, 255, 0.08); }
 /* The dragged clip's time, painted through its ref while the pointer moves - never through state. */
 .os-tl-clip-label { position: absolute; top: 0; left: 0; z-index: 3; padding: 1px 4px; border-radius: 3px; background: rgba(76, 29, 149, 0.92); color: #fff; font-size: 10px; line-height: 1.2; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; will-change: transform; }
 /* The clip inspector, under the strip: the file, where it sits, its level and its two fades. It sits OUTSIDE

@@ -62,9 +62,11 @@ const GONE2 = { ...GONE, id: "m3", at: 11 };
 type Locks = { video: boolean; narration: boolean; music: boolean };
 
 /** The component's markup, with the plan, the peaks and the studio settings already in the cache. */
-function markup(over: { music?: unknown[]; locks?: Locks } = {}): string {
+function markup(over: { music?: unknown[]; locks?: Locks; snapping?: boolean } = {}): string {
   if (over.locks) stored.set(`ms:tl-locks:${PID}`, JSON.stringify(over.locks));
   else stored.delete(`ms:tl-locks:${PID}`);
+  if (over.snapping !== undefined) stored.set(`ms:tl-snap:${PID}`, JSON.stringify(over.snapping));
+  else stored.delete(`ms:tl-snap:${PID}`);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // The plan's key carries the Re-voice card's provider, voice and speed.
   qc.setQueryData([...narrationPlanKey(PID), "edge", "en-GB", 1], {
@@ -328,20 +330,25 @@ describe("the strip's summary is a list of the basic gestures, and the rest is a
     // survive the app's small size or a narrow window.
     expect(terms.length).toBe(meanings.length);
     expect(terms.length).toBeGreaterThanOrEqual(9);
-    // The basics the owner listed: a range, the cut, the split, the channel,
-    // the lock, a block, the library, a clip, the eye, undo.
+    // The basics the owner listed: a range, the cut, (E5a) the trim, the
+    // split, the channel and the lock - one row since E5a, so the trim's row
+    // keeps the list at ten - a block, the library, a clip, the eye, undo.
     expect(terms).toEqual([
       "Drag the green or red handle, or Ctrl+drag",
       "Scissors, or Delete",
+      "Drag a piece&#x27;s edge",
       "S",
-      "Click a lane&#x27;s name",
-      "The lock icon",
+      "A lane&#x27;s name, or its lock",
       "Drag a sentence block",
       "The + on Music",
       "Drag a clip, or either of its ends",
       "The eye on Music",
       "Ctrl+Z",
     ]);
+    expect(terms).toHaveLength(10);
+    // The handle row says it snaps and how to stop it for one drag; the trim row says what a piece's edge does.
+    expect(meanings[0]).toBe("Select a range; snaps to pins and joins, Alt: no snap");
+    expect(meanings[2]).toBe("Trim the cut; drag it back out to restore");
   });
 
   it("points at the Timeline document for everything else", () => {
@@ -380,6 +387,81 @@ describe("the strip's summary is a list of the basic gestures, and the rest is a
     expect(words, "the summary is creeping back towards the 415 words of prose").toBeLessThan(170);
     expect(context, "two short lines of context, then the list").toBeLessThan(45);
     expect([...actions(html).matchAll(/<dt>/g)].length).toBeLessThanOrEqual(12);
+  });
+});
+
+/**
+ * One pieces layer's markup: from its opening tag to whatever the body draws
+ * next (another pieces layer, the film, a join, a block's ghost or a block).
+ */
+function piecesLayer(html: string, name: string): string {
+  const at = html.indexOf(`class="os-tl-pieces ${name}`);
+  expect(at, `the ${name} pieces layer is not in the markup`).toBeGreaterThan(-1);
+  const ends = ['class="os-tl-pieces ', 'class="os-tl-film', 'class="os-tl-join', 'class="os-tl-ghost', 'class="os-tl-block ']
+    .map((marker) => html.indexOf(marker, at + 1))
+    .filter((index) => index > at);
+  return html.slice(at, Math.min(...ends));
+}
+const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+describe("the pieces' trim edges (E5a)", () => {
+  // The fixture's picture is [[0, 6], [7.5, 12]]: two pieces; its narration
+  // is whole: one piece.
+  it("draws an edge zone at each end of every piece of an unlocked lane", () => {
+    const html = markup();
+    const video = piecesLayer(html, "video");
+    expect(count(video, 'class="os-tl-piece-edge in"')).toBe(2);
+    expect(count(video, 'class="os-tl-piece-edge out"')).toBe(2);
+    const narration = piecesLayer(html, "narration");
+    expect(count(narration, 'class="os-tl-piece-edge in"')).toBe(1);
+    expect(count(narration, 'class="os-tl-piece-edge out"')).toBe(1);
+    // ... and says so on the piece.
+    expect(video).toContain("drag an edge to trim");
+    expect(narration).toContain("drag an edge to trim");
+  });
+
+  it("draws none on a locked lane, whose pieces have no edges (trap 19)", () => {
+    const videoLocked = markup({ locks: { video: true, narration: false, music: false } });
+    expect(piecesLayer(videoLocked, "video")).not.toContain("os-tl-piece-edge");
+    expect(piecesLayer(videoLocked, "video")).not.toContain("drag an edge to trim");
+    expect(piecesLayer(videoLocked, "narration")).toContain("os-tl-piece-edge");
+    const narrationLocked = markup({ locks: { video: false, narration: true, music: false } });
+    expect(piecesLayer(narrationLocked, "narration")).not.toContain("os-tl-piece-edge");
+    expect(piecesLayer(narrationLocked, "narration")).not.toContain("drag an edge to trim");
+    expect(piecesLayer(narrationLocked, "video")).toContain("os-tl-piece-edge");
+  });
+
+  it("draws none on the Audio lane, which follows Video and has no edges of its own", () => {
+    const audio = piecesLayer(markup(), "audio");
+    expect(audio).toContain('class="os-tl-piece"');
+    expect(audio).not.toContain("os-tl-piece-edge");
+    expect(audio).not.toContain("drag an edge to trim");
+  });
+
+  it("carries a trim overlay in every pieces layer and a label on the two that can be trimmed, hidden until a drag", () => {
+    const html = markup();
+    expect(count(html, 'class="os-tl-trim"')).toBe(3);
+    expect(count(html, 'class="os-tl-trim-label"')).toBe(2);
+    expect(piecesLayer(html, "audio")).toContain('class="os-tl-trim"');
+    expect(piecesLayer(html, "audio")).not.toContain("os-tl-trim-label");
+  });
+});
+
+describe("the magnet (E5a)", () => {
+  it("is on the toolbar beside Fit, pressed by default", () => {
+    const html = markup();
+    const magnet = button(html, 'aria-label="Snapping"');
+    expect(magnet).toContain('aria-pressed="true"');
+    expect(magnet).toContain("Hold Alt while dragging to turn it off for that drag");
+    expect(html.indexOf('aria-label="Fit"')).toBeLessThan(html.indexOf('aria-label="Snapping"'));
+  });
+
+  it("comes back off only when it was switched off, and says how to turn it on", () => {
+    const off = button(markup({ snapping: false }), 'aria-label="Snapping"');
+    expect(off).toContain('aria-pressed="false"');
+    expect(off).toContain("Snapping is off");
+    // Anything but a stored `false` is on.
+    expect(button(markup({ snapping: true }), 'aria-label="Snapping"')).toContain('aria-pressed="true"');
   });
 });
 

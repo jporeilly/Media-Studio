@@ -8,6 +8,8 @@ import {
   MAX_OFFSET,
   MAX_PPS,
   anchoredScrollLeft,
+  atFrameFloor,
+  caughtAfterClamp,
   clickSelectsPiece,
   describeJoin,
   dragOffsets,
@@ -15,8 +17,10 @@ import {
   maxZoom,
   nextEditForCut,
   nextEditForSplit,
+  nextEditForTrim,
   outputDuration,
   pieceAt,
+  pieceEdgeAt,
   pieces,
   positionAfterEdit,
   projectPeaks,
@@ -24,11 +28,13 @@ import {
   removeRange,
   renderEstimate,
   renderSummary,
+  restoreRange,
   round3,
   rulerLabel,
   sameEdit,
   sliderFromZoom,
   snap,
+  snapTargets,
   splitAt,
   stepFrame,
   stepZoom,
@@ -38,13 +44,18 @@ import {
   toTimeline,
   trackBody,
   trackList,
+  trimChange,
+  trimLabel,
+  trimPiece,
   unmovedRelease,
   wholeKeep,
   wholeSource,
   zoomFromSlider,
   zoomToSelection,
   type Keep,
+  type MusicClip,
   type TrackEdit,
+  type TrimEdge,
 } from "./edit";
 
 interface TrackCase {
@@ -672,16 +683,28 @@ describe("the pointer gestures — what an unmoved release means, and which clic
     for (const kind of ["in", "out", "range"] as const) expect(unmovedRelease(kind, false, false)).toBe("keep-selection");
   });
 
+  it("picks the piece when its edge is pressed and released without moving - the edge is a zone of the piece", () => {
+    // E5a: a press on a piece's trim zone that never moved is a click on the
+    // piece, and it must mean what a click beside the zone means (select the
+    // piece, or seek on a single-piece or locked lane) - not a seek from the
+    // strip, which is where a suppressed-nothing click would have landed on
+    // the Narration lane.
+    expect(unmovedRelease("piece-trim", false, false)).toBe("pick");
+    expect(unmovedRelease("piece-trim", true, false)).toBe("pick");
+  });
+
   it("does nothing for a pointer the browser cancelled, whatever the kind", () => {
-    for (const kind of ["scrub", "in", "out", "range", "move", "marquee"] as const) {
+    for (const kind of ["scrub", "in", "out", "range", "move", "marquee", "piece-trim"] as const) {
       expect(unmovedRelease(kind, true, true)).toBe("nothing");
     }
   });
 
-  it("swallows the follow-up click after a real drag, a scrub or a marquee - never after an unmoved block or handle release", () => {
-    for (const kind of ["scrub", "in", "out", "range", "move", "marquee"] as const) expect(releaseSuppressesClick(kind, true)).toBe(true);
+  it("swallows the follow-up click after a real drag, a scrub, a marquee or a piece edge - never after an unmoved block or handle release", () => {
+    for (const kind of ["scrub", "in", "out", "range", "move", "marquee", "piece-trim"] as const) expect(releaseSuppressesClick(kind, true)).toBe(true);
     expect(releaseSuppressesClick("scrub", false)).toBe(true);
     expect(releaseSuppressesClick("marquee", false)).toBe(true);
+    // The release itself picked, so the click that follows must not seek a second time.
+    expect(releaseSuppressesClick("piece-trim", false)).toBe(true);
     expect(releaseSuppressesClick("move", false)).toBe(false);
     expect(releaseSuppressesClick("range", false)).toBe(false);
     expect(releaseSuppressesClick("in", false)).toBe(false);
@@ -740,5 +763,488 @@ describe("the fixture's tracks — two lists, one axis", () => {
 describe("EPSILON", () => {
   it("is half a millisecond, as the server's", () => {
     expect(EPSILON).toBe(0.0005);
+  });
+});
+
+// ── E5a: the trim — a piece's edge is the cut, and moves ────────────────────
+
+/** A repeatable pseudo-random source, so a failing round is the same round twice. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** The list's invariants, as the server's `validate_keep` reads them and a piece's floor adds to them. */
+function expectValidKeep(keep: Keep, sourceDuration: number, where: string) {
+  let previous = 0;
+  for (const [start, end] of keep) {
+    expect(start, `${where}: start >= previous end`).toBeGreaterThanOrEqual(previous - EPSILON);
+    expect(end, `${where}: start < end`).toBeGreaterThan(start);
+    expect(end, `${where}: within the source`).toBeLessThanOrEqual(sourceDuration + EPSILON);
+    expect(round3(start), `${where}: 3 dp`).toBe(start);
+    expect(round3(end), `${where}: 3 dp`).toBe(end);
+    previous = end;
+  }
+}
+
+describe("trimPiece — a bound moved, clamped so the list stays what the server stores", () => {
+  // KEEP is [[0, 6], [7.5, 12]] over a 12 s source: two pieces, a 1.5 s hole
+  // between them, laid out on the output as 0–6 and 6–10.5.
+  const FRAME = round3(FRAME_SECONDS);
+
+  it("shortens from the start when an in-edge is dragged right, and restores when it is dragged left", () => {
+    expect(trimPiece(KEEP, 1, "in", 8.2, SOURCE)).toEqual([[0, 6], [8.2, 12]]);
+    expect(trimPiece(KEEP, 1, "in", 6.5, SOURCE)).toEqual([[0, 6], [6.5, 12]]);
+  });
+
+  it("restores an in-edge no further than the previous range's end, and the first no further than 0", () => {
+    expect(trimPiece(KEEP, 1, "in", 2, SOURCE)).toEqual([[0, 6], [6, 12]]);
+    expect(trimPiece(KEEP, 1, "in", -50, SOURCE)).toEqual([[0, 6], [6, 12]]);
+    // The head trim, and the head restored.
+    expect(trimPiece(KEEP, 0, "in", 1.5, SOURCE)).toEqual([[1.5, 6], [7.5, 12]]);
+    expect(trimPiece([[2, 6], [7.5, 12]], 0, "in", -3, SOURCE)).toEqual([[0, 6], [7.5, 12]]);
+  });
+
+  it("shortens from the end when an out-edge is dragged left, and restores when it is dragged right", () => {
+    expect(trimPiece(KEEP, 0, "out", 5, SOURCE)).toEqual([[0, 5], [7.5, 12]]);
+    expect(trimPiece(KEEP, 0, "out", 7, SOURCE)).toEqual([[0, 7], [7.5, 12]]);
+  });
+
+  it("restores an out-edge no further than the next range's start, and the last no further than the source's end", () => {
+    expect(trimPiece(KEEP, 0, "out", 99, SOURCE)).toEqual([[0, 7.5], [7.5, 12]]);
+    // The tail trim, and the tail restored.
+    expect(trimPiece(KEEP, 1, "out", 11, SOURCE)).toEqual([[0, 6], [7.5, 11]]);
+    expect(trimPiece([[0, 6], [7.5, 11]], 1, "out", 99, SOURCE)).toEqual([[0, 6], [7.5, 12]]);
+    expect(trimPiece([[0, 6], [7.5, 11]], 1, "out", 99, 12.0004)).toEqual([[0, 6], [7.5, 12]]);
+  });
+
+  it("stops one frame short of removing the piece, from either edge (decision 6)", () => {
+    const fromStart = trimPiece(KEEP, 0, "in", 99, SOURCE);
+    expect(fromStart).toEqual([[round3(6 - FRAME_SECONDS), 6], [7.5, 12]]);
+    expect(round3(fromStart[0][1] - fromStart[0][0])).toBe(FRAME);
+    const fromEnd = trimPiece(KEEP, 1, "out", 0, SOURCE);
+    expect(fromEnd).toEqual([[0, 6], [7.5, round3(7.5 + FRAME_SECONDS)]]);
+    expect(round3(fromEnd[1][1] - fromEnd[1][0])).toBe(FRAME);
+    // Exactly at the floor is allowed; a hair past it is the floor.
+    expect(trimPiece(KEEP, 0, "in", 6 - FRAME_SECONDS, SOURCE)).toEqual(fromStart);
+    expect(trimPiece(KEEP, 0, "in", 5.99, SOURCE)).toEqual(fromStart);
+    expect(atFrameFloor(fromStart, 0)).toBe(true);
+    expect(atFrameFloor(fromEnd, 1)).toBe(true);
+    expect(atFrameFloor(KEEP, 0)).toBe(false);
+    expect(atFrameFloor(KEEP, 9)).toBe(false);
+  });
+
+  it("lets a piece already shorter than a frame only grow, never shrink (a split can leave one)", () => {
+    const tiny: Keep = [[0, 4], [5, 5.01], [6, 12]];
+    expect(trimPiece(tiny, 1, "in", 99, SOURCE)).toBe(tiny);
+    expect(trimPiece(tiny, 1, "out", 0, SOURCE)).toBe(tiny);
+    expect(trimPiece(tiny, 1, "in", 4.5, SOURCE)).toEqual([[0, 4], [4.5, 5.01], [6, 12]]);
+    expect(trimPiece(tiny, 1, "out", 5.5, SOURCE)).toEqual([[0, 4], [5, 5.5], [6, 12]]);
+    expect(atFrameFloor(tiny, 1)).toBe(true);
+  });
+
+  it("reads an empty or whole list as the whole source first, as pieces() does", () => {
+    expect(trimPiece([], 0, "in", 2, SOURCE)).toEqual([[2, 12]]);
+    expect(trimPiece([[0, 12]], 0, "out", 10, SOURCE)).toEqual([[0, 10]]);
+    expect(trimPiece([], 0, "out", 99, SOURCE)).toEqual([[0, 12]]);
+  });
+
+  it("returns an equal list — the same one — when the bound does not move, or the piece is not there", () => {
+    expect(trimPiece(KEEP, 1, "in", 7.5, SOURCE)).toBe(KEEP);
+    expect(trimPiece(KEEP, 0, "out", 6, SOURCE)).toBe(KEEP);
+    expect(trimPiece(KEEP, 0, "out", 6.0004, SOURCE)).toBe(KEEP);
+    expect(trimPiece(KEEP, 5, "in", 3, SOURCE)).toBe(KEEP);
+    expect(trimPiece(KEEP, -1, "in", 3, SOURCE)).toBe(KEEP);
+    // A bare split has no gap: neither edge at the boundary can restore anything.
+    const split: Keep = [[0, 6], [6, 12]];
+    expect(trimPiece(split, 0, "out", 7, SOURCE)).toBe(split);
+    expect(trimPiece(split, 1, "in", 5, SOURCE)).toBe(split);
+  });
+
+  it("rounds once, at the bound, and never touches the other ranges", () => {
+    expect(trimPiece(KEEP, 1, "in", 8.12345, SOURCE)).toEqual([[0, 6], [8.123, 12]]);
+    expect(trimPiece(KEEP, 1, "in", 8.12345, SOURCE)[0]).toBe(KEEP[0]);
+  });
+
+  it("never overlaps, never disorders, never empties a piece — over random lists and drags", () => {
+    const random = mulberry32(20260924);
+    for (let round = 0; round < 3000; round++) {
+      const source = round3(5 + random() * 30);
+      const bounds = new Set<number>();
+      const count = 1 + Math.floor(random() * 4);
+      while (bounds.size < count * 2) bounds.add(round3(random() * source));
+      const sorted = [...bounds].sort((x, y) => x - y);
+      const keep: Keep = [];
+      for (let i = 0; i < sorted.length; i += 2) if (sorted[i + 1] - sorted[i] > EPSILON) keep.push([sorted[i], sorted[i + 1]]);
+      if (keep.length === 0) continue;
+      const index = Math.floor(random() * keep.length);
+      const edge: TrimEdge = random() < 0.5 ? "in" : "out";
+      const toSource = round3(-5 + random() * (source + 10));
+      const next = trimPiece(keep, index, edge, toSource, source);
+      const where = `round ${round}: ${JSON.stringify(keep)} ${edge} ${index} -> ${toSource}`;
+      expect(next, where).toHaveLength(keep.length);
+      expectValidKeep(next, source, where);
+      // Only the dragged bound moved.
+      next.forEach((range, i) => {
+        if (i !== index) expect(range, where).toBe(keep[i]);
+        else if (edge === "in") expect(range[1], where).toBe(keep[i][1]);
+        else expect(range[0], where).toBe(keep[i][0]);
+      });
+      // The floor: a piece longer than a frame is never left shorter than one.
+      const was = round3(keep[index][1] - keep[index][0]);
+      const is = round3(next[index][1] - next[index][0]);
+      if (was >= round3(FRAME_SECONDS)) expect(is, where).toBeGreaterThanOrEqual(round3(FRAME_SECONDS) - EPSILON);
+      else expect(is, where).toBeGreaterThanOrEqual(was - EPSILON);
+    }
+  });
+});
+
+describe("restoreRange — the inverse of a cut, bounded by the gap the cut left on THAT list", () => {
+  it("moves the range that starts at the boundary back into the gap before it", () => {
+    expect(restoreRange(KEEP, 6, 1, "before", SOURCE)).toEqual([[0, 6], [6.5, 12]]);
+    // As much as the gap holds, and no more.
+    expect(restoreRange(KEEP, 6, 5, "before", SOURCE)).toEqual([[0, 6], [6, 12]]);
+  });
+
+  it("moves the range that ends at the boundary forward into the gap after it", () => {
+    expect(restoreRange(KEEP, 6, 1, "after", SOURCE)).toEqual([[0, 7], [7.5, 12]]);
+    expect(restoreRange(KEEP, 6, 5, "after", SOURCE)).toEqual([[0, 7.5], [7.5, 12]]);
+  });
+
+  it("restores the head at 0 with `before`, bounded by 0, and the tail at the output's end with `after`, bounded by the source", () => {
+    expect(restoreRange([[2, 6], [7.5, 12]], 0, 1, "before", SOURCE)).toEqual([[1, 6], [7.5, 12]]);
+    expect(restoreRange([[2, 6], [7.5, 12]], 0, 5, "before", SOURCE)).toEqual([[0, 6], [7.5, 12]]);
+    // [[0, 6], [7.5, 11]] runs to 9.5 on the output.
+    expect(restoreRange([[0, 6], [7.5, 11]], 9.5, 0.5, "after", SOURCE)).toEqual([[0, 6], [7.5, 11.5]]);
+    expect(restoreRange([[0, 6], [7.5, 11]], 9.5, 5, "after", SOURCE)).toEqual([[0, 6], [7.5, 12]]);
+  });
+
+  it("leaves the list exactly as it is — the same object — when nothing starts or ends there", () => {
+    expect(restoreRange(KEEP, 3, 1, "before", SOURCE)).toBe(KEEP);
+    expect(restoreRange(KEEP, 3, 1, "after", SOURCE)).toBe(KEEP);
+    // No range ENDS at 0 and none STARTS at the output's end.
+    expect(restoreRange(KEEP, 0, 1, "after", SOURCE)).toBe(KEEP);
+    expect(restoreRange(KEEP, 10.5, 1, "before", SOURCE)).toBe(KEEP);
+    // Trap 38, the case that matters: the narration never lost anything at 6.
+    const whole: Keep = [[0, 12]];
+    expect(restoreRange(whole, 6, 1, "before", SOURCE)).toBe(whole);
+    expect(restoreRange(whole, 6, 1, "after", SOURCE)).toBe(whole);
+    const none: Keep = [];
+    expect(restoreRange(none, 0, 1, "before", SOURCE)).toBe(none);
+  });
+
+  it("changes nothing at a bare split, whose gap is empty, and with nothing to restore", () => {
+    const split: Keep = [[0, 6], [6, 12]];
+    expect(restoreRange(split, 6, 1, "before", SOURCE)).toBe(split);
+    expect(restoreRange(split, 6, 1, "after", SOURCE)).toBe(split);
+    expect(restoreRange(KEEP, 6, 0, "before", SOURCE)).toBe(KEEP);
+    expect(restoreRange(KEEP, 6, -1, "after", SOURCE)).toBe(KEEP);
+    expect(restoreRange(KEEP, 6, Number.NaN, "after", SOURCE)).toBe(KEEP);
+  });
+
+  it("finds the boundary within half a millisecond, and rounds the bound once", () => {
+    expect(restoreRange(KEEP, 6.0004, 1, "before", SOURCE)).toEqual([[0, 6], [6.5, 12]]);
+    expect(restoreRange(KEEP, 5.9996, 1, "after", SOURCE)).toEqual([[0, 7], [7.5, 12]]);
+    expect(restoreRange(KEEP, 6, 0.12345, "before", SOURCE)).toEqual([[0, 6], [7.377, 12]]);
+  });
+});
+
+describe("trimChange — what one bound's move does to the output", () => {
+  it("is a cut of the removed stretch, at the piece's edge as laid out now", () => {
+    expect(trimChange(KEEP, 1, "in", 8.2, SOURCE)).toEqual({ kind: "cut", a: 6, b: 6.7 });
+    expect(trimChange(KEEP, 0, "out", 5, SOURCE)).toEqual({ kind: "cut", a: 5, b: 6 });
+  });
+
+  it("is an insert of the restored length at the edge", () => {
+    expect(trimChange(KEEP, 1, "in", 6.5, SOURCE)).toEqual({ kind: "insert", t: 6, d: 1 });
+    expect(trimChange(KEEP, 0, "out", 7, SOURCE)).toEqual({ kind: "insert", t: 6, d: 1 });
+    expect(trimChange([[2, 6], [7.5, 12]], 0, "in", 0, SOURCE)).toEqual({ kind: "insert", t: 0, d: 2 });
+  });
+
+  it("is nothing when the bound does not move, or the piece is not there", () => {
+    expect(trimChange(KEEP, 1, "in", 7.5, SOURCE)).toBeNull();
+    expect(trimChange(KEEP, 1, "in", 7.5004, SOURCE)).toBeNull();
+    expect(trimChange(KEEP, 4, "in", 7.5, SOURCE)).toBeNull();
+  });
+});
+
+describe("nextEditForTrim — one gesture, two lists (spec §13.1)", () => {
+  const OPEN = { video: false, narration: false };
+  const VIDEO_LOCKED = { video: true, narration: false };
+  const NARRATION_LOCKED = { video: false, narration: true };
+
+  it("shortens the picture and removes the same output interval from the narration, exactly as a cut does", () => {
+    const outcome = nextEditForTrim({ video: KEEP, narration: null }, OPEN, "video", 1, "in", 8.2, SOURCE);
+    expect(outcome.change).toEqual({ kind: "cut", a: 6, b: 6.7 });
+    expect(outcome.next).toEqual({ video: [[0, 6], [8.2, 12]], narration: [[0, 6], [6.7, 12]] });
+    expect(outcome.next?.narration).toEqual(removeRange([[0, 12]], 6, 6.7));
+    expect(outcome.refused).toBeNull();
+    expect(outcome.picture).toEqual({ kind: "cut", a: 6, b: 6.7 });
+  });
+
+  it("leaves a locked track exactly as it is, whatever the trimmed lane does (trap 19)", () => {
+    const outcome = nextEditForTrim({ video: KEEP, narration: null }, NARRATION_LOCKED, "video", 1, "in", 8.2, SOURCE);
+    expect(outcome.next).toEqual({ video: [[0, 6], [8.2, 12]], narration: null });
+    expect(nextEditForTrim({ video: KEEP, narration: KEEP }, VIDEO_LOCKED, "narration", 0, "out", 5, SOURCE).next)
+      .toEqual({ video: KEEP, narration: [[0, 5], [7.5, 12]] });
+  });
+
+  it("restores the picture and lets the narration's own bound back into its OWN gap at that moment", () => {
+    const both: TrackEdit = { video: KEEP, narration: KEEP };
+    const outcome = nextEditForTrim(both, OPEN, "video", 1, "in", 6.5, SOURCE);
+    expect(outcome.change).toEqual({ kind: "insert", t: 6, d: 1 });
+    expect(outcome.next).toEqual({ video: [[0, 6], [6.5, 12]], narration: [[0, 6], [6.5, 12]] });
+    expect(outcome.next?.narration).toEqual(restoreRange(KEEP, 6, 1, "before", SOURCE));
+    // The out-edge of the piece before the hole, the other way round.
+    const back = nextEditForTrim(both, OPEN, "video", 0, "out", 7, SOURCE);
+    expect(back.change).toEqual({ kind: "insert", t: 6, d: 1 });
+    expect(back.next).toEqual({ video: [[0, 7], [7.5, 12]], narration: [[0, 7], [7.5, 12]] });
+  });
+
+  it("restores only as much of the other track as ITS gap holds", () => {
+    // The narration's hole at output 6 is 6–7 of the source; the picture's is 6–7.5.
+    const outcome = nextEditForTrim({ video: KEEP, narration: [[0, 6], [7, 12]] }, OPEN, "video", 1, "in", 6, SOURCE);
+    expect(outcome.change).toEqual({ kind: "insert", t: 6, d: 1.5 });
+    expect(outcome.next).toEqual({ video: [[0, 6], [6, 12]], narration: [[0, 6], [6, 12]] });
+  });
+
+  it("never invents narration the narration list never lost (trap 38): no join there, nothing restored", () => {
+    // A picture cut made with Narration locked, restored later: the frames
+    // come back and the sentences stay exactly where they are.
+    const outcome = nextEditForTrim({ video: KEEP, narration: null }, OPEN, "video", 1, "in", 6.5, SOURCE);
+    expect(outcome.next).toEqual({ video: [[0, 6], [6.5, 12]], narration: null });
+    // A narration with a join elsewhere is equally untouched.
+    const elsewhere = nextEditForTrim({ video: KEEP, narration: [[0, 3], [4, 12]] }, OPEN, "video", 1, "in", 6.5, SOURCE);
+    expect(elsewhere.next?.narration).toEqual([[0, 3], [4, 12]]);
+  });
+
+  it("refuses, naming the track, when a shortening would empty the other track", () => {
+    // The narration keeps only output 0–1 (source 6–7); trimming the head of
+    // the whole picture by 2 s removes all of it.
+    const outcome = nextEditForTrim({ video: null, narration: [[6, 7]] }, OPEN, "video", 0, "in", 2, SOURCE);
+    expect(outcome).toEqual({ next: null, refused: "narration", change: { kind: "cut", a: 0, b: 2 }, picture: null });
+    const mirror = nextEditForTrim({ video: [[6, 7]], narration: null }, OPEN, "narration", 0, "in", 2, SOURCE);
+    expect(mirror.refused).toBe("video");
+    // Never the trimmed lane itself: its floor is a frame, so it cannot be emptied.
+    expect(nextEditForTrim({ video: null, narration: null }, OPEN, "video", 0, "in", 99, SOURCE).refused).toBeNull();
+  });
+
+  it("changes nothing when the trimmed lane is locked, and hands the same edit back", () => {
+    const edit: TrackEdit = { video: KEEP, narration: null };
+    const outcome = nextEditForTrim(edit, VIDEO_LOCKED, "video", 1, "in", 8.2, SOURCE);
+    expect(outcome).toEqual({ next: edit, refused: null, change: null, picture: null });
+    expect(outcome.next).toBe(edit);
+    expect(sameEdit(outcome.next!, edit, SOURCE)).toBe(true);
+  });
+
+  it("is a no-op when the bound does not move, in the body's own terms", () => {
+    const edit: TrackEdit = { video: KEEP, narration: null };
+    const outcome = nextEditForTrim(edit, OPEN, "video", 1, "in", 7.5, SOURCE);
+    expect(outcome.change).toBeNull();
+    expect(outcome.next).toBe(edit);
+    // A whole track stays null after a trim that restores everything a cut took.
+    const whole = nextEditForTrim({ video: [[2, 12]], narration: null }, OPEN, "video", 0, "in", 0, SOURCE);
+    expect(whole.next).toEqual({ video: null, narration: null });
+  });
+
+  it("reports the PICTURE's own change for the music — the trimmed lane's when the picture is it", () => {
+    const cut = nextEditForTrim({ video: KEEP, narration: null }, OPEN, "video", 0, "out", 5, SOURCE);
+    expect(cut.picture).toEqual(cut.change);
+    const restore = nextEditForTrim({ video: KEEP, narration: KEEP }, OPEN, "video", 0, "out", 7, SOURCE);
+    expect(restore.picture).toEqual(restore.change);
+  });
+
+  it("reports no picture change for a narration trim the picture did not follow (the music rides the picture)", () => {
+    // Video locked: the picture cannot change.
+    expect(nextEditForTrim({ video: KEEP, narration: KEEP }, VIDEO_LOCKED, "narration", 1, "in", 8.2, SOURCE).picture).toBeNull();
+    expect(nextEditForTrim({ video: KEEP, narration: KEEP }, VIDEO_LOCKED, "narration", 1, "in", 6.5, SOURCE).picture).toBeNull();
+    // Video unlocked but whole: no join at 6, so a narration restore there leaves the picture alone.
+    const noJoin = nextEditForTrim({ video: null, narration: KEEP }, OPEN, "narration", 1, "in", 6.5, SOURCE);
+    expect(noJoin.change).toEqual({ kind: "insert", t: 6, d: 1 });
+    expect(noJoin.next?.video).toBeNull();
+    expect(noJoin.picture).toBeNull();
+    // A narration cut past the end of a shorter picture changes no frame.
+    const beyond = nextEditForTrim({ video: [[0, 6]], narration: null }, OPEN, "narration", 0, "out", 10, SOURCE);
+    expect(beyond.change).toEqual({ kind: "cut", a: 10, b: 12 });
+    expect(beyond.next?.video).toEqual([[0, 6]]);
+    expect(beyond.picture).toBeNull();
+  });
+
+  it("reports the picture's change as what its list really did: the gap it had, the end it has", () => {
+    // The narration restores 1.5 s at 6; the picture's own hole there is only 1 s.
+    const half = nextEditForTrim({ video: [[0, 6], [7, 12]], narration: KEEP }, OPEN, "narration", 1, "in", 6, SOURCE);
+    expect(half.change).toEqual({ kind: "insert", t: 6, d: 1.5 });
+    expect(half.next?.video).toEqual([[0, 6], [6, 12]]);
+    expect(half.picture).toEqual({ kind: "insert", t: 6, d: 1 });
+    // A narration cut of 9–12 on a picture that ends at 10 removes 9–10 of it.
+    const clipped = nextEditForTrim({ video: [[0, 10]], narration: null }, OPEN, "narration", 0, "out", 9, SOURCE);
+    expect(clipped.change).toEqual({ kind: "cut", a: 9, b: 12 });
+    expect(clipped.next?.video).toEqual([[0, 9]]);
+    expect(clipped.picture).toEqual({ kind: "cut", a: 9, b: 10 });
+  });
+
+  it("is a cut with a name (trap 37): the trimmed lane's own list is what removeRange / restoreRange give it", () => {
+    // Over random lists and drags, the list `trimPiece` produces for the
+    // trimmed lane is exactly the list the OTHER track's arithmetic would
+    // produce for the same output interval — so there is one ripple, not two.
+    const random = mulberry32(13);
+    let cuts = 0;
+    let inserts = 0;
+    for (let round = 0; round < 2000; round++) {
+      const source = round3(5 + random() * 30);
+      const bounds = new Set<number>();
+      const count = 1 + Math.floor(random() * 4);
+      while (bounds.size < count * 2) bounds.add(round3(random() * source));
+      const sorted = [...bounds].sort((x, y) => x - y);
+      const keep: Keep = [];
+      for (let i = 0; i < sorted.length; i += 2) if (sorted[i + 1] - sorted[i] > EPSILON) keep.push([sorted[i], sorted[i + 1]]);
+      if (keep.length === 0) continue;
+      const index = Math.floor(random() * keep.length);
+      const edge: TrimEdge = random() < 0.5 ? "in" : "out";
+      const toSource = round3(-5 + random() * (source + 10));
+      const outcome = nextEditForTrim({ video: keep, narration: null }, OPEN, "video", index, edge, toSource, source);
+      const where = `round ${round}: ${JSON.stringify(keep)} ${edge} ${index} -> ${toSource}`;
+      if (outcome.change === null) { expect(outcome.next, where).toEqual({ video: keep, narration: null }); continue; }
+      const own = trackList(outcome.next!.video, source);
+      if (outcome.change.kind === "cut") {
+        cuts += 1;
+        expect(own, where).toEqual(removeRange(keep, outcome.change.a, outcome.change.b));
+      } else {
+        inserts += 1;
+        expect(own, where).toEqual(restoreRange(keep, outcome.change.t, outcome.change.d, edge === "in" ? "before" : "after", source));
+      }
+      // ... and the output moved by exactly what the change says.
+      const moved = round3(outputDuration(own) - outputDuration(keep));
+      expect(moved, where).toBe(outcome.change.kind === "cut" ? round3(outcome.change.a - outcome.change.b) : outcome.change.d);
+    }
+    expect(cuts).toBeGreaterThan(100);
+    expect(inserts).toBeGreaterThan(100);
+  });
+});
+
+describe("pieceEdgeAt — which edge of which piece a pointer has", () => {
+  // KEEP's pieces on the output: 0–6 and 6–10.5, a join at 6. 8 px at 40 px/s.
+  const list = pieces(KEEP, SOURCE);
+  const edge = 8 / 40;
+
+  it("splits the join: the left third is the left piece's out-edge, the right third the right piece's in-edge", () => {
+    expect(pieceEdgeAt(list, 5.9, edge)).toEqual({ index: 0, edge: "out" });
+    expect(pieceEdgeAt(list, 5.8, edge)).toEqual({ index: 0, edge: "out" });
+    expect(pieceEdgeAt(list, 6.1, edge)).toEqual({ index: 1, edge: "in" });
+    expect(pieceEdgeAt(list, 6.2, edge)).toEqual({ index: 1, edge: "in" });
+    // The join itself belongs to the later piece, as `pieceAt` and `toSource` choose.
+    expect(pieceEdgeAt(list, 6, edge)).toEqual({ index: 1, edge: "in" });
+    // Beyond the zone on either side is the body: no edge.
+    expect(pieceEdgeAt(list, 5.79, edge)).toBeNull();
+    expect(pieceEdgeAt(list, 6.21, edge)).toBeNull();
+    expect(pieceEdgeAt(list, 3, edge)).toBeNull();
+  });
+
+  it("gives a single whole piece a head in-edge and a tail out-edge, and a body between", () => {
+    const whole = pieces([], SOURCE);
+    expect(pieceEdgeAt(whole, 0, edge)).toEqual({ index: 0, edge: "in" });
+    expect(pieceEdgeAt(whole, 0.19, edge)).toEqual({ index: 0, edge: "in" });
+    expect(pieceEdgeAt(whole, 0.21, edge)).toBeNull();
+    expect(pieceEdgeAt(whole, 11.81, edge)).toEqual({ index: 0, edge: "out" });
+    expect(pieceEdgeAt(whole, 12, edge)).toEqual({ index: 0, edge: "out" });
+    // The first in-edge and the last out-edge of a cut list too: the head and tail trims.
+    expect(pieceEdgeAt(list, 0.1, edge)).toEqual({ index: 0, edge: "in" });
+    expect(pieceEdgeAt(list, 10.4, edge)).toEqual({ index: 1, edge: "out" });
+  });
+
+  it("leaves a narrow piece a middle third to click: a third each side, never more", () => {
+    const narrow = pieces([[0, 6], [6, 6.3], [6.3, 12]], SOURCE);
+    expect(pieceEdgeAt(narrow, 6.05, edge)).toEqual({ index: 1, edge: "in" });
+    expect(pieceEdgeAt(narrow, 6.15, edge)).toBeNull();
+    expect(pieceEdgeAt(narrow, 6.25, edge)).toEqual({ index: 1, edge: "out" });
+    // However wide the zone is asked to be, the middle third survives.
+    expect(pieceEdgeAt(narrow, 6.15, 5)).toBeNull();
+    expect(pieceEdgeAt(narrow, 6.09, 5)).toEqual({ index: 1, edge: "in" });
+  });
+
+  it("answers nothing outside every piece, and for no pieces", () => {
+    expect(pieceEdgeAt(list, -0.5, edge)).toBeNull();
+    expect(pieceEdgeAt(list, 11, edge)).toBeNull();
+    expect(pieceEdgeAt([], 1, edge)).toBeNull();
+  });
+});
+
+describe("snapTargets — one candidate set for every gesture that places a cut", () => {
+  const clip = (id: string, at: number, out: number): MusicClip => ({ id, file: "bed.mp3", at, in: 0, out, gain: 0.15, fade_in: 0, fade_out: 0 });
+
+  it("offers 0, the output's end, the playhead, every join, every pin and every clip's two edges, deduplicated, rounded, sorted", () => {
+    expect(snapTargets({
+      playhead: 3.0004,
+      duration: 10.5,
+      joins: [6, 6, 8.9996],
+      pins: [0, 2, 5.0001, 7],
+      clips: [clip("a", 1, 6), clip("b", 9, 1.5)],
+    })).toEqual([0, 1, 2, 3, 5, 6, 7, 9, 10.5]);
+  });
+
+  it("is the three fixed moments alone with nothing else on the strip", () => {
+    expect(snapTargets({ playhead: 0, duration: 12, joins: [], pins: [], clips: [] })).toEqual([0, 12]);
+    expect(snapTargets({ playhead: 4, duration: 12, joins: [], pins: [], clips: [] })).toEqual([0, 4, 12]);
+  });
+
+  it("feeds `snap` unchanged", () => {
+    const targets = snapTargets({ playhead: 4, duration: 12, joins: [6], pins: [2.5], clips: [] });
+    expect(snap(2.52, targets, 0.05)).toEqual({ t: 2.5, snapped: 2.5 });
+    expect(snap(6.04, targets, 0.05)).toEqual({ t: 6, snapped: 6 });
+    expect(snap(9, targets, 0.05)).toEqual({ t: 9, snapped: null });
+  });
+});
+
+describe("caughtAfterClamp — ⌖ means caught, not asked for", () => {
+  it("keeps the candidate only when the painted position is it, within half a millisecond", () => {
+    expect(caughtAfterClamp(6, 6)).toBe(6);
+    expect(caughtAfterClamp(6.0004, 6)).toBe(6);
+    expect(caughtAfterClamp(8, 6)).toBeNull();
+    expect(caughtAfterClamp(6.001, 6)).toBeNull();
+    expect(caughtAfterClamp(6, null)).toBeNull();
+  });
+
+  it("drops the ⌖ when trimPiece's clamp overrides the snap — the Reviewer's walk (E5a, MINOR 1)", () => {
+    // keep [[0, 10], [12, 30]] over 60 s: piece 1 is output 10–28 (source
+    // 12–30) with a 2 s gap before it. The playhead parked at output 6 is a
+    // candidate; the in-edge of piece 1 dragged left to it lands the POINTER
+    // on 6, but the edge can restore only to the previous range's end
+    // (source 10, output 8) — so the label must not say ⌖.
+    const keep: Keep = [[0, 10], [12, 30]];
+    const list = pieces(keep, 60);
+    const targets = snapTargets({ playhead: 6, duration: 28, joins: joins(keep, 60).map((j) => j.at), pins: [], clips: [] });
+    const landed = snap(6.02, targets, 8 / 40);
+    expect(landed).toEqual({ t: 6, snapped: 6 });
+    const piece = list[1];
+    const trimmed = trimPiece(keep, 1, "in", piece.sourceStart + (landed.t - piece.start), 60);
+    expect(trimmed).toEqual([[0, 10], [10, 30]]);
+    const at = round3(piece.start + (trimmed[1][0] - piece.sourceStart));
+    expect(at).toBe(8);
+    expect(caughtAfterClamp(at, landed.snapped)).toBeNull();
+    // The same walk toward a candidate the edge really reaches keeps its ⌖.
+    const near = snap(9.03, [9], 8 / 40);
+    const toNine = trimPiece(keep, 1, "in", piece.sourceStart + (near.t - piece.start), 60);
+    expect(caughtAfterClamp(round3(piece.start + (toNine[1][0] - piece.sourceStart)), near.snapped)).toBe(9);
+    // ... and the floor does the same: a candidate past the last frame while
+    // shortening (0.01, with the edge held at 0.033) is not claimed.
+    const floor = trimPiece(keep, 0, "out", 0.01, 60);
+    expect(floor[0]).toEqual([0, round3(FRAME_SECONDS)]);
+    expect(caughtAfterClamp(round3(floor[0][1]), snap(0.01, [0.01], 8 / 40).snapped)).toBeNull();
+  });
+});
+
+describe("trimLabel — what the drag says", () => {
+  it("says what is removed, what comes back, and why the edge will go no further", () => {
+    expect(trimLabel({ kind: "cut", a: 6, b: 7.2 }, false)).toBe("−1.200 s");
+    expect(trimLabel({ kind: "cut", a: 6, b: 6.033 }, false)).toBe("−0.033 s");
+    expect(trimLabel({ kind: "insert", t: 6, d: 0.8 }, false)).toBe("+0.800 s restored");
+    expect(trimLabel({ kind: "cut", a: 6, b: 11.967 }, true)).toBe("one frame — use Cut to remove it");
+    expect(trimLabel(null, true)).toBe("one frame — use Cut to remove it");
+    expect(trimLabel(null, false)).toBe("no change");
   });
 });

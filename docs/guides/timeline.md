@@ -54,6 +54,16 @@ A cut acts on a selection, and there are three ways to make one.
 - Click a **piece** of a lane that has been split — see below — and the piece
   becomes the selection.
 
+The handles and a Ctrl+drag's ends **snap**: within 8 px of the playhead, a
+join, a sentence's start or end, a music clip's edge, 0 or the end of the
+picture, the end you are dragging lands exactly on it and its time shows ⌖.
+Hold **Alt** while dragging to place it freely for that one drag. The
+**magnet** on the toolbar, beside Fit, turns snapping off for every drag on the
+strip — the handles, a range's ends, a piece's edge, a sentence block and a
+music clip alike — until it is switched on again; it is on by default and
+remembered per project in this browser, like the locks. A block and a clip
+still take Ctrl as well as Alt for a free drag.
+
 **Shift+,** and **Shift+.** grow the selection a frame at a time;
 **Ctrl+Shift+Home** and **Ctrl+Shift+End** stretch it to the start or the end
 of the picture. **Escape** gives up whatever is selected, in that order — the
@@ -120,14 +130,64 @@ lane always seeks.
 
 A split on a boundary that is already there changes nothing and is not saved.
 
+## Trimming a piece
+
+A piece's two edges are the cut itself, and they move. Over the outer 8 px of
+a piece on the Video or Narration lane the pointer becomes a resize arrow
+(never more than a third of a narrow piece, so it can still be clicked). Drag
+the **left edge** to the right to remove more from the piece's start, or back
+to the left to **restore** what an earlier cut took — as far as the previous
+piece's end, or the start of the video. Drag the **right edge** to the left to
+shorten the piece, or to the right to restore, as far as the next piece's
+start or the end of the video. The very first edge and the very last are the
+head and tail trims, and they exist on a lane with one whole piece too — the
+commonest edit, which used to take a selection and a Cut.
+
+While you drag, the stretch that will go is hatched red and the stretch that
+comes back is tinted green, the new edge is a bright line, and a label says
+where the edge now is and how much: "0:06.700 · −1.200 s", or
+"0:06.000 · +0.800 s restored". The edge snaps like the handles
+(see "Selecting a range"), and Alt turns that off for the drag. Everything
+after the edge moves with it when you let go — the output has no gaps, so a
+trim ripples exactly as a cut does — and the filmstrip and the waveform redraw
+on release.
+
+A trim never removes a piece: the edge stops one frame short, and the label
+says "one frame — use Cut to remove it". Select the piece and Cut instead.
+
+A trim is a cut with a name, so it obeys the locks exactly as a cut does.
+Shortening removes the same stretch of the output from every unlocked lane; a
+locked lane is left exactly as it is, and shows no edges to grab while it is
+locked. Restoring is the inverse, lane by lane:
+at that moment on the output, each unlocked lane's own cut opens up again by
+as much as it can — as much as was removed there, and nothing at all on a lane
+that has no cut at that moment. So a picture cut made with Narration locked,
+restored later, brings the frames back and leaves the sentences exactly where
+they are: a restore never invents narration that was never cut. The Audio lane
+has no edges of its own; the original audio follows the picture.
+
+A cut made mid-sentence leaves that sentence's block straddling the narration
+join, and a block sits above the pieces, so the narration's own edges at that
+join cannot be grabbed from the Narration lane: with both lanes unlocked the
+picture's edge trims both, and a narration-alone trim there needs the block
+dragged clear first (Reset timing brings it back).
+
+The music rides the picture here as everywhere. With Video and Music both
+unlocked, shortening ripples the clips as a cut does, and restoring moves every
+clip at or after the edge later by what the picture got back (a clip lying
+across the edge stays where it is, unsplit). With either lane locked the clips
+do not move, and a trim of the Narration lane moves them only as far as the
+picture itself changed. Undo takes a trim back like any other edit.
+
 ## Re-timing a sentence
 
 **Drag** a sentence block along the Narration lane to aim it somewhere else.
 It snaps to the playhead, to the picture's joins, to the start and the end, to
 the other sentences' pins and landed ends, and to **its own spoken moment** —
 so putting it back where it was said is a snap rather than a hunt. Hold
-**Ctrl** to drag freely. While a sentence is aimed away from where it was
-spoken, a ghost on the lane shows where that was.
+**Ctrl** or **Alt** to drag freely, or switch the magnet off. While a
+sentence is aimed away from where it was spoken, a ghost on the lane shows
+where that was.
 
 **[** and **]** nudge the selected blocks by 0.05 s, or by 0.25 s with Shift
 held. **Reset timing** in the toolbar puts them back exactly where they were
@@ -175,8 +235,9 @@ second.
 
 Drag a clip along the lane to move it — only its place changes, never the part
 of the file it plays. It snaps to the playhead, the picture's joins, the ends
-and the other clips, by either of its own edges; Ctrl drags freely. A clip
-cannot be dragged before zero or past the end of the audition.
+and the other clips, by either of its own edges; Ctrl or Alt drags freely, and
+the magnet turns the snapping off. A clip cannot be dragged before zero or
+past the end of the audition.
 
 Drag either **end** of a clip to trim it. The left edge moves the clip and its
 start in the file together, so the audio stays where it is under the pointer;
@@ -276,6 +337,7 @@ open.
 | **S** | Split the unlocked lanes at the playhead |
 | **Ctrl+Shift+S** | Split every lane, locks and all |
 | **[** / **]** | Nudge the selected blocks 0.05 s (Shift: 0.25 s) |
+| **Alt** (held while dragging) | No snapping for that drag — a handle, a range's end, a piece's edge, a block or a clip (Ctrl does the same for a block or a clip) |
 | **Ctrl+Z** / **Ctrl+Y** | Undo / redo (Ctrl+Shift+Z redoes as well) |
 | **Escape** | Give up the clip, then the blocks, then the range |
 | **Ctrl+Shift+D** | Clear the selection |

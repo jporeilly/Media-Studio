@@ -17,6 +17,7 @@ import {
   Eye,
   EyeOff,
   Lock,
+  Magnet,
   Maximize2,
   Mic,
   Music,
@@ -49,6 +50,8 @@ import {
   FRAME_SECONDS,
   UNDO_DEPTH,
   anchoredScrollLeft,
+  atFrameFloor,
+  caughtAfterClamp,
   clickSelectsPiece,
   clipAt,
   clipEnd,
@@ -77,25 +80,33 @@ import {
   missingAcross,
   missingAcrossRefusal,
   moveClip,
+  musicAfterTrim,
   newMusicClip,
   nextEditForCut,
   nextEditForSplit,
+  nextEditForTrim,
   outputDuration,
   pieceAt,
+  pieceEdgeAt,
   pieces,
   positionAfterEdit,
   projectPeaks,
   releaseSuppressesClick,
+  round3,
   sameEdit,
   sameMusic,
   sliderFromZoom,
   snap,
+  snapTargets,
   stepFrame,
   stepZoom,
   ticks,
   toSource,
   trackBody,
+  trimChange,
   trimClip,
+  trimLabel,
+  trimPiece,
   unmovedRelease,
   wholeKeep,
   withoutMissing,
@@ -111,6 +122,8 @@ import {
   type Piece,
   type Track,
   type TrackEdit,
+  type TrimChange,
+  type TrimEdge,
 } from "../../lib/edit";
 import { useStudioSettings } from "../../lib/studioSettings";
 import type { Segment } from "../../lib/narration";
@@ -216,6 +229,14 @@ interface Drag {
   clip?: MusicClip;
   zone?: ClipZone;
   clipNow?: MusicClip;
+  /** A piece trim (E5a): the lane, the piece and which of its edges; and where the edge is painted now, in both axes. */
+  lane?: Track;
+  pieceIndex?: number;
+  edge?: TrimEdge;
+  trimNow?: { toSource: number; at: number };
+  /** A handle or a range end: the candidate it caught (null: none) and which end of the selection is moving, for the label's ⌖. */
+  snapped?: number | null;
+  snapEnd?: "start" | "end";
 }
 
 /** Fetched three at a time. Sixty requests at once queue behind each other in
@@ -239,6 +260,8 @@ const NUDGE_SECONDS = 0.05;
 const NUDGE_LARGE_SECONDS = 0.25;
 /** Where a project's lock state is remembered: the client's, per visit, never on the record (decision 2 of §11.7). */
 const locksKey = (projectId: string) => `ms:tl-locks:${projectId}`;
+/** Where the magnet is remembered, beside the locks (E5a, spec §13.4): on by default, off only when it was switched off. */
+const snapKey = (projectId: string) => `ms:tl-snap:${projectId}`;
 const UNLOCKED: Locks = { video: false, narration: false, music: false };
 const NO_BLOCKS: ReadonlySet<number> = new Set();
 /** The lead given to a clip whose buffer arrives mid-play, so its `start` is not already in the past. */
@@ -257,6 +280,28 @@ function readLocks(projectId: string): Locks {
     return laneLocks(JSON.parse(localStorage.getItem(locksKey(projectId)) ?? "null"));
   } catch { /* no storage, or not ours: unlocked */ }
   return UNLOCKED;
+}
+
+/** A callback ref per named layer that keeps `into` current — built once, so React is not handed a new ref every render. */
+function layerRefs(
+  layers: readonly string[], into: { current: Map<string, HTMLDivElement> },
+): Record<string, (node: HTMLDivElement | null) => void> {
+  const out: Record<string, (node: HTMLDivElement | null) => void> = {};
+  for (const layer of layers) {
+    out[layer] = (node) => {
+      if (node) into.current.set(layer, node);
+      else into.current.delete(layer);
+    };
+  }
+  return out;
+}
+
+/** The stored magnet: anything but a stored `false` reads as ON — a project never switched off comes back snapping. */
+function readSnapping(projectId: string): boolean {
+  try {
+    return localStorage.getItem(snapKey(projectId)) !== "false";
+  } catch { /* no storage: on, then */ }
+  return true;
 }
 
 /**
@@ -378,6 +423,9 @@ export function NarrationTimeline({
   });
 
   const sentences = useMemo(() => plan.data?.sentences ?? [], [plan.data]);
+  /** Read by the drags' stable callbacks (the snap candidates are the drawn blocks' ends). */
+  const sentencesRef = useRef(sentences);
+  sentencesRef.current = sentences;
   // The OUTPUT's length when there is a cut - the plan already says so.
   const duration = plan.data?.duration ?? peaks.data?.duration ?? 0;
   const durationRef = useRef(duration);
@@ -446,8 +494,12 @@ export function NarrationTimeline({
   const joinsRef = useRef<Join[]>(joinList);
   joinsRef.current = joinList;
   const narrationJoins = useMemo(() => joins(narrationKeep, sourceDuration), [narrationKeep, sourceDuration]);
+  const narrationJoinsRef = useRef<Join[]>(narrationJoins);
+  narrationJoinsRef.current = narrationJoins;
   // The pieces per lane - the stretches between boundaries, what a click selects.
   const videoPieces = useMemo(() => pieces(keep, sourceDuration), [keep, sourceDuration]);
+  const videoPiecesRef = useRef(videoPieces);
+  videoPiecesRef.current = videoPieces;
   const narrationPieces = useMemo(() => pieces(narrationKeep, sourceDuration), [narrationKeep, sourceDuration]);
   const narrationPiecesRef = useRef(narrationPieces);
   narrationPiecesRef.current = narrationPieces;
@@ -485,6 +537,24 @@ export function NarrationTimeline({
     const alone = !held[lane] && LANES.every((other) => other === lane || held[other]);
     changeLocks(alone ? UNLOCKED : { video: true, narration: true, music: true, [lane]: false });
   }, [changeLocks]);
+
+  // ── the magnet (E5a, spec §13.4) ─────────────────────────────────────────
+  //
+  // Camtasia's toolbar toggle: it governs EVERY snapping gesture - the green
+  // and red handles, a Ctrl+drag range's ends, a piece's trimmed edge, E3's
+  // block drag and E4b's clip drag. On by default, remembered per project in
+  // localStorage beside the locks. Holding Alt during a drag turns it off for
+  // that drag alone (Ctrl cannot: Ctrl+drag IS the range gesture; the block
+  // and clip drags keep Ctrl as a synonym).
+  const [snapping, setSnapping] = useState<boolean>(() => readSnapping(projectId));
+  useEffect(() => { setSnapping(readSnapping(projectId)); }, [projectId]);
+  const snappingRef = useRef(snapping);
+  snappingRef.current = snapping;
+  const toggleSnapping = useCallback(() => {
+    const next = !snappingRef.current;
+    setSnapping(next);
+    try { localStorage.setItem(snapKey(projectId), JSON.stringify(next)); } catch { /* no storage: per visit, then */ }
+  }, [projectId]);
 
   // The render's own tempo-squeeze constants, never literals here: see
   // `renderedLength` in lib/timeline.ts.
@@ -899,12 +969,18 @@ export function NarrationTimeline({
         bandRef.current.style.display = "none";
       }
     }
+    // A handle or a range end that caught a snap candidate says so with ⌖ on
+    // the end that is moving (E5a) - read off the drag here rather than
+    // written by the move handler, because the animation loop repaints these
+    // labels every frame while the audition plays.
+    const drag = dragRef.current;
+    const caught = drag && drag.moved && drag.snapped !== null && drag.snapped !== undefined ? drag.snapEnd : undefined;
     if (inLabelRef.current) {
-      inLabelRef.current.textContent = sel ? timecode(sel.start) : "";
+      inLabelRef.current.textContent = sel ? `${timecode(sel.start)}${caught === "start" ? " ⌖" : ""}` : "";
       inLabelRef.current.style.transform = `translateX(${inAt}px) translateX(-100%)`;
     }
     if (outLabelRef.current) {
-      outLabelRef.current.textContent = sel ? timecode(sel.end) : "";
+      outLabelRef.current.textContent = sel ? `${timecode(sel.end)}${caught === "end" ? " ⌖" : ""}` : "";
       outLabelRef.current.style.transform = `translateX(${outAt}px)`;
     }
   }, []);
@@ -1502,13 +1578,58 @@ export function NarrationTimeline({
     if (clipLabelRef.current) clipLabelRef.current.style.display = "none";
   }, []);
 
+  // ── a trim in flight (E5a) ───────────────────────────────────────────────
+  //
+  // The edge follows the pointer, snapped, and the strip re-lays on RELEASE,
+  // not per frame: the filmstrip and the waveform are drawn from the plan
+  // (spec §13.1). What moves meanwhile is one overlay per pieces layer - the
+  // stretch between the edge's old and new positions, hatched where it will
+  // be removed and tinted where it comes back, with the live edge as a line
+  // on the side the pointer is on - and a label. Painted through refs, never
+  // through state. The picture's trim paints the Video AND Audio layers,
+  // because the original audio follows the picture; the narration's paints
+  // its own.
+  const trimNodes = useRef(new Map<string, HTMLDivElement>());
+  const trimLabels = useRef(new Map<string, HTMLDivElement>());
+  // One callback ref per layer, made ONCE: a ref minted per render is called
+  // with null and then the node again on every render of the strip.
+  const trimRefs = useMemo(() => layerRefs(["video", "audio", "narration"], trimNodes), []);
+  const trimLabelRefs = useMemo(() => layerRefs(["video", "narration"], trimLabels), []);
+  const paintTrim = useCallback((
+    drag: Drag, from: number, to: number, change: TrimChange | null, atFloor: boolean, snapped: number | null,
+  ) => {
+    const pps = ppsRef.current;
+    const lo = Math.min(from, to) * pps;
+    const hi = Math.max(from, to) * pps;
+    for (const layer of drag.lane === "video" ? ["video", "audio"] : ["narration"]) {
+      const node = trimNodes.current.get(layer);
+      if (!node) continue;
+      node.style.display = "";
+      node.style.left = `${lo}px`;
+      node.style.width = `${Math.max(0, hi - lo)}px`;
+      node.className = `os-tl-trim ${change?.kind === "insert" ? "restore" : "cut"} ${to >= from ? "right" : "left"}`;
+    }
+    const label = trimLabels.current.get(drag.lane === "video" ? "video" : "narration");
+    if (label) {
+      label.style.display = "";
+      label.style.transform = `translateX(${to * pps}px)`;
+      const what = `${timecode(to)} · ${trimLabel(change, atFloor)}`;
+      label.textContent = snapped === null ? what : `${what} ⌖`;
+    }
+  }, []);
+  const clearTrim = useCallback(() => {
+    trimNodes.current.forEach((node) => { node.style.display = "none"; });
+    trimLabels.current.forEach((node) => { node.style.display = "none"; });
+  }, []);
+
   /** Take the blocks a move painted through their transforms, and the clips a clip drag painted, back to the plan's. */
   const clearMoved = useCallback(() => {
     blockNodes.current.forEach((node) => { node.style.transform = ""; });
     dragGhosts.current.forEach((node) => { node.style.display = "none"; });
     if (moveLabelRef.current) moveLabelRef.current.style.display = "none";
     clearClipDrag();
-  }, [clearClipDrag]);
+    clearTrim();
+  }, [clearClipDrag, clearTrim]);
   // THE RACE THE LOCK CLOSES. A commit succeeds and the plan is invalidated,
   // but until the refetch lands the strip is still drawn from the PREVIOUS
   // plan (`keepPreviousData`) - and the server re-measures the speaking rate
@@ -1879,12 +2000,29 @@ export function NarrationTimeline({
    *  the pressed child to the body anyway. `grabbed` is the timeline moment
    *  of the thing under the pointer (a handle, the head, a block), so that
    *  thing follows the pointer from where it was rather than jumping to it. */
+  /**
+   * ONE candidate set for every gesture that places a cut (E5a, spec §13.4):
+   * 0, the picture's end, the playhead, every join on either track, every
+   * sentence pin - each block's drawn start and end - and every clip's two
+   * edges. Built once per gesture, never per pointer move (trap 41).
+   */
+  const snapTargetsNow = useCallback(() => snapTargets({
+    playhead: positionRef.current,
+    duration: durationRef.current,
+    joins: [...joinsRef.current, ...narrationJoinsRef.current].map((join) => join.at),
+    pins: sentencesRef.current.flatMap((s) => [s.pinned_start, s.pinned_start + (s.end - s.start)]),
+    clips: musicRef.current,
+  }), []);
+
   const beginDrag = useCallback((
     event: ReactPointerEvent, kind: DragKind, anchor: number, grabbed?: number,
-    move?: Pick<Drag, "index" | "members" | "snapTo" | "clip" | "zone">,
+    move?: Pick<Drag, "index" | "members" | "snapTo" | "clip" | "zone" | "lane" | "pieceIndex" | "edge">,
   ) => {
     const body = bodyRef.current;
     if (!body || event.button !== 0) return;
+    // The handles, a range's ends and a trimmed edge share the full candidate
+    // set; the block and clip drags bring their own subsets.
+    const snapTo = move?.snapTo ?? (kind === "in" || kind === "out" || kind === "range" || kind === "piece-trim" ? snapTargetsNow() : undefined);
     dragRef.current = {
       kind,
       anchor,
@@ -1895,10 +2033,11 @@ export function NarrationTimeline({
       pointerId: event.pointerId,
       delta: 0,
       ...move,
+      snapTo,
     };
     event.stopPropagation();
     event.preventDefault();
-  }, [secondsAt]);
+  }, [secondsAt, snapTargetsNow]);
 
   /** Paint the marquee's band over the Narration lane between two moments, through its ref. */
   const paintMarquee = useCallback((a: number, b: number) => {
@@ -1953,7 +2092,9 @@ export function NarrationTimeline({
       // paint a clip the server would refuse.
       const base = drag.clip;
       if (!base) return;
-      const free = event.ctrlKey || event.metaKey;
+      // The magnet governs this drag too (E5a); Ctrl stays its synonym here,
+      // and Alt is the one modifier that turns snapping off everywhere.
+      const free = !snappingRef.current || event.ctrlKey || event.metaKey || event.altKey;
       const threshold = SNAP_PX / ppsRef.current;
       let next: MusicClip;
       let snapped: number | null;
@@ -1961,17 +2102,22 @@ export function NarrationTimeline({
         const landed = free || !drag.snapTo
           ? { at: Math.max(0, t), snapped: null }
           : snapClip(t, clipLength(base), drag.snapTo, threshold);
-        snapped = landed.snapped;
         // Clamped to the END of the audition as well as to 0 (`moveClip`), as
         // E3's block drag is: the pointer is captured on the body, so a drag
         // carries on past the strip, and a clip parked out there is dropped
         // by the render (`amix=…:duration=first`) while the Render line still
         // counts it.
         next = moveClip(base, landed.at, totalRef.current);
+        // ⌖ only when the moved clip really sits on the candidate - by its
+        // start or by its end, since `snapClip` may catch by either - after
+        // `moveClip`'s clamps (0, the audition's end) have had their say.
+        snapped = caughtAfterClamp(next.at, landed.snapped) ?? caughtAfterClamp(clipEnd(next), landed.snapped);
       } else {
         const landed = free || !drag.snapTo ? { t, snapped: null } : snap(t, drag.snapTo, threshold);
-        snapped = landed.snapped;
         next = trimClip(base, drag.zone === "in" ? "in" : "out", landed.t, fileSecondsOf(base));
+        // ⌖ only when the trimmed edge IS the candidate: `trimClip`'s clamps
+        // (0.1 s, the file's length, 0) can hold it short of one.
+        snapped = caughtAfterClamp(drag.zone === "in" ? next.at : clipEnd(next), landed.snapped);
       }
       drag.clipNow = next;
       paintClip(drag, next, snapped);
@@ -1990,7 +2136,9 @@ export function NarrationTimeline({
       const pps = ppsRef.current;
       let delta = (event.clientX - drag.startX) / pps;
       let snapped: number | null = null;
-      if (!(event.ctrlKey || event.metaKey) && drag.snapTo) {
+      // The magnet governs this drag too (E5a); Ctrl stays E3's synonym for
+      // Alt here, the one modifier that turns snapping off everywhere.
+      if (snappingRef.current && !(event.ctrlKey || event.metaKey || event.altKey) && drag.snapTo) {
         const landed = snap(grabbed.pinned_start + delta, drag.snapTo, SNAP_PX / pps);
         delta = landed.t - grabbed.pinned_start;
         snapped = landed.snapped;
@@ -1998,6 +2146,9 @@ export function NarrationTimeline({
       const pins = members.map((s) => s.pinned_start);
       delta = Math.max(delta, -Math.min(...pins));
       delta = Math.min(delta, totalRef.current - Math.max(...pins));
+      // ⌖ only when the grabbed block's pin IS the candidate: the clamp above
+      // can hold it short of one while another member sits at an end.
+      snapped = caughtAfterClamp(grabbed.pinned_start + delta, snapped);
       drag.delta = delta;
       for (const s of members) {
         const node = blockNodes.current.get(s.index);
@@ -2012,11 +2163,54 @@ export function NarrationTimeline({
       }
       return;
     }
-    // A handle drags its own end; Ctrl+drag grows from where it began. Painted
-    // through the ref, never through state, until release.
-    selectionRef.current = drag.kind === "in" ? normalize(t, drag.anchor) : normalize(drag.anchor, t);
+    if (drag.kind === "piece-trim") {
+      // A piece's edge follows the pointer, snapped, and the bound is the
+      // model's (`trimPiece`, lib/edit.ts) - clamped to the neighbouring
+      // range, to 0 or the source's end, and to one frame of the piece - so
+      // the paint never promises a list the server would refuse. The pointer
+      // moves on the OUTPUT axis; the edge's source bound is the piece's own
+      // mapping extended past its end, which is exactly the removed material
+      // a restore brings back.
+      const { lane, pieceIndex: index, edge } = drag;
+      if (lane === undefined || index === undefined || edge === undefined) return;
+      const piece = (lane === "video" ? videoPiecesRef.current : narrationPiecesRef.current)[index];
+      if (!piece) return;
+      const free = !snappingRef.current || event.altKey;
+      const landed = free || !drag.snapTo ? { t, snapped: null } : snap(t, drag.snapTo, SNAP_PX / ppsRef.current);
+      const oldBound = edge === "in" ? piece.sourceStart : piece.sourceEnd;
+      const oldAt = edge === "in" ? piece.start : piece.end;
+      const list = lane === "video" ? keepRef.current : narrationKeepRef.current;
+      const source = sourceDurationRef.current;
+      const trimmed = trimPiece(list, index, edge, oldBound + (landed.t - oldAt), source);
+      const bound = trimmed[index][edge === "in" ? 0 : 1];
+      const at = round3(oldAt + (bound - oldBound));
+      drag.trimNow = { toSource: bound, at };
+      // ⌖ only when the painted edge IS the candidate: `trimPiece`'s clamp -
+      // the neighbouring range, the floor, 0, the end - routinely sits beside
+      // one and holds the edge short of it (the Reviewer's MINOR 1).
+      paintTrim(drag, oldAt, at, trimChange(list, index, edge, bound, source), atFrameFloor(trimmed, index), caughtAfterClamp(at, landed.snapped));
+      return;
+    }
+    // A handle drags its own end; Ctrl+drag grows from where it began. Both
+    // snap to the one candidate set (E5a) unless the magnet is off or Alt is
+    // held; the label's ⌖ is `paint`'s, read off the drag. Painted through
+    // the ref, never through state, until release.
+    const free = !snappingRef.current || event.altKey;
+    const landed = free || !drag.snapTo ? { t, snapped: null } : snap(t, drag.snapTo, SNAP_PX / ppsRef.current);
+    let sel: Selection;
+    if (drag.kind === "in") {
+      sel = normalize(landed.t, drag.anchor);
+      drag.snapEnd = landed.t <= drag.anchor ? "start" : "end";
+    } else {
+      sel = normalize(drag.anchor, landed.t);
+      drag.snapEnd = landed.t < drag.anchor ? "start" : "end";
+    }
+    selectionRef.current = sel;
+    // ⌖ only when the moving end IS the candidate: `normalize` clamps to the
+    // picture, and the playhead can sit past it during an overrunning narration.
+    drag.snapped = caughtAfterClamp(drag.snapEnd === "start" ? sel.start : sel.end, landed.snapped);
     paint();
-  }, [halt, normalize, paint, paintClip, paintMarquee, position, secondsAt, syncVideo]);
+  }, [halt, normalize, paint, paintClip, paintMarquee, paintTrim, position, secondsAt, syncVideo]);
 
   /** A piece under the pointer becomes the selection: the handles jump to its ends and the band spans it. */
   const selectPiece = useCallback((piece: Piece | null) => {
@@ -2054,7 +2248,11 @@ export function NarrationTimeline({
       // What a click means, per kind (lib/edit.ts, `unmovedRelease`).
       switch (unmovedRelease(drag.kind, drag.seekOnClick, cancelled)) {
         case "seek": seek(secondsAt(event.clientX)); return;
-        case "pick": pickOnLane("narration", narrationPiecesRef.current, event.clientX); return;
+        // A marquee picks on the Narration lane; a pressed piece edge on its own lane.
+        case "pick":
+          if (drag.lane === "video") pickOnLane("video", videoPiecesRef.current, event.clientX);
+          else pickOnLane("narration", narrationPiecesRef.current, event.clientX);
+          return;
         case "keep-selection": commitSelection(selectionRef.current); return;
         case "click":
           if (moveLabelRef.current) moveLabelRef.current.style.display = "none";
@@ -2093,6 +2291,47 @@ export function NarrationTimeline({
       if (clipLabelRef.current) clipLabelRef.current.style.display = "none";
       return;
     }
+    if (drag.kind === "piece-trim") {
+      // ONE PUT on release, through the same path a Cut takes: the new lists
+      // for every unlocked track from `nextEditForTrim` (a trim is a cut with
+      // a name, trap 37), the clips from `musicAfterTrim` - the music rides
+      // the PICTURE's change - and `commitEdit`, which skips a no-op
+      // (`sameEdit`) and holds the commit lock. The overlay goes at once:
+      // the strip re-lays from the plan the server answers with.
+      clearTrim();
+      const now = drag.trimNow;
+      const { lane, pieceIndex: index, edge } = drag;
+      if (cancelled || editLockedRef.current || !now || lane === undefined || index === undefined || edge === undefined) return;
+      const held = locksRef.current;
+      const before = committedRef.current;
+      const outcome = nextEditForTrim(before, held, lane, index, edge, now.toSource, sourceDurationRef.current);
+      if (outcome.refused) {
+        const track = outcome.refused === "video" ? "picture" : "narration";
+        setRefusal(`Keep at least one range — that trim would remove the whole ${track}.`);
+        return;
+      }
+      if (!outcome.next || !outcome.change) return;
+      // A shortening ACROSS a missing clip would change its slice, which the
+      // server refuses (E4c) in words about a trim of the clip, not this
+      // gesture: refused here first, as the cut and the split are, only
+      // where the ripple applies at all.
+      const picture = outcome.picture;
+      if (picture?.kind === "cut" && !held.music && !held.video) {
+        const across = missingAcross(before.music, picture.a, picture.b);
+        if (across.length > 0) {
+          setRefusal(missingAcrossRefusal("trim", across, picture.a, picture.b));
+          return;
+        }
+      }
+      const music = musicAfterTrim(before.music, held, outcome.picture);
+      if (music.length > MAX_CLIPS) {
+        setRefusal(`That trim would split the music into ${music.length} clips, past the limit of ${MAX_CLIPS} — `
+          + "remove a clip first, or lock the Music lane to trim the picture alone.");
+        return;
+      }
+      commitEdit({ ...outcome.next, music });
+      return;
+    }
     if (drag.kind === "move") {
       if (moveLabelRef.current) moveLabelRef.current.style.display = "none";
       // ONE request on release, never per frame (trap 8): the moved blocks'
@@ -2108,7 +2347,7 @@ export function NarrationTimeline({
       return;
     }
     commitSelection(selectionRef.current);
-  }, [clearClipDrag, clearMoved, commitMusic, commitOffsets, commitSelection, pickOnLane, secondsAt, seek, sentences]);
+  }, [clearClipDrag, clearMoved, clearTrim, commitEdit, commitMusic, commitOffsets, commitSelection, pickOnLane, secondsAt, seek, sentences]);
 
   /** Down on the ruler: scrub, or with Ctrl a selection from this point. */
   const onRulerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2149,6 +2388,25 @@ export function NarrationTimeline({
     if (suppressClick.current || event.ctrlKey || event.metaKey) return;
     pickOnLane("video", videoPieces, event.clientX);
   };
+  /**
+   * Down on a lane's pieces layer: a TRIM when the pointer has a piece's
+   * edge - which edge is `pieceEdgeAt`'s answer at the current zoom, capped
+   * at a third of the piece like a clip's, so the zones never eat a narrow
+   * piece's body - on an unlocked lane only (a locked lane has no edges, and
+   * Audio · original follows Video and has none of its own). Anything else
+   * is left to bubble: a click picks or seeks as before, a press on the
+   * Narration lane's empty space is its marquee, and Ctrl+drag is the range
+   * everywhere. The pointer is captured lazily by the body's move handler.
+   */
+  const onPiecesPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>, lane: Track, list: Piece[]) => {
+    if (event.ctrlKey || event.metaKey || event.button !== 0) return;
+    if (editLocked || locksRef.current[lane]) return;
+    const hit = pieceEdgeAt(list, secondsAt(event.clientX), CLIP_EDGE_PX / ppsRef.current);
+    if (!hit) return;
+    const piece = list[hit.index];
+    const grabbed = hit.edge === "in" ? piece.start : piece.end;
+    beginDrag(event, "piece-trim", grabbed, grabbed, { lane, pieceIndex: hit.index, edge: hit.edge });
+  }, [beginDrag, editLocked, secondsAt]);
   /** Down on empty Narration-lane space: a marquee (a click selects the piece); Ctrl+drag stays the body's. */
   const onNarrationLanePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.ctrlKey || event.metaKey) return;
@@ -2525,27 +2783,30 @@ export function NarrationTimeline({
       <div className="os-tl-help os-muted os-small">
         <div>
           Play to hear the new narration against the picture — no render, no job. A block sits where its
-          sentence is <strong>aimed</strong>, and the picture skips at a join because that is the edit.
+          sentence is <strong>aimed</strong>; the picture skips at a join because that is the edit.
         </div>
+        {/* Ten rows since E5a: the trim's row is paid for by the lane's name
+            and its lock sharing one, and the word budget by a word off six
+            others (the render harness counts both). */}
         <dl className="os-tl-actions">
           <dt>Drag the green or red handle, or Ctrl+drag</dt>
-          <dd>Select a range</dd>
+          <dd>Select a range; snaps to pins and joins, Alt: no snap</dd>
           <dt>Scissors, or Delete</dt>
-          <dd>Cut the selection and close the gap</dd>
+          <dd>Cut the selection, close the gap</dd>
+          <dt>Drag a piece's edge</dt>
+          <dd>Trim the cut; drag it back out to restore</dd>
           <dt>S</dt>
           <dd>Split the unlocked lanes at the playhead</dd>
-          <dt>Click a lane's name</dt>
-          <dd>Edit that channel alone — the others lock</dd>
-          <dt>The lock icon</dt>
-          <dd>Leave that lane exactly as it is</dd>
+          <dt>A lane's name, or its lock</dt>
+          <dd>Edit that channel alone (the others lock), or leave that lane as it is</dd>
           <dt>Drag a sentence block</dt>
-          <dd>Re-time it; [ and ] nudge, Reset timing puts it back</dd>
+          <dd>Re-time it; [ / ] nudge, Reset timing puts it back</dd>
           <dt>The + on Music</dt>
-          <dd>The library — add a track at the playhead</dd>
+          <dd>The library: add a track at the playhead</dd>
           <dt>Drag a clip, or either of its ends</dt>
-          <dd>Move it, or trim it; Delete removes it</dd>
+          <dd>Move or trim it; Delete removes it</dd>
           <dt>The eye on Music</dt>
-          <dd>Hear the voice alone — the render still mixes the music</dd>
+          <dd>Hear the voice alone; the render still mixes it</dd>
           <dt>Ctrl+Z</dt>
           <dd>Undo</dd>
         </dl>
@@ -2777,6 +3038,25 @@ export function NarrationTimeline({
           <button type="button" className="os-tl-btn" aria-label="Fit" title="Fit the whole edit in the strip (Ctrl+Shift+7)" disabled={zoomNow <= 1} onClick={zoomFit}>
             <Maximize2 size={14} />
           </button>
+          {/* Camtasia's magnet (E5a): every snapping gesture on the strip
+              obeys it, and Alt while dragging turns it off for one drag. */}
+          <button
+            type="button"
+            className="os-tl-btn os-tl-magnet"
+            aria-label="Snapping"
+            aria-pressed={snapping}
+            title={snapping
+              ? "Snapping is on: a dragged handle, a range's end, a piece's edge, a sentence block or a music clip "
+                + "catches the playhead, the joins, the sentence pins and the clips' ends within 8 px. Hold Alt while "
+                + "dragging to turn it off for that drag; click to turn it off."
+              : "Snapping is off: drags land exactly where the pointer leaves them. Click to turn it on — a dragged "
+                + "handle, a range's end, a piece's edge, a sentence block or a music clip then catches the playhead, "
+                + "the joins, the sentence pins and the clips' ends within 8 px, and Alt while dragging turns it off "
+                + "for that drag."}
+            onClick={toggleSnapping}
+          >
+            <Magnet size={14} />
+          </button>
         </div>
 
         <div className="os-tl-tracks">
@@ -2898,17 +3178,43 @@ export function NarrationTimeline({
                   - as layers over the two lanes (the film and the waveform
                   beneath are not positioned, so these paint above them). The
                   Narration lane's pieces sit inside its own lane, under the
-                  blocks. */}
+                  blocks.
+
+                  A piece's edges are the cut, and move (E5a): each piece of
+                  an UNLOCKED lane carries a trim zone at either end - the
+                  ew-resize cursor only; the pointer-down bubbles to the
+                  layer, which asks `pieceEdgeAt` which edge it has. The
+                  Video layer alone: Audio · original follows Video and has
+                  no edges of its own, though a trim in flight is painted
+                  over both, because the picture's audio goes with it. */}
               {(["video", "audio"] as const).map((lane) => (
-                <div key={lane} className={`os-tl-pieces ${lane}${locks.video ? " locked" : ""}`} onClick={onPieceClick}>
+                <div
+                  key={lane}
+                  className={`os-tl-pieces ${lane}${locks.video ? " locked" : ""}`}
+                  onClick={onPieceClick}
+                  onPointerDown={lane === "video" ? (event) => onPiecesPointerDown(event, "video", videoPieces) : undefined}
+                >
                   {videoPieces.map((piece) => (
                     <div
                       key={piece.start}
                       className="os-tl-piece"
                       style={{ left: piece.start * pps, width: Math.max(1, (piece.end - piece.start) * pps) }}
-                      title={`${timecode(piece.start)} – ${timecode(piece.end)} (${timecode(piece.sourceStart)} – ${timecode(piece.sourceEnd)} of the source). Click to select.`}
-                    />
+                      title={`${timecode(piece.start)} – ${timecode(piece.end)} (${timecode(piece.sourceStart)} – ${timecode(piece.sourceEnd)} of the source). `
+                        + (lane === "video" && !locks.video ? "Click to select; drag an edge to trim." : "Click to select.")}
+                    >
+                      {lane === "video" && !locks.video && (
+                        <>
+                          <span className="os-tl-piece-edge in" aria-hidden="true" />
+                          <span className="os-tl-piece-edge out" aria-hidden="true" />
+                        </>
+                      )}
+                    </div>
                   ))}
+                  {/* A trim in flight, painted through its ref. */}
+                  <div className="os-tl-trim" ref={trimRefs[lane]} style={{ display: "none" }} aria-hidden="true" />
+                  {lane === "video" && (
+                    <div className="os-tl-trim-label" ref={trimLabelRefs.video} style={{ display: "none" }} aria-hidden="true" />
+                  )}
                 </div>
               ))}
 
@@ -2934,15 +3240,29 @@ export function NarrationTimeline({
                   blocks, a marquee on the empty space between them, and one
                   block per sentence that can be dragged along the lane. */}
               <div className={`os-tl-blocks${locks.narration ? " locked" : ""}`} onPointerDown={onNarrationLanePointerDown}>
-                <div className={`os-tl-pieces narration${locks.narration ? " locked" : ""}`}>
+                <div
+                  className={`os-tl-pieces narration${locks.narration ? " locked" : ""}`}
+                  onPointerDown={(event) => onPiecesPointerDown(event, "narration", narrationPieces)}
+                >
                   {narrationPieces.map((piece) => (
                     <div
                       key={piece.start}
                       className="os-tl-piece"
                       style={{ left: piece.start * pps, width: Math.max(1, (piece.end - piece.start) * pps) }}
-                      title={`${timecode(piece.start)} – ${timecode(piece.end)} (${timecode(piece.sourceStart)} – ${timecode(piece.sourceEnd)} of the source). Click to select.`}
-                    />
+                      title={`${timecode(piece.start)} – ${timecode(piece.end)} (${timecode(piece.sourceStart)} – ${timecode(piece.sourceEnd)} of the source). `
+                        + (locks.narration ? "Click to select." : "Click to select; drag an edge to trim.")}
+                    >
+                      {!locks.narration && (
+                        <>
+                          <span className="os-tl-piece-edge in" aria-hidden="true" />
+                          <span className="os-tl-piece-edge out" aria-hidden="true" />
+                        </>
+                      )}
+                    </div>
                   ))}
+                  {/* A trim in flight, painted through its ref. */}
+                  <div className="os-tl-trim" ref={trimRefs.narration} style={{ display: "none" }} aria-hidden="true" />
+                  <div className="os-tl-trim-label" ref={trimLabelRefs.narration} style={{ display: "none" }} aria-hidden="true" />
                 </div>
                 {narrationJoins.map((join) => (
                   <div
@@ -2997,7 +3317,7 @@ export function NarrationTimeline({
                           + (landed ? `\nLands at ${timecode(landed.start)}` : "")
                           + (landed?.squeezedHere ? "\nSped up slightly to fit the gap after it." : "")
                           + why
-                          + "\n\nDrag to move it (Ctrl: no snapping); [ and ] nudge the selection"
+                          + "\n\nDrag to move it (Alt or Ctrl: no snapping); [ and ] nudge the selection"
                           + (nudged ? "; Reset timing puts it back where it was spoken." : ".")}
                         style={{
                           left: sentence.pinned_start * pps,
@@ -3056,7 +3376,7 @@ export function NarrationTimeline({
                             + " render will refuse. Drag to move it, set its level and fades, or Delete to remove"
                             + " it — it cannot be trimmed while the file is gone. Or upload the file again under"
                             + " the same name."
-                          : "\n\nDrag to move it (Ctrl: no snapping); drag an end to trim it; Delete removes it.")}
+                          : "\n\nDrag to move it (Alt or Ctrl: no snapping); drag an end to trim it; Delete removes it.")}
                       style={{ left: held.at * pps, width }}
                       onPointerDown={(event) => onClipPointerDown(event, held)}
                       onClick={(event) => onClipClick(event, held)}

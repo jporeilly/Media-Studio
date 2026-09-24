@@ -55,6 +55,8 @@ import {
   missingAcross,
   missingAcrossRefusal,
   moveClip,
+  musicAfterInsert,
+  musicAfterTrim,
   musicBody,
   newMusicClip,
   renderSummary,
@@ -697,8 +699,9 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(timeline).toMatch(/const music = musicAfterCut\(before\.music, held, sel\.start, sel\.end\)/);
     // A split is not subject to it: it changes no clip's `at`.
     expect(timeline).toMatch(/const music = !all && locksRef\.current\.music \? before\.music : cutMusic\(before\.music, at, at\)/);
-    // ... and both gestures check the 200-clip cap the ripple can cross.
-    expect(timeline.match(/music\.length > MAX_CLIPS/g) ?? []).toHaveLength(2);
+    // ... and all three gestures that ripple the clips - the cut, the split
+    // and (E5a) the trim - check the 200-clip cap the ripple can cross.
+    expect(timeline.match(/music\.length > MAX_CLIPS/g) ?? []).toHaveLength(3);
     // The scissors is disabled by the rule `canCut` holds, and the keys ask it too.
     expect(timeline).toMatch(/disabled=\{!selection \|\| editLocked \|\| !canCut\(locks\)\}/);
     expect(timeline).toMatch(/if \(!canCut\(held\)\) \{/);
@@ -774,6 +777,74 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     // `editRefusal` takes the detail and the kind, nothing about the lane.
     expect(timeline).toMatch(/editRefusal\(errorMessage\(commit\.error\), commit\.variables\?\.op\.kind === "offsets" \? "timing" : "edit"\)/);
     expect(timeline).not.toMatch(/frozen|unfreeze|cannot be changed until/);
+  });
+
+  it("snaps the handles, a range's ends and a trimmed edge to ONE candidate set, built once per gesture (E5a)", () => {
+    // The set is `snapTargets` (tested in edit.test.ts); this pins that
+    // `beginDrag` builds it once for exactly these kinds (trap 41) and that
+    // the pins are the drawn blocks' starts and ends.
+    expect(timeline).toMatch(
+      /const snapTo = move\?\.snapTo \?\? \(kind === "in" \|\| kind === "out" \|\| kind === "range" \|\| kind === "piece-trim" \? snapTargetsNow\(\) : undefined\)/,
+    );
+    expect(handler("snapTargetsNow")).toMatch(/pins: sentencesRef\.current\.flatMap\(\(s\) => \[s\.pinned_start, s\.pinned_start \+ \(s\.end - s\.start\)\]\)/);
+    expect(handler("snapTargetsNow")).toMatch(/joins: \[\.\.\.joinsRef\.current, \.\.\.narrationJoinsRef\.current\]/);
+    // The handle / range branch and the trim branch snap through `drag.snapTo`
+    // unless the magnet is off or Alt is held - the same line in both.
+    const free = timeline.match(/const free = !snappingRef\.current \|\| event\.altKey;\s*const landed = free \|\| !drag\.snapTo \? \{ t, snapped: null \} : snap\(t, drag\.snapTo, SNAP_PX \/ ppsRef\.current\);/g) ?? [];
+    expect(free).toHaveLength(2);
+    // The handle's label gains ⌖ from `paint`, off the drag, on the moving end.
+    expect(handler("paint")).toMatch(/const caught = drag && drag\.moved && drag\.snapped !== null && drag\.snapped !== undefined \? drag\.snapEnd : undefined;/);
+    expect(handler("paint")).toMatch(/\$\{caught === "start" \? " ⌖" : ""\}/);
+    expect(handler("paint")).toMatch(/\$\{caught === "end" \? " ⌖" : ""\}/);
+  });
+
+  it("lets the magnet govern the block drag and the clip drag too, with Ctrl kept as their synonym for Alt (E5a)", () => {
+    expect(handler("onBodyPointerMove")).toMatch(/const free = !snappingRef\.current \|\| event\.ctrlKey \|\| event\.metaKey \|\| event\.altKey;/);
+    expect(handler("onBodyPointerMove")).toMatch(/if \(snappingRef\.current && !\(event\.ctrlKey \|\| event\.metaKey \|\| event\.altKey\) && drag\.snapTo\) \{/);
+    // Remembered per project beside the locks; anything but a stored `false` is on.
+    expect(timeline).toMatch(/const snapKey = \(projectId: string\) => `ms:tl-snap:\$\{projectId\}`;/);
+    expect(timeline).toMatch(/return localStorage\.getItem\(snapKey\(projectId\)\) !== "false";/);
+  });
+
+  it("commits a trim through nextEditForTrim, then musicAfterTrim on the PICTURE's change, then commitEdit (E5a)", () => {
+    // A trim is a cut with a name (trap 37): one PUT on release through the
+    // same `commitEdit` a cut uses, the clips following the picture's own
+    // change - never merely the trimmed lane's - and nothing sent for a
+    // no-op, a refusal, or a release under the commit lock.
+    const up = handler("onBodyPointerUp");
+    expect(up).toMatch(/if \(cancelled \|\| editLockedRef\.current \|\| !now \|\| lane === undefined \|\| index === undefined \|\| edge === undefined\) return;/);
+    expect(up).toMatch(/const outcome = nextEditForTrim\(before, held, lane, index, edge, now\.toSource, sourceDurationRef\.current\);/);
+    expect(up).toMatch(/const music = musicAfterTrim\(before\.music, held, outcome\.picture\);/);
+    expect(up).toMatch(/commitEdit\(\{ \.\.\.outcome\.next, music \}\);/);
+    expect(up.indexOf("nextEditForTrim(")).toBeLessThan(up.indexOf("musicAfterTrim("));
+    expect(up.indexOf("musicAfterTrim(")).toBeLessThan(up.indexOf("commitEdit({ ...outcome.next, music })"));
+    // A shortening across a MISSING clip is refused before the PUT, as the cut's is.
+    expect(up).toMatch(/if \(picture\?\.kind === "cut" && !held\.music && !held\.video\) \{\s*const across = missingAcross\(before\.music, picture\.a, picture\.b\);\s*if \(across\.length > 0\) \{\s*setRefusal\(missingAcrossRefusal\("trim", across, picture\.a, picture\.b\)\);\s*return;/);
+    // The gesture begins only from an edge `pieceEdgeAt` answers, on an unlocked lane, outside the commit lock.
+    const down = handler("onPiecesPointerDown");
+    expect(down).toMatch(/if \(editLocked \|\| locksRef\.current\[lane\]\) return;/);
+    expect(down).toMatch(/const hit = pieceEdgeAt\(list, secondsAt\(event\.clientX\), CLIP_EDGE_PX \/ ppsRef\.current\);/);
+    expect(down).toMatch(/beginDrag\(event, "piece-trim", grabbed, grabbed, \{ lane, pieceIndex: hit\.index, edge: hit\.edge \}\)/);
+    // The live edge is the model's bound (`trimPiece`), painted, never state.
+    const move = handler("onBodyPointerMove");
+    expect(move).toMatch(/const trimmed = trimPiece\(list, index, edge, oldBound \+ \(landed\.t - oldAt\), source\);/);
+    expect(move).toMatch(/paintTrim\(drag, oldAt, at, trimChange\(list, index, edge, bound, source\), atFrameFloor\(trimmed, index\), caughtAfterClamp\(at, landed\.snapped\)\);/);
+  });
+
+  it("claims ⌖ only for a candidate the painted thing really sits on, after every clamp (the Reviewer's MINOR 1)", () => {
+    // `snap` lands the pointer; the model's clamp can then hold the thing
+    // short of the candidate, and ⌖ means "caught". The rule is
+    // `caughtAfterClamp` (edit.test.ts walks the trim); this pins that all
+    // five clamped drags pass the PAINTED position through it - the piece
+    // trim, the clip trim, the clip move (by its start OR its end, since
+    // `snapClip` may catch by either), the handles and the block - never
+    // the pointer's.
+    const move = handler("onBodyPointerMove");
+    expect(move).toMatch(/caughtAfterClamp\(at, landed\.snapped\)/);
+    expect(move).toMatch(/next = moveClip\(base, landed\.at, totalRef\.current\);\s*(\/\/[^\n]*\n\s*)+snapped = caughtAfterClamp\(next\.at, landed\.snapped\) \?\? caughtAfterClamp\(clipEnd\(next\), landed\.snapped\);/);
+    expect(move).toMatch(/next = trimClip\(base, drag\.zone === "in" \? "in" : "out", landed\.t, fileSecondsOf\(base\)\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*snapped = caughtAfterClamp\(drag\.zone === "in" \? next\.at : clipEnd\(next\), landed\.snapped\);/);
+    expect(move).toMatch(/drag\.snapped = caughtAfterClamp\(drag\.snapEnd === "start" \? sel\.start : sel\.end, landed\.snapped\);/);
+    expect(move).toMatch(/delta = Math\.min\(delta, totalRef\.current - Math\.max\(\.\.\.pins\)\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*snapped = caughtAfterClamp\(grabbed\.pinned_start \+ delta, snapped\);/);
   });
 
   it("passes the audition's own length as the drag's ceiling", () => {
@@ -979,6 +1050,95 @@ describe("what a cut leaves on the lane (musicAfterCut, the owner's ruling)", ()
   });
 });
 
+describe("what a restore leaves on the lane (musicAfterInsert, the mirror of the ripple - E5a)", () => {
+  // The same rule as the cut's: the clips move only when the PICTURE's own
+  // list changed, which is when Video is unlocked, and the lane obeys its own
+  // lock like a track. Three clips: one before the moment, one straddling it,
+  // one at or after it.
+  const before = [
+    clip({ id: "m1", at: 0, in: 0, out: 2 }),   // 0–2, before
+    clip({ id: "m2", at: 7, in: 0, out: 4 }),   // 7–11, straddles 8
+    clip({ id: "m3", at: 8, in: 0, out: 3 }),   // 8–11, exactly at 8
+    clip({ id: "m4", at: 20, in: 0, out: 1 }),  // 20–21, after
+  ];
+  const locks = (video: boolean, narration: boolean, music: boolean) => ({ video, narration, music });
+  const CASES: [boolean, boolean, boolean, boolean][] = [
+    // video, narration, music, does the restore move the clips?
+    [false, false, false, true],
+    [false, true, false, true],
+    [false, false, true, false],
+    [false, true, true, false],
+    [true, false, false, false],
+    [true, true, false, false],
+    [true, false, true, false],
+    [true, true, true, false],
+  ];
+
+  it.each(CASES)("video=%s narration=%s music=%s -> moves=%s", (video, narration, music, moves) => {
+    const after = musicAfterInsert(before, locks(video, narration, music), 8, 2);
+    if (moves) expect(after.map((held) => held.at)).toEqual([0, 7, 10, 22]);
+    else expect(after).toBe(before);
+  });
+
+  it("moves every clip at or after the moment later by the restored length, and nothing before it", () => {
+    const after = musicAfterInsert(before, locks(false, false, false), 8, 2);
+    expect(after.map((held) => held.at)).toEqual([0, 7, 10, 22]);
+    // A moved clip keeps its slice, its level and its fades: only `at` changes.
+    expect(after[2]).toEqual({ ...before[2], at: 10 });
+    expect(after[3]).toEqual({ ...before[3], at: 22 });
+  });
+
+  it("neither splits nor moves a clip that straddles the moment", () => {
+    const after = musicAfterInsert(before, locks(false, false, false), 8, 2);
+    expect(after).toHaveLength(before.length);
+    expect(after[1]).toBe(before[1]);
+    expect(clipLength(after[1])).toBe(4);
+  });
+
+  it("hands back the same objects where nothing changed, and the same array when nothing moves", () => {
+    const after = musicAfterInsert(before, locks(false, false, false), 8, 2);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
+    expect(after[2]).not.toBe(before[2]);
+    // Nothing at or after 30: the same array, so trap 37's `===` reads "unchanged".
+    expect(musicAfterInsert(before, locks(false, false, false), 30, 2)).toBe(before);
+    expect(musicAfterInsert([], locks(false, false, false), 0, 2)).toEqual([]);
+    // Nothing restored is nothing moved.
+    expect(musicAfterInsert(before, locks(false, false, false), 8, 0)).toBe(before);
+    expect(musicAfterInsert(before, locks(false, false, false), 8, -1)).toBe(before);
+  });
+
+  it("rounds the moment and the length once, at the top, so a clip lands where the picture's join does", () => {
+    // A Ctrl+drag trim carries three decimals: the picture restores round3(d) at round3(t).
+    const [, , exact, later] = musicAfterInsert(before, locks(false, false, false), 7.9996, 3.3284);
+    expect(exact.at).toBe(11.328);
+    expect(later.at).toBe(23.328);
+    // Half a millisecond before the moment counts as at it.
+    const [edge] = musicAfterInsert([clip({ id: "e", at: 7.9996, in: 0, out: 1 })], locks(false, false, false), 8, 1);
+    expect(edge.at).toBe(9);
+  });
+});
+
+describe("what a trim leaves on the lane (musicAfterTrim)", () => {
+  const clips = [clip({ id: "m1", at: 0, in: 0, out: 2 }), clip({ id: "m2", at: 8, in: 0, out: 3 })];
+  const open = { video: false, narration: false, music: false };
+  const musicLocked = { video: false, narration: false, music: true };
+
+  it("is the cut's ripple for a shortening, the restore's for a restore, and nothing for nothing", () => {
+    expect(musicAfterTrim(clips, open, { kind: "cut", a: 3, b: 5 })).toEqual(musicAfterCut(clips, open, 3, 5));
+    expect(musicAfterTrim(clips, open, { kind: "cut", a: 3, b: 5 }).map((held) => held.at)).toEqual([0, 6]);
+    expect(musicAfterTrim(clips, open, { kind: "insert", t: 3, d: 2 })).toEqual(musicAfterInsert(clips, open, 3, 2));
+    expect(musicAfterTrim(clips, open, { kind: "insert", t: 3, d: 2 }).map((held) => held.at)).toEqual([0, 10]);
+    expect(musicAfterTrim(clips, open, null)).toBe(clips);
+  });
+
+  it("passes the list straight through under the locks the two rules read", () => {
+    expect(musicAfterTrim(clips, musicLocked, { kind: "cut", a: 3, b: 5 })).toBe(clips);
+    expect(musicAfterTrim(clips, musicLocked, { kind: "insert", t: 3, d: 2 })).toBe(clips);
+    expect(musicAfterTrim(clips, { ...open, video: true }, { kind: "insert", t: 3, d: 2 })).toBe(clips);
+  });
+});
+
 describe("the missing clips a cut would slice (missingAcross)", () => {
   // A missing clip on the output at [5, 9): the server keeps it only with
   // the slice it has (E4c), so a cut or a split that changes that slice is
@@ -1075,6 +1235,13 @@ describe("what the strip says before such a cut (missingAcrossRefusal)", () => {
       + " so its slice cannot change — lock the Music lane and cut the picture alone, or remove the clip first.";
     expect(missingAcrossRefusal("cut", [gone], 2, 3.5)).toBe(said);
     expect(missingAcrossRefusal("cut", [gone], 3.5, 2)).toBe(said);
+  });
+
+  it("names a TRIM as a trim (E5a): the same slicing, the same ways out, in the gesture's own word", () => {
+    expect(missingAcrossRefusal("trim", [gone], 2, 3.5)).toBe(
+      "That trim (0:02.000 – 0:03.500) would cut into sting.wav, but its file is no longer in the library,"
+      + " so its slice cannot change — lock the Music lane and trim the picture alone, or remove the clip first.",
+    );
   });
 
   it("names each file once, in the plural, and counts the clips", () => {

@@ -287,6 +287,21 @@ export function snap(t: number, candidates: number[], thresholdSeconds: number):
   return best === null ? { t, snapped: null } : { t: best, snapped: best };
 }
 
+/**
+ * The candidate a label may claim AFTER a clamp: `snapped` only when the
+ * painted position `at` is that candidate (within `EPSILON`), else `null`.
+ * `snap` lands the POINTER on a candidate; the model's clamp — `trimPiece`'s
+ * neighbouring range, floor, 0 or end; `trimClip`'s; `normalize`'s picture;
+ * a block's members at the audition's ends — can then put the thing
+ * somewhere else, and ⌖ means "caught", not "asked for". The Reviewer's walk
+ * (E5a, MINOR 1): the playhead parked at output 6, piece 1's in-edge dragged
+ * to it, the clamp holding the edge at the previous range's end — a ⌖ for a
+ * moment the edge never reached.
+ */
+export function caughtAfterClamp(at: number, snapped: number | null): number | null {
+  return snapped !== null && Math.abs(at - snapped) <= EPSILON ? snapped : null;
+}
+
 /** The bound `services/narration.py::MAX_OFFSET_SECONDS` puts on an offset. */
 export const MAX_OFFSET = 300;
 
@@ -441,6 +456,238 @@ export function nextEditForSplit(
  */
 export function clickSelectsPiece(list: Piece[]): boolean {
   return list.length > 1;
+}
+
+// ── the trim: a piece's edge is the cut, and moves (E5a, spec §13.1) ────────
+
+/** Which edge of a piece a trim moves: its start (`in`) or its end (`out`). */
+export type TrimEdge = "in" | "out";
+
+/**
+ * What a trim did to the OUTPUT, in output seconds: a `cut` of `[a, b]` — the
+ * same interval a Cut removes, applied with `removeRange` — or an `insert` of
+ * `d` seconds at `t`, its inverse, applied with `restoreRange`. One gesture,
+ * two lists (spec §13.1): the trimmed lane's own change is the source of
+ * this, and every other unlocked track gets the same interval.
+ */
+export type TrimChange = { kind: "cut"; a: number; b: number } | { kind: "insert"; t: number; d: number };
+
+/**
+ * A piece's bound moved to `round3(toSource)`, clamped so the list stays what
+ * the server stores — ordered, disjoint, every piece at least a frame long:
+ *
+ * - the in-edge within `[the previous range's end (or 0), end − FRAME_SECONDS]`;
+ * - the out-edge within `[start + FRAME_SECONDS, the next range's start (or the source's end)]`.
+ *
+ * Dragging an in-edge RIGHT removes more from the piece's start; LEFT restores
+ * source as far as the previous range's end. An out-edge: left shortens, right
+ * restores up to the next range's start. The output re-lays itself from zero,
+ * so everything after the edge moves — the ripple is the model's (spec §2), not
+ * code here.
+ *
+ * **A trim never removes a piece** (decision 6): the floor is one frame, the
+ * label says so, and Cut is how a piece goes. A piece already shorter than a
+ * frame (a split can leave one) can only grow. The floor is the gesture's,
+ * not the server's — `validate_keep` asks only `start < end`.
+ *
+ * An empty or whole `keep` is `wholeKeep(sourceDuration)` first, as `pieces()`
+ * reads it. Rounded ONCE, at the bound, like `removeRange`. A no-op — the bound
+ * where it already is — returns an equal list, so the caller can compare.
+ */
+export function trimPiece(keep: Keep, index: number, edge: TrimEdge, toSource: number, sourceDuration: number): Keep {
+  const list = keep.length > 0 ? keep : wholeKeep(sourceDuration);
+  const range = list[index];
+  if (!range) return list;
+  const [start, end] = range;
+  const wanted = round3(toSource);
+  if (edge === "in") {
+    const floor = index > 0 ? list[index - 1][1] : 0;
+    const ceiling = Math.max(start, round3(end - FRAME_SECONDS));
+    const bound = Math.min(Math.max(wanted, floor), ceiling);
+    if (bound === start) return list;
+    return list.map((held, i): [number, number] => (i === index ? [bound, end] : held));
+  }
+  const ceiling = index + 1 < list.length ? list[index + 1][0] : round3(sourceDuration);
+  const floor = Math.min(end, round3(start + FRAME_SECONDS));
+  const bound = Math.max(Math.min(wanted, ceiling), floor);
+  if (bound === end) return list;
+  return list.map((held, i): [number, number] => (i === index ? [start, bound] : held));
+}
+
+/** Whether a piece sits at the trim's floor — one frame long, or shorter — where the label says "use Cut". */
+export function atFrameFloor(keep: Keep, index: number): boolean {
+  const range = keep[index];
+  return !!range && round3(range[1] - range[0]) <= round3(FRAME_SECONDS) + EPSILON;
+}
+
+/**
+ * The inverse of a cut, on ONE list: at a boundary at output moment `tOutput`
+ * (within `EPSILON`), the bound on `side` moves back into that list's OWN gap
+ * by up to `seconds` — `before`: the range that STARTS there begins earlier,
+ * as far as the previous range's end (or 0), which at `tOutput` 0 is the head
+ * coming back; `after`: the range that ENDS there runs later, as far as the
+ * next range's start (or the source's end), which at the output's end is the
+ * tail coming back. No boundary there — or a boundary with no gap behind it,
+ * a bare split — and the list comes back exactly as it is (the same object).
+ *
+ * Trap 38: a restore is bounded by the gap the cut left, per track. Restoring
+ * picture that the narration never lost cannot invent narration — a picture
+ * cut made with Narration locked, restored later, brings the frames back and
+ * leaves the sentences where they are, which is what "locked" meant when the
+ * cut was made.
+ */
+export function restoreRange(keep: Keep, tOutput: number, seconds: number, side: "before" | "after", sourceDuration: number): Keep {
+  if (!(seconds > 0)) return keep;
+  const list = keep.length > 0 ? keep : wholeKeep(sourceDuration);
+  let at = 0;
+  for (let i = 0; i < list.length; i++) {
+    const [start, end] = list[i];
+    if (side === "before" && Math.abs(at - tOutput) <= EPSILON) {
+      const floor = i > 0 ? list[i - 1][1] : 0;
+      const bound = round3(Math.max(floor, start - seconds));
+      if (bound >= start - EPSILON) return keep;
+      return list.map((held, k): [number, number] => (k === i ? [bound, end] : held));
+    }
+    at = round3(at + (end - start));
+    if (side === "after" && Math.abs(at - tOutput) <= EPSILON) {
+      const ceiling = i + 1 < list.length ? list[i + 1][0] : round3(sourceDuration);
+      const bound = round3(Math.min(ceiling, end + seconds));
+      if (bound <= end + EPSILON) return keep;
+      return list.map((held, k): [number, number] => (k === i ? [start, bound] : held));
+    }
+  }
+  return keep;
+}
+
+/**
+ * What moving one bound of `keep`'s piece `index` to `bound` (source seconds)
+ * does to the OUTPUT: a cut of the removed stretch, or an insert of the
+ * restored one, at the piece's edge as it is laid out NOW. `null` when the
+ * bound does not move. Rounded once, at the interval's far end: the near end
+ * is the piece's own rounded boundary.
+ */
+export function trimChange(keep: Keep, index: number, edge: TrimEdge, bound: number, sourceDuration: number): TrimChange | null {
+  const piece = pieces(keep, sourceDuration)[index];
+  if (!piece) return null;
+  const delta = round3(bound - (edge === "in" ? piece.sourceStart : piece.sourceEnd));
+  if (delta === 0) return null;
+  if (edge === "in") {
+    return delta > 0
+      ? { kind: "cut", a: piece.start, b: round3(piece.start + delta) }
+      : { kind: "insert", t: piece.start, d: -delta };
+  }
+  return delta < 0
+    ? { kind: "cut", a: round3(piece.end + delta), b: piece.end }
+    : { kind: "insert", t: piece.end, d: delta };
+}
+
+export interface TrimOutcome {
+  /** The next edit, or `null` when refused. The same edit when the lane is locked or nothing moved. */
+  next: TrackEdit | null;
+  /** The track a shortening would leave with nothing, as `nextEditForCut` names it. */
+  refused: Track | null;
+  /** The trimmed lane's own change — what the label reports. `null` for a no-op or a locked lane. */
+  change: TrimChange | null;
+  /**
+   * The PICTURE's change — what the music rides (`musicAfterTrim`). The same
+   * as `change` when the picture is the trimmed lane; when the narration is,
+   * it is what the video list really did with the interval: nothing when
+   * Video is locked or has no boundary at that moment, and only as much as
+   * its own gap held on a restore. `null` when the picture did not change.
+   */
+  picture: TrimChange | null;
+}
+
+/**
+ * The picture's own change, read off its two lists rather than assumed from
+ * the locks: the music rides the picture (the owner's ruling, 2026-09-21),
+ * so a trim that leaves the picture's length alone must move no clip, and a
+ * restore the picture's gap only half held moves the clips by that half.
+ */
+function pictureChange(before: Keep | null, after: Keep | null, change: TrimChange, sourceDuration: number, locked: boolean): TrimChange | null {
+  if (locked) return null;
+  const moved = round3(outputDuration(trackList(after, sourceDuration)) - outputDuration(trackList(before, sourceDuration)));
+  if (moved === 0) return null;
+  return change.kind === "cut"
+    ? { kind: "cut", a: change.a, b: round3(change.a - moved) }
+    : { kind: "insert", t: change.t, d: moved };
+}
+
+/**
+ * A trim of one piece's edge on `lane`, applied to every unlocked track the
+ * way `nextEditForCut` applies a cut (trap 37: a trim is a cut with a name,
+ * and a second implementation of "remove `[a, b]`" is a defect):
+ *
+ * - the trimmed lane must be unlocked, else nothing changes (`change: null`);
+ * - its own list is `trimPiece`, and the output interval that moved is `change`;
+ * - a SHORTENING is `removeRange` of that interval on each other unlocked
+ *   track — refused, naming the track, if it would empty it;
+ * - a RESTORE is `restoreRange` on each other unlocked track: that track's own
+ *   bound at the same output moment moves back into its own gap, by the
+ *   restored length or as much as the gap holds, and not at all where it has
+ *   no join (trap 38).
+ *
+ * The interval means the same instant on every list — each is laid out from
+ * 0 on the output axis (trap 18). `picture` is what the video list really did
+ * with it, for the music.
+ */
+export function nextEditForTrim(
+  edit: TrackEdit, locks: TrackLocks, lane: Track, index: number, edge: TrimEdge, toSource: number, sourceDuration: number,
+): TrimOutcome {
+  const unchanged: TrimOutcome = { next: edit, refused: null, change: null, picture: null };
+  if (locks[lane]) return unchanged;
+  const list = trackList(edit[lane], sourceDuration);
+  const trimmed = trimPiece(list, index, edge, toSource, sourceDuration);
+  const range = trimmed[index];
+  if (!range) return unchanged;
+  const change = trimChange(list, index, edge, edge === "in" ? range[0] : range[1], sourceDuration);
+  if (change === null) return unchanged;
+  const next: TrackEdit = { video: edit.video, narration: edit.narration };
+  next[lane] = trackBody(trimmed, sourceDuration);
+  for (const track of TRACKS) {
+    if (track === lane || locks[track]) continue;
+    const held = trackList(edit[track], sourceDuration);
+    if (change.kind === "cut") {
+      const cut = removeRange(held, change.a, change.b);
+      if (cut === null) return { next: null, refused: track, change, picture: null };
+      next[track] = trackBody(cut, sourceDuration);
+    } else {
+      next[track] = trackBody(restoreRange(held, change.t, change.d, edge === "in" ? "before" : "after", sourceDuration), sourceDuration);
+    }
+  }
+  return { next, refused: null, change, picture: pictureChange(edit.video, next.video, change, sourceDuration, locks.video) };
+}
+
+/**
+ * Which edge of which piece a pointer has, or `null` for a body (or nothing).
+ * The zones are `edgeSeconds` wide (8 px at the current zoom) but never more
+ * than a THIRD of the piece each, as `clipAt`'s are, so a narrow piece keeps a
+ * third of itself to click. At a join the two edges coincide (the strip closes
+ * holes): the zone to the LEFT of the join is the left piece's out-edge, to the
+ * RIGHT the right piece's in-edge, and the join itself belongs to the later
+ * piece, as `pieceAt` and `toSource` choose. The very first in-edge and the
+ * last out-edge are the head and tail trims, and exist on a lane with a single
+ * whole piece too.
+ */
+export function pieceEdgeAt(list: Piece[], t: number, edgeSeconds: number): { index: number; edge: TrimEdge } | null {
+  let found = -1;
+  for (let i = 0; i < list.length; i++) if (list[i].start <= t && t <= list[i].end) found = i;
+  if (found < 0) return null;
+  const piece = list[found];
+  const grab = Math.min(Math.max(0, edgeSeconds), (piece.end - piece.start) / 3);
+  if (t <= piece.start + grab) return { index: found, edge: "in" };
+  if (t >= piece.end - grab) return { index: found, edge: "out" };
+  return null;
+}
+
+/**
+ * The drag's label: what the trim does to the output. At the floor it says
+ * why the edge will go no further (decision 6); with nothing moved, that.
+ */
+export function trimLabel(change: TrimChange | null, atFloor: boolean): string {
+  if (atFloor) return "one frame — use Cut to remove it";
+  if (change === null) return "no change";
+  return change.kind === "cut" ? `−${(change.b - change.a).toFixed(3)} s` : `+${change.d.toFixed(3)} s restored`;
 }
 
 // ── the music lane: clips on the output axis (E4, spec §12.2 and §12.5) ─────
@@ -720,6 +967,48 @@ export function musicAfterCut(clips: MusicClip[], locks: LaneLocks, a: number, b
 }
 
 /**
+ * The clips a RESTORE leaves — the mirror of `cutMusic`'s ripple, under the
+ * same rule as `musicAfterCut` (the music rides the picture): when Video AND
+ * Music are unlocked, every clip at or after output moment `t` moves later by
+ * `d`; a clip straddling `t` is not split and does not move (the picture
+ * grew under its tail; nothing was placed against the frames that came
+ * back); with either lane locked the clips are untouched — the same objects.
+ * A clip that does not move is the same object too, and a list in which
+ * nothing moves is the same array, so `sameMusic` and trap 37's `===` both
+ * read "unchanged". The two numbers are rounded ONCE, at the top, and each
+ * moved clip's `at` when it becomes the clip's own (§12.5's As-built on the
+ * join).
+ */
+export function musicAfterInsert(clips: MusicClip[], locks: LaneLocks, t: number, d: number): MusicClip[] {
+  if (locks.music || locks.video) return clips;
+  const at = round3(Math.max(0, t));
+  const by = round3(d);
+  if (!(by > 0)) return clips;
+  let moved = false;
+  const out = clips.map((clip) => {
+    if (clip.at < at - EPSILON) return clip;
+    moved = true;
+    return { ...clip, at: round3(clip.at + by) };
+  });
+  return moved ? out : clips;
+}
+
+/**
+ * The clips a TRIM leaves: `musicAfterCut` over a shortening's interval,
+ * `musicAfterInsert` for a restore, the same list for a no-op. `change` is
+ * the PICTURE's change (`TrimOutcome.picture`), never merely the trimmed
+ * lane's: a narration trim that leaves the picture's length alone moves no
+ * clip, and a restore the picture's gap only half held moves them by that
+ * half — the music rides the picture, not the gesture.
+ */
+export function musicAfterTrim(clips: MusicClip[], locks: LaneLocks, change: TrimChange | null): MusicClip[] {
+  if (change === null) return clips;
+  return change.kind === "cut"
+    ? musicAfterCut(clips, locks, change.a, change.b)
+    : musicAfterInsert(clips, locks, change.t, change.d);
+}
+
+/**
  * The MISSING clips a cut of `[a, b]` — or a split, `a === b` — would SLICE,
  * by `cutMusic`'s own arithmetic: the two bounds rounded once, at the top,
  * and a piece counted only when `cutMusic` would keep it
@@ -764,12 +1053,12 @@ function listed(names: string[]): string {
  * file or files, why, and BOTH ways out — the one that keeps the clip first.
  * `b` is the cut's other bound; a split has only `a`.
  */
-export function missingAcrossRefusal(gesture: "cut" | "split", across: MusicClip[], a: number, b = a): string {
+export function missingAcrossRefusal(gesture: "cut" | "split" | "trim", across: MusicClip[], a: number, b = a): string {
   const files = [...new Set(across.map((clip) => clip.file))];
   const oneFile = files.length === 1;
   const where = gesture === "split"
     ? `That split at ${timecode(a)}`
-    : `That cut (${timecode(Math.min(a, b))} – ${timecode(Math.max(a, b))})`;
+    : `That ${gesture} (${timecode(Math.min(a, b))} – ${timecode(Math.max(a, b))})`;
   return `${where} would cut into ${listed(files)}, but ${oneFile ? "its file is" : "their files are"} no longer in`
     + ` the library, so ${across.length === 1 ? "its slice" : "their slices"} cannot change — lock the Music lane and ${gesture}`
     + ` the picture alone, or remove the ${across.length === 1 ? "clip" : "clips"} first.`;
@@ -822,6 +1111,28 @@ export function clipSnapTargets(args: {
     out.push(round3(clip.at), clipEnd(clip));
   }
   return out;
+}
+
+/**
+ * ONE candidate set for every gesture that places a cut (E5a, spec §13.4):
+ * 0, the output's end, the playhead, every join, every sentence pin — each
+ * block's drawn start and end, `pins`, which the component passes — and every
+ * clip's two edges. The green and red handles, a Ctrl+drag range's ends and a
+ * piece's trimmed edge all snap to this, built once at the gesture's start
+ * (trap 41), through `snap` unchanged. Deduplicated at the stored precision
+ * and sorted, so a hundred pins is a small array and a tie is the earlier
+ * moment. The block and clip drags keep their own subsets
+ * (`clipSnapTargets`, and the block's gathered in the component).
+ */
+export function snapTargets(args: { playhead: number; duration: number; joins: number[]; pins: number[]; clips: MusicClip[] }): number[] {
+  const out = new Set<number>([0, round3(Math.max(0, args.duration)), round3(Math.max(0, args.playhead))]);
+  for (const at of args.joins) out.add(round3(at));
+  for (const pin of args.pins) out.add(round3(pin));
+  for (const clip of args.clips) {
+    out.add(round3(clip.at));
+    out.add(clipEnd(clip));
+  }
+  return [...out].sort((x, y) => x - y);
 }
 
 /**
@@ -1031,21 +1342,26 @@ export function editRefusal(detail: string, what: "edit" | "timing"): string {
 
 /**
  * Every drag the strip knows: a scrub (the ruler or the head), a handle, a
- * Ctrl+drag range, a block move, a marquee, and (E4) a music clip moved along
- * its lane or trimmed by one of its edges.
+ * Ctrl+drag range, a block move, a marquee, (E4) a music clip moved along
+ * its lane or trimmed by one of its edges, and (E5a) a PIECE trimmed by one
+ * of its edges — the cut itself, moved.
  */
-export type DragKind = "scrub" | "in" | "out" | "range" | "move" | "marquee" | "clip" | "trim";
+export type DragKind = "scrub" | "in" | "out" | "range" | "move" | "marquee" | "clip" | "trim" | "piece-trim";
 /**
  * What a release that never moved — a click on the thing that was pressed —
  * means per kind: `seek` (the ruler), `pick` (the piece under a marquee's
- * start, or a seek where the lane has one piece or is locked), `click` (a
- * block, or a music clip and its trim edges: left to its own click handler,
- * and the two handlers deliberately differ — a block's chooses, selects and
- * SEEKS, a clip's only selects, because seeking would jump the playhead back
- * every time the inspector was reached for while the audition plays (the
- * owner's ruling, 2026-09-21)), `keep-selection` (a handle or a Ctrl+click:
- * the selection as it stands), `nothing` (the head, or a pointer the browser
- * cancelled).
+ * start or under a pressed piece edge, or a seek where the lane has one piece
+ * or is locked), `click` (a block, or a music clip and its trim edges: left
+ * to its own click handler, and the two handlers deliberately differ — a
+ * block's chooses, selects and SEEKS, a clip's only selects, because seeking
+ * would jump the playhead back every time the inspector was reached for while
+ * the audition plays (the owner's ruling, 2026-09-21)), `keep-selection` (a
+ * handle or a Ctrl+click: the selection as it stands), `nothing` (the head,
+ * or a pointer the browser cancelled).
+ *
+ * A piece edge pressed and released without moving is a click ON THE PIECE,
+ * so it picks as a click beside the edge would: the edge is a zone of the
+ * piece, not a thing of its own.
  */
 export type UnmovedRelease = "seek" | "pick" | "click" | "keep-selection" | "nothing";
 
@@ -1053,7 +1369,7 @@ export function unmovedRelease(kind: DragKind, seekOnClick: boolean, cancelled: 
   if (cancelled) return "nothing";
   switch (kind) {
     case "scrub": return seekOnClick ? "seek" : "nothing";
-    case "marquee": return "pick";
+    case "marquee": case "piece-trim": return "pick";
     case "move": case "clip": case "trim": return "click";
     default: return "keep-selection";
   }
@@ -1062,17 +1378,18 @@ export function unmovedRelease(kind: DragKind, seekOnClick: boolean, cancelled: 
 /**
  * Whether the click the browser fires after a release must be ignored: a
  * real drag happened, or the release itself was the click's meaning (a scrub
- * seeks, a marquee picks). A block's, a music clip's, a trim edge's or a
- * handle's unmoved release lets the click through — the element's own handler
- * is where a click is a click, and those handlers deliberately differ: a
- * block's seeks, a clip's only selects (the owner's ruling, 2026-09-21).
+ * seeks, a marquee picks, a piece edge picks). A block's, a music clip's, a
+ * clip edge's or a handle's unmoved release lets the click through — the
+ * element's own handler is where a click is a click, and those handlers
+ * deliberately differ: a block's seeks, a clip's only selects (the owner's
+ * ruling, 2026-09-21).
  *
  * The pointer is captured LAZILY, only once a drag has really moved: capture
  * on pointer-down would retarget that click (and a double-click) to the
  * capturing element, and no block or head would ever receive its own.
  */
 export function releaseSuppressesClick(kind: DragKind, moved: boolean): boolean {
-  return moved || kind === "scrub" || kind === "marquee";
+  return moved || kind === "scrub" || kind === "marquee" || kind === "piece-trim";
 }
 
 /**
