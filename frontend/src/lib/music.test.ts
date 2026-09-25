@@ -690,7 +690,9 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
   // calling `musicAfterCut` / `cutMusic` behind the missing-clip and cap
   // refusals - are behaviour tests since R1a, on the units that now own the
   // code: components/project/timeline/useEditCommits.test.ts and
-  // useEditGestures.test.ts. What is still the root's is pinned here.
+  // useEditGestures.test.ts. Since R1b the audition's are too - the fade
+  // envelope, `paint`'s ⌖, the wait for the first sentence - on
+  // useAudition.test.ts. What is still the root's is pinned here.
   it("keeps the trim's own clip-cap check and the scissors' rule on the root, where they still live", () => {
     // The third of the three checks the ripple can cross - the trim release's
     // - is the root's; the cut's and the split's are tested as behaviour.
@@ -699,16 +701,10 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(timeline).toMatch(/disabled=\{!selection \|\| editLocked \|\| !canCut\(locks\)\}/);
   });
 
-  it("fades the audition with LINEAR ramps only", () => {
-    // `exponentialRampToValueAtTime` throws a RangeError on a target of 0, and
-    // `fadePoints` always ends a fade-out at 0 - so that mutation does not
-    // merely sound wrong, it kills the audition at the first clip with a fade
-    // out. It is also decision 4: ffmpeg's `afade` is linear, so the audition
-    // must be too or what is heard is not what is rendered.
-    expect(timeline).toMatch(/gain\.gain\.linearRampToValueAtTime\(/);
-    expect(timeline).toMatch(/gain\.gain\.setValueAtTime\(/);
-    expect(timeline).not.toMatch(/exponentialRampToValueAtTime/);
-  });
+  // The audition's LINEAR ramps (the pin "fades the audition with LINEAR ramps
+  // only") are a behaviour test since R1b, on the hook that schedules them:
+  // components/project/timeline/useAudition.test.ts, "shapes a clip's GainNode
+  // with fadePoints…", with the whole-file negative over the hook's own text.
 
   it("holds the commit lock over a clip drag's release, as it does over every other commit", () => {
     // The E2 MAJOR class: a second gesture landing inside a refetch window
@@ -771,10 +767,9 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     // the same line in all three.
     const free = timeline.match(/const free = !snappingRef\.current \|\| event\.altKey;\s*const landed = free \|\| !drag\.snapTo \? \{ t, snapped: null \} : snap\(t, drag\.snapTo, SNAP_PX \/ ppsRef\.current\);/g) ?? [];
     expect(free).toHaveLength(3);
-    // The handle's label gains ⌖ from `paint`, off the drag, on the moving end.
-    expect(handler("paint")).toMatch(/const caught = drag && drag\.moved && drag\.snapped !== null && drag\.snapped !== undefined \? drag\.snapEnd : undefined;/);
-    expect(handler("paint")).toMatch(/\$\{caught === "start" \? " ⌖" : ""\}/);
-    expect(handler("paint")).toMatch(/\$\{caught === "end" \? " ⌖" : ""\}/);
+    // The handle's label gaining ⌖ from `paint`, off the drag, on the moving
+    // end, is a behaviour test since R1b (useAudition.test.ts, "claims ⌖ on
+    // the MOVING end's label only while a drag has really caught a candidate").
   });
 
   it("lets the magnet govern the block drag and the clip drag too, with Ctrl kept as their synonym for Alt (E5a)", () => {
@@ -836,13 +831,9 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(timeline).toMatch(/next = moveClip\(base, landed\.at, totalRef\.current\)/);
   });
 
-  it("waits for the first sentence when every clip on the lane is MISSING", () => {
-    // The audition skips a clip whose file has gone (trap 25), so a lane of
-    // nothing but missing clips has nothing to hear: Play must wait for the
-    // first sentence rather than running the playhead across a silent strip.
-    // `musicRef.current.length === 0` - the obvious spelling - gets that wrong.
-    expect(handler("togglePlay")).toMatch(/if \(!musicRef\.current\.some\(\(clip\) => !clip\.missing\)\) \{ setWaitingToPlay\(true\); return; \}/);
-  });
+  // Play waiting for the first sentence when every clip on the lane is MISSING
+  // (trap 25) is a behaviour test since R1b: useAudition.test.ts, "waits for the
+  // first sentence when nothing is decoded and every clip on the lane is MISSING…".
 
   it("invalidates the PLAN on a library change, not just the library", () => {
     // The banner offers two ways out, and the second one - put the file back
@@ -1514,17 +1505,14 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
 
 describe("the shuttle (E5c), pinned in the component's own source", () => {
   // The table is lib/shuttle.ts's (shuttle.test.ts holds every state × every
-  // key, the advance, the label and the throttle); these pin that the
-  // component drives it where the design says - the three keys and the
-  // K-held step, a silent loop that never touches the audio graph, the
-  // `<video>`'s rate written in one place, the throttled backwards seek, the
-  // resets - and no more. The live feel is the owner's walk.
+  // key, the advance, the label and the throttle). Since R1b the drive itself
+  // - the silent loop that never touches the audio graph, the `<video>`'s rate
+  // written in one place, the throttled backwards seek, the resets - is the
+  // hook's, tested as behaviour in useAudition.test.ts; what the ROOT still
+  // does, pinned here, is the three keys and the K-held step in the key map,
+  // the transport's buttons and the label's markup. The live feel is the
+  // owner's walk.
   const timeline = timelineSource;
-  const handler = (name: string): string => {
-    const from = timeline.indexOf(`const ${name} = useCallback(`);
-    expect(from, `${name} not found`).toBeGreaterThan(-1);
-    return timeline.slice(from, timeline.indexOf("\n  }, [", from));
-  };
 
   it("binds J, K and L in the plain branch, once per press, with K held turning J and L into the frame step", () => {
     // In the `!ctrl && !shift` branch, after M and before the Shift branch.
@@ -1537,97 +1525,49 @@ describe("the shuttle (E5c), pinned in the component's own source", () => {
     expect(timeline).toMatch(/const onBlur = \(\) => \{ kHeldRef\.current = false; \};/);
     expect(timeline).toMatch(/window\.addEventListener\("blur", onBlur\);/);
     expect(timeline).toMatch(/window\.removeEventListener\("blur", onBlur\);\s*kHeldRef\.current = false;/);
-    // The step is `stepBy`, the same one Comma and Period call, so the frame stays in one place.
-    expect(handler("stepBy")).toMatch(/halt\(stepFrame\(position\(\), direction, totalRef\.current\)\)/);
+    // The step itself - `stepBy`, the same one Comma and Period call - is the
+    // hook's, tested as behaviour (useAudition.test.ts, "steps one frame…").
   });
 
-  it("takes every transition from nextShuttle, and makes forward 1× a REAL play - Space's path from a stop, `start` out of a backwards shuttle", () => {
-    const key = handler("shuttleKey");
-    expect(key).toMatch(/const before = shuttleRef\.current;\s*const next = nextShuttle\(before, key\);/);
-    expect(key).toMatch(/if \(next\.direction === 0\) \{ halt\(position\(\)\); setWaitingToPlay\(false\); return; \}/);
-    expect(key).toMatch(/if \(before\.direction === 0\) \{ togglePlay\(\); return; \}/);
-    // Out of a backwards shuttle: `seek`'s own two lines - `halt` (the loop
-    // cancelled, the state reset, `playing` FALSE) before `start` enters its
-    // awaits, so a second L inside them is the ordinary second press the
-    // token resolves as a play, never a stop (the Reviewer's MINOR 1: the
-    // earlier `applyShuttle(STOPPED)` left `playing` true, and a quick
-    // second L read it and halted).
-    expect(key).toMatch(/halt\(positionRef\.current\);\s*void start\(positionRef\.current\);\s*return;/);
-    expect(key).not.toMatch(/applyShuttle\(STOPPED\)/);
-    // The backwards floor: `shuttleFloor` (its table is in shuttle.test.ts) on
-    // entry, with the first frame seeking at once - and again from the
-    // selection effect while the shuttle runs, the mirror of the forward
-    // ceiling, so a cleared selection stops holding it (the Reviewer's MINOR 2).
-    expect(key).toMatch(/shuttleFloorRef\.current = shuttleFloor\(selectionRef\.current, positionRef\.current\);\s*lastSeekRef\.current = Number\.NEGATIVE_INFINITY;/);
-    expect(timeline).toMatch(/if \(shuttleRef\.current\.direction === -1\) shuttleFloorRef\.current = shuttleFloor\(selection, positionRef\.current\);\s*paint\(\);/);
-    // Nothing else writes the floor.
-    expect(timeline.match(/shuttleFloorRef\.current = /g)).toHaveLength(2);
-  });
+  // The transitions (`nextShuttle`'s table driven by `shuttleKey`: K a halt
+  // that gives up a waiting Play, L from a stop Space's own path, L out of a
+  // backwards shuttle a halt THEN a start, the backwards floor from
+  // `shuttleFloor` on entry and from the selection mirror while it runs) are
+  // behaviour tests since R1b: useAudition.test.ts, "J / K / L: the shuttle"
+  // and "the selection mirror"; the floor's two writers are counted over the
+  // hook's own text there.
 
-  it("never creates or schedules an audio source above 1× or backwards (trap 40): the silent branch stops the audio and drops its clock, and the loop touches no graph", () => {
-    const key = handler("shuttleKey");
-    // The silent branch is everything after the forward-1× return: the
-    // playhead read off the audio clock first, then the sources stopped and
-    // the clock origin dropped WITHOUT `halt`, a `start` in flight superseded.
-    const silent = key.slice(key.indexOf("positionRef.current = position();"));
-    expect(silent.length, "the silent branch is not where it was").toBeGreaterThan(0);
-    expect(silent).toMatch(/positionRef\.current = position\(\);\s*startToken\.current \+= 1;\s*stopSources\(\);\s*startedAt\.current = null;/);
-    expect(silent).toMatch(/shuttleClockRef\.current = performance\.now\(\);\s*applyShuttle\(next\);\s*setPlaying\(true\);\s*shuttleLoop\(\);/);
-    expect(silent).not.toMatch(/\bstart\(|scheduleFrom\(|createBufferSource|\.start\(/);
-    const loop = handler("shuttleLoop");
-    expect(loop).not.toMatch(/\bstart\(|scheduleFrom\(|createBufferSource|\.start\(|stopSources|startedAt/);
-    // And nothing else in the file starts a source outside `scheduleFrom` and the music's own schedule.
-    const starters = timeline.match(/node\.start\(/g) ?? [];
-    expect(starters).toHaveLength(2);
-    for (const starter of starters) expect(handler("scheduleFrom")).toContain(starter);
-  });
+  // Trap 40 - no audio source made or scheduled above 1× or backwards, the
+  // silent branch stopping the audio and dropping its clock, the loop touching
+  // no graph - is a behaviour test since R1b (useAudition.test.ts, "L from a
+  // stop is Space's own path; L again doubles the rate SILENTLY…"), with the
+  // two-starter count and the loop's negative kept over the hook's own text.
 
-  it("advances by real time on one loop, halts through `halt` at a bound, treats an unknown end as no bound, and syncs the picture as tick does", () => {
-    const loop = handler("shuttleLoop");
-    // Never two loops: the same `frame` ref as `tick`, cancelled first; a state that stopped between frames ends the loop.
-    expect(loop).toMatch(/cancelAnimationFrame\(frame\.current\);\s*frame\.current = requestAnimationFrame\(\(\) => \{\s*const state = shuttleRef\.current;\s*if \(state\.direction === 0\) return;/);
-    expect(loop).toMatch(/const now = performance\.now\(\);\s*const dt = \(now - shuttleClockRef\.current\) \/ 1000;\s*shuttleClockRef\.current = now;/);
-    expect(loop).toMatch(/const ceiling = playBoundRef\.current \?\? \(end > 0 \? end : Number\.POSITIVE_INFINITY\);/);
-    expect(loop).toMatch(/shuttleAdvance\(positionRef\.current, state, dt, shuttleFloorRef\.current, ceiling\)/);
-    expect(loop).toMatch(/positionRef\.current = at;\s*paint\(\);\s*if \(hit\) \{ halt\(at\); return; \}/);
-    // Forward: the join re-sync and the pause past the picture, word for word as `tick` has them.
-    expect(loop).toMatch(/if \(join && at >= join\.at\) \{\s*syncVideo\(at\);\s*nextJoinRef\.current = joinsRef\.current\.find\(\(j\) => j\.at > at \+ EPSILON\) \?\? null;\s*\}/);
-    expect(loop).toMatch(/if \(video && !video\.paused && at >= durationRef\.current\) video\.pause\(\);/);
-    expect(handler("tick")).toMatch(/nextJoinRef\.current = joinsRef\.current\.find\(\(j\) => j\.at > positionRef\.current \+ EPSILON\) \?\? null;/);
-    // Backwards: the seek throttled, and only the seek.
-    expect(loop).toMatch(/\} else if \(seekThrottle\(lastSeekRef\.current, now\)\) \{\s*lastSeekRef\.current = now;\s*syncVideo\(at\);\s*\}/);
-    expect(loop.match(/syncVideo\(/g)).toHaveLength(2);
-  });
+  // The loop - one frame armed at a time, the advance by real time at the
+  // rate, a bound halting through `halt`, an unknown end as no bound, the join
+  // re-seek and the pause past the picture as `tick` has them, the backwards
+  // seek throttled - is a behaviour test since R1b (useAudition.test.ts, "the
+  // loop advances by real time…", "re-seeks the picture ONCE at a join…", "J
+  // from a stop runs the playhead back…").
 
-  it("writes the <video>'s playbackRate in ONE place - the rate forward, 1 and paused otherwise - and halt, seek, togglePlay and the buttons reset it", () => {
-    const apply = handler("applyShuttle");
-    expect(apply).toMatch(/shuttleRef\.current = next;\s*if \(shuttleLabelRef\.current\) shuttleLabelRef\.current\.textContent = shuttleLabel\(next\);/);
-    expect(apply).toMatch(/if \(next\.direction === 1\) \{\s*video\.playbackRate = next\.rate;/);
-    expect(apply).toMatch(/\} else \{\s*video\.playbackRate = 1;\s*video\.pause\(\);\s*\}/);
-    expect(timeline.match(/video\.playbackRate =/g)).toHaveLength(2);
-    // Every call hands it a state: STOPPED from halt, FORWARD from start, `next` from the keys (the
-    // reverse out of a backwards shuttle goes through `halt` since the Reviewer's MINOR 1).
-    const calls = [...timeline.matchAll(/applyShuttle\((\w+)\)/g)].map((m) => m[1]);
-    expect(calls.length).toBeGreaterThanOrEqual(3);
-    for (const arg of calls) expect(["STOPPED", "FORWARD", "next"]).toContain(arg);
-    expect(handler("halt")).toMatch(/startedAt\.current = null;\s*positionRef\.current = at;\s*(\/\/[^\n]*\n\s*)*applyShuttle\(STOPPED\);\s*syncVideo\(at\);/);
-    expect(handler("start")).toMatch(/applyShuttle\(FORWARD\);\s*setPlaying\(true\);\s*tick\(\);/);
-    // The resets all go through `halt`: a seek, Space, the frame step, the two jumps.
-    expect(handler("seek")).toMatch(/halt\(next\);/);
-    expect(handler("togglePlay")).toMatch(/if \(playingRef\.current\) \{ halt\(position\(\)\); return; \}/);
-    expect(handler("jumpToEnd")).toMatch(/halt\(totalRef\.current\)/);
+  it("wires the transport's buttons to the audition's own moves - seek(0), stepBy, togglePlay, jumpToEnd - where the resets go through halt", () => {
+    // The `<video>`'s playbackRate written in ONE place, every `applyShuttle`
+    // handed STOPPED, FORWARD or the table's `next`, and halt, seek, Space,
+    // the frame step and the jumps resetting the shuttle through `halt`, are
+    // behaviour tests and text pins over the hook since R1b (useAudition.test.ts,
+    // "the frame step, the jumps and a seek…", "J / K / L…", "the hook's own
+    // text…"); the buttons that call them are the root's, and pinned here.
     expect(timeline).toMatch(/aria-label="Jump to start"[^\n]*onClick=\{\(\) => seek\(0\)\}/);
     expect(timeline).toMatch(/onClick=\{\(\) => stepBy\(-1\)\}/);
+    expect(timeline).toMatch(/onClick=\{\(\) => stepBy\(1\)\}/);
     expect(timeline).toMatch(/onClick=\{togglePlay\}/);
     expect(timeline).toMatch(/onClick=\{jumpToEnd\}/);
-    // A forward shuttle's ceiling follows the selection as a play's bound does.
-    expect(timeline).toMatch(/if \(startedAt\.current \|\| shuttleRef\.current\.direction === 1\) \{\s*const at = position\(\);\s*playBoundRef\.current = selection/);
   });
 
   it("wires the label beside the clock as a polite live region, written through its ref and never through state", () => {
     expect(timeline).toMatch(/<span\s+ref=\{shuttleLabelRef\}\s+className="os-tl-shuttle"\s+aria-live="polite"/);
-    expect(timeline).toMatch(/const shuttleRef = useRef<Shuttle>\(STOPPED\);/);
-    expect(timeline).not.toMatch(/useState<Shuttle>/);
+    // The state as a ref, never React state (`useRef<Shuttle>(STOPPED)`, no
+    // `useState<Shuttle>`), is pinned over the hook's own text since R1b.
     // The Play button reads Pause while shuttling (it reads `playing`, which the silent branch sets) and names the keys.
     expect(timeline).toMatch(/aria-label=\{playing \? "Pause" : "Play"\}/);
     expect(timeline).toMatch(/"Pause \(Space, or K\) — L again shuttles forward at 2×, 4×, 8×; J shuttles back"/);

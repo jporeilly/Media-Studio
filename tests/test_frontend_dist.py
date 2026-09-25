@@ -23,6 +23,9 @@ DIST = FRONTEND / "dist"
 # Keep IDENTICAL to frontend/scripts/build-info.mjs.
 EXTRA = ["index.html", "package.json", "package-lock.json", "vite.config.ts", "tsconfig.json", "tsconfig.node.json"]
 TEST_FILE = re.compile(r"\.test\.tsx?$")
+# Test-only helpers (a `testing/` folder, e.g. timeline/testing/mountHook.ts): nothing outside a test
+# imports them, so the bundle never carries them. Both rules run over the forward-slash relative path.
+TEST_DIR = re.compile(r"(^|/)testing/")
 
 REBUILD_HINT = "run `npm run build` in frontend/ and commit frontend/dist"
 
@@ -37,7 +40,10 @@ def fingerprint() -> tuple[str, int]:
         p = FRONTEND / name
         if p.is_file():
             files.append(p)
-    rels = sorted({f.relative_to(FRONTEND).as_posix() for f in files if not TEST_FILE.search(f.name)})
+    rels = sorted({
+        rel for rel in (f.relative_to(FRONTEND).as_posix() for f in files)
+        if not TEST_FILE.search(rel) and not TEST_DIR.search(rel)
+    })
     h = hashlib.sha256()
     for rel in rels:
         h.update(rel.encode("utf-8") + b"\0")

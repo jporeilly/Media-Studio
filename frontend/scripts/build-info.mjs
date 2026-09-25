@@ -10,7 +10,9 @@
 // The output is deterministic on purpose (no timestamps): rebuilding an
 // unchanged tree leaves git clean, which the desktop staging gate relies on.
 // Keep the file set and the hashing rule IDENTICAL to the Python side:
-//   files  = frontend/src/** (minus *.test.ts / *.test.tsx) + frontend/public/**
+//   files  = frontend/src/** (minus *.test.ts / *.test.tsx, and minus any
+//            testing/ folder - test-only helpers nothing outside a test
+//            imports, so the bundle never carries them) + frontend/public/**
 //            + index.html, package.json, package-lock.json, vite.config.ts,
 //            tsconfig.json, tsconfig.node.json
 //   hash   = sha256 over, for each file sorted by its forward-slash relative
@@ -23,6 +25,7 @@ import { fileURLToPath } from "node:url";
 const root = dirname(dirname(fileURLToPath(import.meta.url))); // frontend/
 const EXTRA = ["index.html", "package.json", "package-lock.json", "vite.config.ts", "tsconfig.json", "tsconfig.node.json"];
 const TEST_FILE = /\.test\.tsx?$/;
+const TEST_DIR = /(^|\/)testing\//;
 
 function walk(dir, out) {
   for (const name of readdirSync(dir)) {
@@ -44,7 +47,7 @@ function fingerprint() {
     if (existsSync(p)) files.push(p);
   }
   const rels = [...new Set(files.map((p) => relative(root, p).split("\\").join("/")))]
-    .filter((rel) => !TEST_FILE.test(rel))
+    .filter((rel) => !TEST_FILE.test(rel) && !TEST_DIR.test(rel))
     .sort();
   const h = createHash("sha256");
   for (const rel of rels) {
