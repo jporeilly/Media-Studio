@@ -685,29 +685,18 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     return timeline.slice(from, timeline.indexOf("\n  }, [", from));
   };
 
-  it("commits every edit with a PUT, through `editBody`, and never deletes the edit", () => {
-    expect(timeline).toMatch(/api\.put<EditPayload>\(\s*`\/api\/projects\/\$\{projectId\}\/edit`/);
-    expect(timeline).toMatch(/editBody\(op, committedRef\.current, sourceDurationRef\.current\)/);
-    expect(timeline).not.toMatch(/api\.delete[^\n]*\/edit/);
-  });
-
-  it("carries the music and the markers on every undo entry, so an undone cut puts the clips back", () => {
-    expect(timeline).toMatch(/type EditState = TrackEdit & \{ music: MusicClip\[\]; markers: Marker\[\] \}/);
-    expect(timeline).toMatch(/committedRef\.current = \{ video: op\.video, narration: op\.narration, music: op\.music, markers: op\.markers \}/);
-  });
-
-  it("ripples the clips only when the PICTURE's list changed (the owner's rule)", () => {
-    // The rule itself is `musicAfterCut`, tested as a table over all eight
-    // lock combinations below; this pins that the CUT is the caller of it.
-    expect(timeline).toMatch(/const music = musicAfterCut\(before\.music, held, sel\.start, sel\.end\)/);
-    // A split is not subject to it: it changes no clip's `at`.
-    expect(timeline).toMatch(/const music = !all && locksRef\.current\.music \? before\.music : cutMusic\(before\.music, at, at\)/);
-    // ... and all three gestures that ripple the clips - the cut, the split
-    // and (E5a) the trim - check the 200-clip cap the ripple can cross.
-    expect(timeline.match(/music\.length > MAX_CLIPS/g) ?? []).toHaveLength(3);
-    // The scissors is disabled by the rule `canCut` holds, and the keys ask it too.
+  // Three pins that were here - the PUT never a DELETE through `editBody`, the
+  // undo entry carrying the music and the markers, and the cut and the split
+  // calling `musicAfterCut` / `cutMusic` behind the missing-clip and cap
+  // refusals - are behaviour tests since R1a, on the units that now own the
+  // code: components/project/timeline/useEditCommits.test.ts and
+  // useEditGestures.test.ts. What is still the root's is pinned here.
+  it("keeps the trim's own clip-cap check and the scissors' rule on the root, where they still live", () => {
+    // The third of the three checks the ripple can cross - the trim release's
+    // - is the root's; the cut's and the split's are tested as behaviour.
+    expect(timeline.match(/music\.length > MAX_CLIPS/g) ?? []).toHaveLength(1);
+    // The scissors is disabled by the rule `canCut` holds.
     expect(timeline).toMatch(/disabled=\{!selection \|\| editLocked \|\| !canCut\(locks\)\}/);
-    expect(timeline).toMatch(/if \(!canCut\(held\)\) \{/);
   });
 
   it("fades the audition with LINEAR ramps only", () => {
@@ -752,33 +741,19 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(handler("removeMissingClips")).not.toMatch(/clipsAfterDelete/);
   });
 
-  it("refuses a cut or a split across a MISSING clip before any PUT, in the gesture's own words", () => {
-    // The Reviewer's M1: the server refuses a changed slice of a missing
-    // clip with a sentence about a trim, which is not what the user did. Both
-    // gestures ask `missingAcross` first and refuse with the strip's own
-    // sentence (`missingAcrossRefusal`, tested above) before `commitEdit` -
-    // the cut only where the ripple applies (the two locks `musicAfterCut`
-    // reads), the split wherever the music would be split at all.
-    const cut = handler("cutSelection");
-    expect(cut).toMatch(
-      /if \(!held\.music && !held\.video\) \{\s*const across = missingAcross\(before\.music, sel\.start, sel\.end\);\s*if \(across\.length > 0\) \{\s*setRefusal\(missingAcrossRefusal\("cut", across, sel\.start, sel\.end\)\);\s*return;/,
-    );
-    expect(cut.indexOf("missingAcross(")).toBeLessThan(cut.indexOf("commitEdit("));
-    const split = handler("splitAtPlayhead");
-    expect(split).toMatch(
-      /if \(all \|\| !locksRef\.current\.music\) \{\s*const across = missingAcross\(before\.music, at, at\);\s*if \(across\.length > 0\) \{\s*setRefusal\(missingAcrossRefusal\("split", across, at\)\);\s*return;/,
-    );
-    expect(split.indexOf("missingAcross(")).toBeLessThan(split.indexOf("cutMusic("));
-    expect(split.indexOf("missingAcross(")).toBeLessThan(split.indexOf("commitEdit("));
-  });
+  // The cut's and the split's refusal across a MISSING clip before any PUT
+  // (the Reviewer's M1) is a behaviour test since R1a: useEditGestures.test.ts,
+  // "refuses a cut across a MISSING clip…" and "refuses a split through a
+  // MISSING clip…". The trim's is still pinned on the release, below.
 
   it("draws no trim zones on a missing clip, and the refusal copy carries no frozen-lane paragraph", () => {
     // The edge overlays are what carry the ew-resize cursor; a missing clip
     // has a body and no edges (E4c), so they are not rendered for it - the
     // render harness proves the markup, this pins the condition.
     expect(timeline).toMatch(/\{!held\.missing && \(\s*<>\s*<span className="os-tl-clip-edge in"/);
-    // `editRefusal` takes the detail and the kind, nothing about the lane.
-    expect(timeline).toMatch(/editRefusal\(errorMessage\(commit\.error\), commit\.variables\?\.op\.kind === "offsets" \? "timing" : "edit"\)/);
+    // `editRefusal` takes the detail and the kind, nothing about the lane:
+    // since R1a a behaviour test on the stack (useEditCommits.test.ts, "says
+    // what was not saved…") beside `editRefusal`'s own table below.
     expect(timeline).not.toMatch(/frozen|unfreeze|cannot be changed until/);
   });
 
@@ -929,10 +904,10 @@ describe("what a change to the LIBRARY makes stale", () => {
   });
 
   it("is the same two keys a successful commit invalidates", () => {
-    // One list, so the modal's path and the commit's cannot drift apart.
+    // One list, so the modal's path and the commit's cannot drift apart. The
+    // commit's side is a behaviour test since R1a (useEditCommits.test.ts,
+    // "invalidates the plan, the project and the edit on an edit…").
     expect(libraryChangeKeys("p1")).toEqual([musicLibraryKey, narrationPlanKey("p1"), ["edit", "p1"]]);
-    expect(timelineSource).toMatch(/void qc\.invalidateQueries\(\{ queryKey: narrationPlanKey\(projectId\) \}\);/);
-    expect(timelineSource).toMatch(/void qc\.invalidateQueries\(\{ queryKey: \["edit", projectId\] \}\);/);
   });
 });
 
@@ -1468,11 +1443,12 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
     expect(timeline).toMatch(/if \(key === "Escape"\) \{\s*if \(selectedMarkerRef\.current !== null\) \{ setSelectedMarker\(null\); return true; \}\s*if \(selectedClipRef\.current !== null\)/);
   });
 
-  it("sends the markers through the one editBody only when they changed, and carries them UNCHANGED through a cut, a split and a trim (trap 39)", () => {
-    expect(timeline).toMatch(/editBody\(op, committedRef\.current, sourceDurationRef\.current\)/);
-    expect(handler("commitEdit")).toMatch(/sameMarkers\(next\.markers, before\.markers\)/);
-    expect(handler("cutSelection")).toMatch(/commitEdit\(\{ \.\.\.outcome\.next, music, markers: before\.markers \}\)/);
-    expect(handler("splitAtPlayhead")).toMatch(/commitEdit\(\{ \.\.\.tracks, music, markers: before\.markers \}\)/);
+  it("carries the markers UNCHANGED through a clip commit, and every marker gesture goes through commitMarkers (trap 39)", () => {
+    // The stack's side - `editBody` against what the server holds, `commitEdit`
+    // sending nothing while the markers are the same - and the cut's and the
+    // split's `markers: before.markers` are behaviour tests since R1a
+    // (useEditCommits.test.ts, useEditGestures.test.ts); the trim's stays
+    // pinned on the release above.
     expect(handler("commitMusic")).toMatch(/music: clips, markers: before\.markers/);
     expect(handler("commitMarkers")).toMatch(/commitEdit\(\{ video: before\.video, narration: before\.narration, music: before\.music, markers: list \}\)/);
     expect(handler("commitMarkers")).toMatch(/if \(editLockedRef\.current\) return;/);

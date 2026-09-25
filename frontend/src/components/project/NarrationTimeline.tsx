@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   AudioLines,
@@ -48,7 +48,6 @@ import {
   DEFAULT_MUSIC_GAIN,
   EPSILON,
   FRAME_SECONDS,
-  UNDO_DEPTH,
   anchoredScrollLeft,
   atFrameFloor,
   caughtAfterClamp,
@@ -62,9 +61,7 @@ import {
   clipSnapTargets,
   clipsAfterDelete,
   canCut,
-  cutMusic,
   drawnMarkers,
-  musicAfterCut,
   LANES,
   MAX_CLIPS,
   MAX_MARKERS,
@@ -74,8 +71,6 @@ import {
   snapClip,
   describeJoin,
   dragOffsets,
-  editBody,
-  editRefusal,
   fadePoints,
   fitFades,
   joins,
@@ -89,8 +84,6 @@ import {
   musicAfterTrim,
   newMarker,
   newMusicClip,
-  nextEditForCut,
-  nextEditForSplit,
   nextEditForTrim,
   outputDuration,
   pieceAt,
@@ -101,7 +94,6 @@ import {
   releaseSuppressesClick,
   renameMarker,
   round3,
-  sameEdit,
   sameMarkers,
   sameMusic,
   sanitizeMarkerName,
@@ -113,7 +105,6 @@ import {
   stepZoom,
   ticks,
   toSource,
-  trackBody,
   trimChange,
   trimClip,
   trimLabel,
@@ -134,12 +125,10 @@ import {
   type MusicClip,
   type Piece,
   type Track,
-  type TrackEdit,
   type TrimChange,
   type TrimEdge,
 } from "../../lib/edit";
 import { useStudioSettings } from "../../lib/studioSettings";
-import type { Segment } from "../../lib/narration";
 import {
   auditionLength,
   clampTime,
@@ -154,7 +143,6 @@ import {
   schedule,
   thumbCount,
   waveformPath,
-  type EditPayload,
   type NarrationPlan,
   type PlanSentence,
   type Schedule,
@@ -173,6 +161,9 @@ import {
 } from "../../lib/shuttle";
 import { Button, ErrorBox, Input, Spinner } from "../ui";
 import { MusicLibrary, type MusicFile } from "./MusicLibrary";
+import type { EditState, SavedSentence, Selection } from "./timeline/types";
+import { type AfterCommit, useEditCommits } from "./timeline/useEditCommits";
+import { drawn, useEditGestures } from "./timeline/useEditGestures";
 
 interface Props {
   projectId: string;
@@ -197,42 +188,19 @@ interface Props {
   onOffsetsSaved: (updated: SavedSentence[]) => void;
 }
 
-/** One sentence as `PATCH /narration/offsets` returns it: the stored segment with its index. */
-export type SavedSentence = Segment & { index: number };
-
-/** A range of the OUTPUT, timeline seconds, `start < end`. */
-interface Selection {
-  start: number;
-  end: number;
-}
+/**
+ * One sentence as `PATCH /narration/offsets` returns it: the stored segment
+ * with its index. Declared beside the edit's own types since R1a
+ * (timeline/types.ts) and re-exported here for the page; `Selection` and
+ * `EditState` come from the same file.
+ */
+export type { SavedSentence } from "./timeline/types";
 /**
  * Camtasia's locks per editable LANE (lib/edit.ts): the two tracks and, since
  * E4, the Music lane. Audio · original has no list of its own: it follows
  * Video.
  */
 type Locks = LaneLocks;
-/**
- * One state of the edit: each track's kept ranges (`null` for a track that
- * keeps everything), the music clips AND the markers — neither is a track,
- * but both are part of the edit, so undo and redo carry them (spec §12.5,
- * §13.2).
- */
-type EditState = TrackEdit & { music: MusicClip[]; markers: Marker[] };
-/**
- * One operation the client can send: the whole edit (both lists and the
- * clips), or a set of offsets by index. An undo entry holds one of each
- * direction — what to send to undo it and what to send to redo it (§11.5).
- */
-type Op = ({ kind: "edit" } & EditState) | { kind: "offsets"; values: Record<number, number | null> };
-interface Entry {
-  undo: Op;
-  redo: Op;
-}
-type Commit =
-  | { kind: "do"; op: Op; before: Op }
-  | { kind: "undo" | "redo"; op: Op; entry: Entry };
-/** What a commit answers with: the stored edit, or the sentences a batch of offsets updated. */
-type Answer = EditPayload | { sentences: SavedSentence[] };
 interface Drag {
   kind: DragKind;
   /** The end that is NOT being dragged (a handle), or where the drag began (Ctrl+drag, a marquee). */
@@ -406,7 +374,6 @@ const Ruler = memo(function Ruler({ total, pps, scrollEl }: { total: number; pps
 export function NarrationTimeline({
   projectId, provider, voiceId, speed, active, selected, onSelect, jobActive, offsets, onOffsetsSaved,
 }: Props) {
-  const qc = useQueryClient();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** The scroll container as STATE too, for the ruler to subscribe to. */
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
@@ -1695,22 +1662,23 @@ export function NarrationTimeline({
 
   // ── the edit: commit, undo, redo ─────────────────────────────────────────
   //
-  // ONE request per gesture, on release, with the whole thing: the record is
-  // rewritten whole and served whole (spec trap 8), and a drag of twelve
-  // blocks is one PATCH of twelve offsets, never twelve (trap 21). Nothing
-  // local is drawn from the new state - the plan is invalidated and the
-  // strip is redrawn from the plan the server answers with, so a refused
-  // commit (a 400 naming the range, a 409 while a job holds the project)
-  // leaves the drawing exactly on the server's state with the message shown.
-  //
-  // Undo is a client-side stack of OPERATIONS - a cut or a split stores the
-  // whole edit before and after, a drag or a Reset the moved sentences'
-  // offsets before and after - pushed only when a commit SUCCEEDS; undo
-  // sends the "before", redo the "after". It is lost on reload: the server
-  // keeps only the current state, and the view says so.
-  const [history, setHistory] = useState<{ past: Entry[]; future: Entry[] }>({ past: [], future: [] });
+  // The commit stack, its lock and its refusal are `useEditCommits` (R1a,
+  // timeline/useEditCommits.ts). The two things it calls back into the strip
+  // with - clearing the transforms a drag left once the plan lands, dropping
+  // the marker `M` dropped when a commit is refused - are late-bound through
+  // `afterCommitRef`, assigned below once `clearMoved` exists, because the
+  // stack is declared here, before the lanes that paint. The refusal's state
+  // and the lock's ref stay the strip's - its own handlers set the one and
+  // read the other - and the stack is handed both.
   /** A refusal made here rather than by the server ("keep at least one range"). */
   const [refusal, setRefusal] = useState<string | null>(null);
+  /** Read at a drag's release, which is a stable callback: a key committed mid-drag must not be followed by a second commit. */
+  const editLockedRef = useRef(false);
+  const afterCommitRef = useRef<AfterCommit>({ clearMoved: () => {}, dropPending: () => {} });
+  const { commit, commitEdit, commitOffsets, undo, redo, history, editLocked, editError, applying } = useEditCommits({
+    projectId, jobActive, plan, committedRef, committedOffsetsRef, sourceDurationRef, setSelection, onOffsetsSaved, afterCommitRef,
+    refusal, setRefusal, editLockedRef,
+  });
   /**
    * Paint a clip where the drag has it NOW - through the DOM, never through
    * state: a setState per pointer move would re-render every block and every
@@ -1829,119 +1797,9 @@ export function NarrationTimeline({
     clearTrim();
     clearMarkerDrag();
   }, [clearClipDrag, clearMarkerDrag, clearTrim]);
-  // THE RACE THE LOCK CLOSES. A commit succeeds and the plan is invalidated,
-  // but until the refetch lands the strip is still drawn from the PREVIOUS
-  // plan (`keepPreviousData`) - and the server re-measures the speaking rate
-  // first, so that window is hundreds of milliseconds warm and seconds cold.
-  // A second Cut inside it would be computed against the stale keep and
-  // would silently overwrite the first cut on the server; a Ctrl+Z inside it
-  // (one key auto-repeat away) would snapshot the wrong "before". So the
-  // gesture - Cut, Undo, Redo, buttons and keys alike - stays locked until a
-  // NEWER plan than the one held at the commit replaces it, or its refetch
-  // fails, or the tab is left. Stamped by the plan's own `dataUpdatedAt` /
-  // `errorUpdatedAt` rather than by `isFetching`, which is scheduler-timed
-  // and could read false before the refetch has begun.
-  const [awaiting, setAwaiting] = useState<{ data: number; error: number } | null>(null);
-  const planStampRef = useRef({ data: plan.dataUpdatedAt, error: plan.errorUpdatedAt });
-  planStampRef.current = { data: plan.dataUpdatedAt, error: plan.errorUpdatedAt };
-  // A LAYOUT effect: the render that brings the new plan also gives the moved
-  // blocks their new `left`, and the transforms a drag left on them would
-  // paint one frame doubled if they were cleared only after that paint.
-  useLayoutEffect(() => {
-    if (!awaiting) return;
-    // Leaving the tab does NOT clear it: the plan is refetched on return (the
-    // commit invalidated it) and that landing is what unlocks - clearing on
-    // `!active` would reopen the window for the first gesture after coming
-    // back, computed against the plan the tab left with.
-    if (plan.dataUpdatedAt !== awaiting.data || plan.errorUpdatedAt !== awaiting.error) {
-      setAwaiting(null);
-      // The plan now draws the moved blocks where they landed.
-      clearMoved();
-    }
-  }, [awaiting, plan.dataUpdatedAt, plan.errorUpdatedAt, clearMoved]);
-  /** Between a successful commit and the plan it produced: the strip is about to change. */
-  const applying = awaiting !== null;
-  const commit = useMutation({
-    mutationFn: ({ op }: Commit): Promise<Answer> => {
-      if (op.kind === "offsets") {
-        const body = Object.entries(op.values).map(([index, offset]) => ({ index: Number(index), offset }));
-        return api.patch<{ sentences: SavedSentence[] }>(`/api/projects/${projectId}/narration/offsets`, { offsets: body });
-      }
-      // ALWAYS a PUT, never a DELETE, and `music` only when this operation
-      // changes it: both rules live in `editBody` (lib/edit.ts), which is
-      // where they are tested. The single highest-risk decision in E4b is not
-      // one to leave inside a mutation as four lines of its own.
-      return api.put<EditPayload>(
-        `/api/projects/${projectId}/edit`,
-        editBody(op, committedRef.current, sourceDurationRef.current),
-      );
-    },
-    onMutate: () => setRefusal(null),
-    onSuccess: (answer, variables) => {
-      const { op } = variables;
-      // What the server held until this instant is what undo goes back to.
-      if (op.kind === "edit") {
-        committedRef.current = { video: op.video, narration: op.narration, music: op.music, markers: op.markers };
-        setSelection(null);
-      } else {
-        committedOffsetsRef.current = { ...committedOffsetsRef.current, ...op.values };
-        // The List view reads the new numbers from the page's copy, folded in
-        // rather than refetched - a refetch would drop half-typed words.
-        if ("sentences" in answer) onOffsetsSaved(answer.sentences);
-      }
-      setHistory((h) => {
-        if (variables.kind === "do") {
-          return { past: [...h.past, { undo: variables.before, redo: op }].slice(-UNDO_DEPTH), future: [] };
-        }
-        if (variables.kind === "undo") return { past: h.past.slice(0, -1), future: [...h.future, variables.entry] };
-        return { past: [...h.past, variables.entry].slice(-UNDO_DEPTH), future: h.future.slice(0, -1) };
-      });
-      setAwaiting(planStampRef.current);
-      void qc.invalidateQueries({ queryKey: narrationPlanKey(projectId) });
-      if (op.kind === "edit") {
-        void qc.invalidateQueries({ queryKey: ["project", projectId] });
-        void qc.invalidateQueries({ queryKey: ["edit", projectId] });
-      }
-    },
-    // A refused commit puts every painted thing back - and drops the marker
-    // `M` dropped, which the server never took.
-    onError: () => { clearMoved(); setPending(null); },
-  });
-  const editLocked = jobActive || commit.isPending || applying;
-  /** Read at a drag's release, which is a stable callback: a key committed mid-drag must not be followed by a second commit. */
-  const editLockedRef = useRef(editLocked);
-  editLockedRef.current = editLocked;
-  /**
-   * A refusal the user can act on, with the server's own sentence kept after
-   * it (`editRefusal`): the server names a clip by its position and its id,
-   * which is a handle nobody here chose, and the first thing to say is that
-   * nothing was saved. The detail is never swallowed - a refusal this client
-   * does not recognise still reaches the user whole.
-   */
-  const editError = refusal ?? (commit.isError
-    ? editRefusal(errorMessage(commit.error), commit.variables?.op.kind === "offsets" ? "timing" : "edit")
-    : null);
+  afterCommitRef.current = { clearMoved, dropPending: () => setPending(null) };
   /** Nothing to cut or split into: every lane is locked. */
   const allLocked = LANES.every((lane) => locks[lane]);
-
-  /**
-   * Commit a new edit (a cut, a split) with what it replaces as its undo.
-   * Compared and stored in the PUT body's own terms - a whole track is null -
-   * so a split on the very start of an untouched track, which makes a list
-   * that is still the whole source, commits nothing and leaves no undo entry.
-   */
-  const commitEdit = useCallback((next: EditState) => {
-    const before = committedRef.current;
-    const source = sourceDurationRef.current;
-    if (sameEdit(next, before, source) && sameMusic(next.music, before.music) && sameMarkers(next.markers, before.markers)) return;
-    const after: EditState = {
-      video: trackBody(next.video, source),
-      narration: trackBody(next.narration, source),
-      music: next.music,
-      markers: next.markers,
-    };
-    commit.mutate({ kind: "do", op: { kind: "edit", ...after }, before: { kind: "edit", ...before } });
-  }, [commit]);
 
   /**
    * A clip gesture: the whole `music` list, with the two tracks and the
@@ -2118,154 +1976,13 @@ export function NarrationTimeline({
     commitMusic(clips.map((clip) => (clip.id === id ? { ...next, fade_in, fade_out } : clip)));
   }, [commitMusic]);
 
-  /**
-   * Camtasia's ripple delete on the unlocked tracks (`nextEditForCut`,
-   * lib/edit.ts): the selection removed from each list that is not locked,
-   * its gap closed; a locked list left exactly as it is (trap 19) - so
-   * cutting the picture with Narration locked moves no pin, and every later
-   * sentence lands earlier against the picture by the length removed. A
-   * locked track that is whole stays `null`, which is not a refusal: the
-   * helper says which track, if any, the cut would empty.
-   */
-  const cutSelection = useCallback(() => {
-    const sel = selectionRef.current;
-    if (!sel || editLocked) return;
-    const held = locksRef.current;
-    if (LANES.every((lane) => held[lane])) return;
-    // THE MUSIC RIDES THE PICTURE (the owner's ruling, 2026-09-21). With
-    // Music the only unlocked lane the ripple below cannot move anything, so
-    // the gesture would appear to work and do nothing at all: the scissors is
-    // disabled for it (`canCut`, and `cutTitle` says why) and the keys refuse
-    // here, rather than sending a PUT that changes no clip.
-    if (!canCut(held)) {
-      setRefusal("The music rides the picture, so a cut with the picture locked would leave every clip exactly "
-        + "where it is. Unlock Video to cut both, or change the music alone with the clip's own gestures — drag "
-        + "its ends to trim it, or select it and press Delete.");
-      return;
-    }
-    const before = committedRef.current;
-    const outcome = nextEditForCut(before, held, sel.start, sel.end, sourceDurationRef.current);
-    if (outcome.refused) {
-      const track = outcome.refused === "video" ? "picture" : "narration";
-      setRefusal(`Keep at least one range — that selection would remove the whole ${track}.`);
-      return;
-    }
-    // A cut ACROSS a missing clip would change its slice, which the server
-    // refuses (E4c) in words that describe a trim, not this gesture (the
-    // Reviewer's M1): refused here first, before anything is sent, naming
-    // the gesture, the file and both ways out. Only where the ripple applies
-    // at all - the same two locks `musicAfterCut` reads.
-    if (!held.music && !held.video) {
-      const across = missingAcross(before.music, sel.start, sel.end);
-      if (across.length > 0) {
-        setRefusal(missingAcrossRefusal("cut", across, sel.start, sel.end));
-        return;
-      }
-    }
-    // THE MUSIC RIDES THE PICTURE (the owner's ruling, 2026-09-21): the rule
-    // and its reasons are `musicAfterCut` in lib/edit.ts, where a table over
-    // all eight lock combinations tests it rather than a regex over this file.
-    const music = musicAfterCut(before.music, held, sel.start, sel.end);
-    if (music.length > MAX_CLIPS) {
-      setRefusal(`That cut would split the music into ${music.length} clips, past the limit of ${MAX_CLIPS} — `
-        + "remove a clip first, or lock the Music lane to cut the picture alone.");
-      return;
-    }
-    // The markers ride along UNCHANGED (trap 39): they are moments of the
-    // source, and the cut moves or hides them by projection, never by
-    // rewriting them.
-    commitEdit({ ...outcome.next, music, markers: before.markers });
-  }, [commitEdit, editLocked]);
-
-  /**
-   * Split at the playhead (`S`): a boundary in each unlocked list - or in
-   * every list, regardless of locks, for Ctrl+Shift+S - at the source moment
-   * under the playhead (`nextEditForSplit`). Nothing is removed (trap 23);
-   * the pieces it makes are what a click selects. A split on an existing
-   * boundary changes no list and commits nothing.
-   */
-  const splitAtPlayhead = useCallback((all: boolean) => {
-    if (editLocked) return;
-    const before = committedRef.current;
-    const at = positionRef.current;
-    const tracks = nextEditForSplit(before, locksRef.current, at, sourceDurationRef.current, all);
-    // A split of the Music lane is the same ripple with nothing removed: the
-    // clips under the playhead become two, and nothing moves (`cutMusic`).
-    // Unaffected by the picture rule the cut follows: a split changes no
-    // clip's `at`, so it cannot put the music out of step with the frames.
-    // A split THROUGH a missing clip would change its slice, which the
-    // server refuses (E4c) in words that describe a trim, not this gesture
-    // (the Reviewer's M1): refused here first, before anything is sent,
-    // wherever the music would be split at all - the lane unlocked, or
-    // Ctrl+Shift+S, which splits regardless of the locks.
-    if (all || !locksRef.current.music) {
-      const across = missingAcross(before.music, at, at);
-      if (across.length > 0) {
-        setRefusal(missingAcrossRefusal("split", across, at));
-        return;
-      }
-    }
-    const music = !all && locksRef.current.music ? before.music : cutMusic(before.music, at, at);
-    if (music.length > MAX_CLIPS) {
-      setRefusal(`That split would make ${music.length} music clips, past the limit of ${MAX_CLIPS} — `
-        + "remove a clip first, or lock the Music lane to split the tracks alone.");
-      return;
-    }
-    commitEdit({ ...tracks, music, markers: before.markers });
-  }, [commitEdit, editLocked]);
-
-  /** The blocks a nudge or a Reset acts on: the selected blocks, else the chosen sentence when it is on the strip. */
-  const actedOn = useCallback((): PlanSentence[] => {
-    const chosen = selectedBlocksRef.current;
-    if (chosen.size > 0) return sentences.filter((s) => chosen.has(s.index));
-    const one = selected !== null ? sentences.find((s) => s.index === selected) : undefined;
-    return one ? [one] : [];
-  }, [selected, sentences]);
-  /** ONE request for however many blocks: their offsets before (from the stored copy) and after. False when nothing changed. */
-  const commitOffsets = useCallback((next: { index: number; offset: number | null }[]): boolean => {
-    const stored = committedOffsetsRef.current;
-    const changed = next.filter(({ index, offset }) => (stored[index] ?? null) !== offset);
-    if (changed.length === 0) return false;
-    const before: Record<number, number | null> = {};
-    const after: Record<number, number | null> = {};
-    for (const { index, offset } of changed) {
-      before[index] = stored[index] ?? null;
-      after[index] = offset;
-    }
-    commit.mutate({ kind: "do", op: { kind: "offsets", values: after }, before: { kind: "offsets", values: before } });
-    return true;
-  }, [commit]);
-  /**
-   * The blocks as `dragOffsets` wants them: from what is DRAWN - the plan's
-   * pin, never the page's stored offset, which can be a plan refetch behind
-   * (a value typed in the List a moment ago) and would land the block
-   * seconds from where it was dropped. The stored copy is undo's business
-   * only (`commitOffsets`).
-   */
-  const drawn = (blocks: PlanSentence[]) => blocks.map((s) => ({ index: s.index, start: s.start, offset: s.pinned_start - s.start }));
-  /** `[` / `]`: the selected blocks a little earlier or later, one request per press. */
-  const nudge = useCallback((deltaSeconds: number) => {
-    if (editLocked) return;
-    const blocks = actedOn();
-    if (blocks.length === 0) return;
-    commitOffsets(dragOffsets(drawn(blocks), deltaSeconds));
-  }, [actedOn, commitOffsets, editLocked]);
-  /** Reset timing: back to the spoken moment for the selected sentences - `offset: null` for each. */
-  const resetTiming = useCallback(() => {
-    if (editLocked) return;
-    commitOffsets(actedOn().map((s) => ({ index: s.index, offset: null })));
-  }, [actedOn, commitOffsets, editLocked]);
-
-  const undo = useCallback(() => {
-    if (history.past.length === 0 || editLocked) return;
-    const entry = history.past[history.past.length - 1];
-    commit.mutate({ kind: "undo", op: entry.undo, entry });
-  }, [commit, editLocked, history.past]);
-  const redo = useCallback(() => {
-    if (history.future.length === 0 || editLocked) return;
-    const entry = history.future[history.future.length - 1];
-    commit.mutate({ kind: "redo", op: entry.redo, entry });
-  }, [commit, editLocked, history.future]);
+  // The cut, the split, the nudge and the reset - and the blocks they act
+  // on - are `useEditGestures` (R1a, timeline/useEditGestures.ts); `drawn`
+  // is imported from it for the block move's release below.
+  const { cutSelection, splitAtPlayhead, actedOn, nudge, resetTiming } = useEditGestures({
+    commitEdit, commitOffsets, editLocked, setRefusal, selectionRef, locksRef, committedRef, positionRef, sourceDurationRef,
+    selectedBlocksRef, sentences, selected,
+  });
 
   // ── the selection gesture ────────────────────────────────────────────────
   /** A selection lives on the PICTURE: nothing past its end can be cut. */
