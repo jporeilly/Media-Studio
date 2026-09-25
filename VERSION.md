@@ -1,6 +1,6 @@
 # Version
 
-**Current version:** 0.9.1
+**Current version:** 0.10.0
 **Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
 assistant, generation options, transcription, re-voice, per-sentence narration adjustments
 on a transcript — phases 1 to 3b of the narration timeline, so an offset, a mute, a voice, a
@@ -21,7 +21,9 @@ which now ships a matched ffprobe beside its ffmpeg, so neither the re-voice nor
 render depends any longer on the machine having a prober of its own (an install updated in
 place from an older installer still does, and says so at every start) —, and the Docs page,
 which serves the user-facing documents and a full guide to the Timeline inside the app —
-the prober and the Docs page in 0.9.1 (released 2026-09-23) —;
+the prober and the Docs page in 0.9.1 (released 2026-09-23) —; E4c, E5a, E5b and E5c — the
+missing-clip rule, trim handles and snapping, markers that become chapters, and the J/K/L
+shuttle — in 0.10.0 (released 2026-09-25) —;
 see CHANGELOG.md). Still to come: the rest of the administration work — notifications,
 a branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
 Enterprise remains the shipping product until parity.
