@@ -38,6 +38,17 @@ project already knows). **Ctrl+Home**
 and **Ctrl+End** jump to the two ends. Dragging the playhead's head scrubs, and
 a click on the ruler seeks.
 
+**J**, **K** and **L** shuttle. **L** plays; pressed again while playing it runs
+the picture forward at 2×, then 4×, then 8×, and stays there. **J** runs it
+backwards at 1×, then 2×, 4×, 8×. **K** stops, and puts the rate back to 1× — so
+do Space, a seek, any transport button, and reaching an end. **K** held with
+**J** or **L** tapped steps one frame back or forward. Above 1× and backwards the
+shuttle is picture only: the audition's audio cannot run faster without changing
+its pitch, and there is no such thing as reverse speech, so it is silent, and the
+readout beside the clock says the direction and the rate ("◀◀ 4×", "▶▶ 2×").
+**L** inside a selection stops at its end, as Play does; **J** stops at the
+selection's start when the playhead is inside one, else at the start of the edit.
+
 Each sentence is spoken once and kept, so the first play of a long project
 takes a while and every play after it is instant. **Prepare all N sentences**
 in the transport row does the same work up front. Music is decoded when you
@@ -368,6 +379,8 @@ open.
 | --- | --- |
 | **Space** | Play or pause |
 | **,** / **.** | One frame back or forward |
+| **J** / **K** / **L** | Shuttle back / stop / forward; pressed again, 2×, 4×, 8× (picture only above 1× and backwards) |
+| **K** held + **J** / **L** | One frame back or forward |
 | **Ctrl+Home** / **Ctrl+End** | Jump to the start or the end |
 | **Shift+,** / **Shift+.** | Grow the selection a frame at its start or its end |
 | **Ctrl+Shift+Home** / **Ctrl+Shift+End** | Stretch the selection to the start or the end of the picture |

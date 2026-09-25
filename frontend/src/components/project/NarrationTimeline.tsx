@@ -160,6 +160,17 @@ import {
   type Schedule,
   type WaveformPeaks,
 } from "../../lib/timeline";
+import {
+  FORWARD,
+  STOPPED,
+  type Shuttle,
+  type ShuttleKey,
+  nextShuttle,
+  seekThrottle,
+  shuttleAdvance,
+  shuttleFloor,
+  shuttleLabel,
+} from "../../lib/shuttle";
 import { Button, ErrorBox, Input, Spinner } from "../ui";
 import { MusicLibrary, type MusicFile } from "./MusicLibrary";
 
@@ -852,6 +863,27 @@ export function NarrationTimeline({
   const playBoundRef = useRef<number | null>(null);
   /** The next join ahead of the playhead, so the picture is re-seeked as it is crossed. */
   const nextJoinRef = useRef<Join | null>(null);
+  // ── the shuttle (E5c) ────────────────────────────────────────────────────
+  //
+  // `J` / `K` / `L`. The state is a ref, never React state: the loop reads
+  // it every frame, and the label beside the clock is written through its
+  // ref as the clock is (`paint`'s rule). Forward at 1× is the audition
+  // proper - `start`'s audio play - and every other moving state is the
+  // SILENT shuttle: no audio source is made or scheduled (trap 40), the
+  // playhead advances at `rate × real time` on `shuttleLoop`, and the muted
+  // `<video>` runs at `playbackRate = rate` forward or is seeked along
+  // backwards. `halt` resets it, so a stop, a seek, a bound and the end all
+  // put the rate back to 1×.
+  const shuttleRef = useRef<Shuttle>(STOPPED);
+  const shuttleLabelRef = useRef<HTMLSpanElement | null>(null);
+  /** `performance.now()` at the last shuttle frame, so each frame advances by real elapsed time. */
+  const shuttleClockRef = useRef(0);
+  /** Where a backwards shuttle stops: the selection's start when it began inside one, else 0. */
+  const shuttleFloorRef = useRef(0);
+  /** `performance.now()` at the last backwards seek of the `<video>`, for the throttle. */
+  const lastSeekRef = useRef(Number.NEGATIVE_INFINITY);
+  /** `K` is down: `J` and `L` step a frame instead of shuttling, until its keyup (or the window loses focus). */
+  const kHeldRef = useRef(false);
 
   // ── the selection ────────────────────────────────────────────────────────
   //
@@ -1138,6 +1170,31 @@ export function NarrationTimeline({
     } catch { /* no metadata yet: the seek is applied when it arrives */ }
   }, []);
 
+  /**
+   * The shuttle's state, and the picture for it: forward runs the muted
+   * `<video>` at the rate (1 for the audition proper, whose `start` has
+   * already played it); backwards and stopped leave it PAUSED at 1× - a
+   * backwards shuttle is seeked, never played. The ONE place the element's
+   * `playbackRate` is written, so it can only ever be above 1 while the
+   * shuttle is forward, and is back at 1 on every halt. The label beside the
+   * clock is written here too, through its ref.
+   */
+  const applyShuttle = useCallback((next: Shuttle) => {
+    shuttleRef.current = next;
+    if (shuttleLabelRef.current) shuttleLabelRef.current.textContent = shuttleLabel(next);
+    const video = videoRef.current;
+    if (!video) return;
+    if (next.direction === 1) {
+      video.playbackRate = next.rate;
+      if (video.paused && positionRef.current < durationRef.current) {
+        video.play().catch(() => { /* the picture is a reference, not the point */ });
+      }
+    } else {
+      video.playbackRate = 1;
+      video.pause();
+    }
+  }, []);
+
   const halt = useCallback((at: number) => {
     // Supersede any `start` still inside its awaits, so a press that has not
     // finished resuming the AudioContext cannot resurrect playback after this.
@@ -1146,11 +1203,12 @@ export function NarrationTimeline({
     stopSources();
     startedAt.current = null;
     positionRef.current = at;
-    videoRef.current?.pause();
+    // Stopped: the picture paused at 1×, the shuttle's rate reset (E5c).
+    applyShuttle(STOPPED);
     syncVideo(at);
     setPlaying(false);
     paint();
-  }, [paint, stopSources, syncVideo]);
+  }, [applyShuttle, paint, stopSources, syncVideo]);
 
   const tick = useCallback(function run() {
     // Never two loops at once: `start` is async, so two presses inside its
@@ -1195,6 +1253,49 @@ export function NarrationTimeline({
     });
   }, [halt, paint, position, syncVideo]);
 
+  /**
+   * The silent shuttle's loop (E5c), `tick`'s twin for the states that have
+   * no audio clock: each frame advances the playhead by `rate × real time`
+   * (`performance.now()`'s delta), paints, and handles the picture - forward,
+   * the `<video>` is already running at the rate (`applyShuttle`) and is
+   * re-synced at every join and paused past the picture's end exactly as
+   * `tick` does; backwards, it is seeked to the playhead at most about
+   * fifteen times a second, so the element is not thrashed. A bound - 0 or
+   * the selection's start behind, the selection's end or the output's end
+   * ahead - halts through `halt`, which resets the state. The same `frame`
+   * ref as `tick`, cancelled first, so there are never two loops at once;
+   * and an end that is not known yet is no bound (`tick`'s own rule).
+   */
+  const shuttleLoop = useCallback(function run() {
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => {
+      const state = shuttleRef.current;
+      if (state.direction === 0) return;
+      const now = performance.now();
+      const dt = (now - shuttleClockRef.current) / 1000;
+      shuttleClockRef.current = now;
+      const end = totalRef.current;
+      const ceiling = playBoundRef.current ?? (end > 0 ? end : Number.POSITIVE_INFINITY);
+      const { position: at, hit } = shuttleAdvance(positionRef.current, state, dt, shuttleFloorRef.current, ceiling);
+      positionRef.current = at;
+      paint();
+      if (hit) { halt(at); return; }
+      if (state.direction === 1) {
+        const join = nextJoinRef.current;
+        if (join && at >= join.at) {
+          syncVideo(at);
+          nextJoinRef.current = joinsRef.current.find((j) => j.at > at + EPSILON) ?? null;
+        }
+        const video = videoRef.current;
+        if (video && !video.paused && at >= durationRef.current) video.pause();
+      } else if (seekThrottle(lastSeekRef.current, now)) {
+        lastSeekRef.current = now;
+        syncVideo(at);
+      }
+      run();
+    });
+  }, [halt, paint, syncVideo]);
+
   /** Where a Play begins: inside the selection when there is one and the
    *  playhead is in it (so pause and resume work), else the selection's start;
    *  with none, from the playhead, or from the top after the end. Decided in
@@ -1238,9 +1339,11 @@ export function NarrationTimeline({
       } catch { /* the picture is a reference, not the point; the audio plays regardless */ }
     }
     if (startToken.current !== token) return;
+    // Forward at 1×, with audio: the shuttle's state for a play (E5c).
+    applyShuttle(FORWARD);
     setPlaying(true);
     tick();
-  }, [audioContext, prepareMusic, scheduleFrom, startFrom, stopSources, syncVideo, tick]);
+  }, [applyShuttle, audioContext, prepareMusic, scheduleFrom, startFrom, stopSources, syncVideo, tick]);
 
   /** Play, or pause. With nothing prepared yet this starts the fetching and
    *  plays as soon as the first sentence is decoded, rather than sitting there
@@ -1408,11 +1511,17 @@ export function NarrationTimeline({
   // does not leave playback halting at an end that no longer exists.
   useEffect(() => {
     selectionRef.current = selection;
-    if (startedAt.current) {
+    // Both of a shuttle's bounds follow the selection the same way (E5c): a
+    // forward shuttle's ceiling by the play's rule above, a backwards
+    // shuttle's floor by `shuttleFloor` - so Escape or a handle drag
+    // mid-shuttle does not leave it halting at a start that no longer exists
+    // either (the Reviewer's MINOR 2).
+    if (startedAt.current || shuttleRef.current.direction === 1) {
       const at = position();
       playBoundRef.current = selection && at >= selection.start - EPSILON && at < selection.end - EPSILON
         ? selection.end : null;
     }
+    if (shuttleRef.current.direction === -1) shuttleFloorRef.current = shuttleFloor(selection, positionRef.current);
     paint();
   }, [selection, paint, position]);
 
@@ -2778,6 +2887,53 @@ export function NarrationTimeline({
     halt(stepFrame(position(), direction, totalRef.current));
   }, [halt, position]);
   const jumpToEnd = useCallback(() => { halt(totalRef.current); }, [halt]);
+  /**
+   * `J` / `K` / `L` (E5c): one transition of `nextShuttle`'s table, and what
+   * it means for the audition. `K` is a stop, through `halt` as Pause is,
+   * and it gives up a Play that was waiting for its first sentence. Forward
+   * at 1× is a REAL play: from a stop it is Space's own path (`togglePlay` -
+   * the prepare, the wait for the first sentence), and out of a backwards
+   * shuttle it is `start` from where the playhead is. Everything else is
+   * the silent shuttle: the audio - if any is playing - is stopped and its
+   * clock origin dropped WITHOUT `halt`'s side effects (the playhead stays
+   * exactly where the clock had it, the selection's bound and the next join
+   * stand), a `start` still inside its awaits is superseded as `halt`
+   * supersedes it, the loop runs on real time from now, and the Play button
+   * reads Pause. No audio source is made or scheduled on this path (trap 40).
+   */
+  const shuttleKey = useCallback((key: ShuttleKey) => {
+    const before = shuttleRef.current;
+    const next = nextShuttle(before, key);
+    if (next.direction === 0) { halt(position()); setWaitingToPlay(false); return; }
+    if (next.direction === 1 && next.rate === 1) {
+      if (before.direction === 0) { togglePlay(); return; }
+      // Out of a backwards shuttle: `seek`'s own two lines. `halt` cancels
+      // the loop, resets the state and sets `playing` false BEFORE `start`
+      // enters its awaits - so nothing moves the playhead meanwhile, and a
+      // second L inside them is the ordinary second press the token resolves
+      // as a play, never a stop (the Reviewer's MINOR 1).
+      halt(positionRef.current);
+      void start(positionRef.current);
+      return;
+    }
+    positionRef.current = position();
+    startToken.current += 1;
+    stopSources();
+    startedAt.current = null;
+    setWaitingToPlay(false);
+    if (next.direction === -1 && before.direction !== -1) {
+      // Backwards from here: the floor is the selection's start when the
+      // playhead is inside one, else 0 (`shuttleFloor`); the selection effect
+      // keeps it current while the shuttle runs, as it keeps a play's bound.
+      // The first frame seeks at once.
+      shuttleFloorRef.current = shuttleFloor(selectionRef.current, positionRef.current);
+      lastSeekRef.current = Number.NEGATIVE_INFINITY;
+    }
+    shuttleClockRef.current = performance.now();
+    applyShuttle(next);
+    setPlaying(true);
+    shuttleLoop();
+  }, [applyShuttle, halt, position, shuttleLoop, start, stopSources, togglePlay]);
   /** Shift+Comma / Shift+Period: grow the selection a frame at its start or end (from the playhead with none). */
   const extendSelection = useCallback((direction: 1 | -1) => {
     const sel = selectionRef.current;
@@ -2880,6 +3036,13 @@ export function NarrationTimeline({
       if (code === "KeyS" || key === "s") { if (once) splitAtPlayhead(false); return true; }
       // Camtasia's M: a marker at the playhead, its name box open (E5b).
       if (code === "KeyM" || key === "m") { if (once) dropMarker(); return true; }
+      // J / K / L (E5c): the shuttle - or, with K held, a frame step. Once
+      // per press: held, L would climb 2×, 4×, 8× at the repeat rate. K's
+      // repeats keep its flag up while it is down (its keyup clears it), and
+      // the step under it repeats as Comma and Period do.
+      if (code === "KeyK" || key === "k") { kHeldRef.current = true; if (once) shuttleKey("K"); return true; }
+      if (code === "KeyJ" || key === "j") { if (kHeldRef.current) stepBy(-1); else if (once) shuttleKey("J"); return true; }
+      if (code === "KeyL" || key === "l") { if (kHeldRef.current) stepBy(1); else if (once) shuttleKey("L"); return true; }
       return false;
     }
     if (shift && !ctrl) {
@@ -2936,15 +3099,23 @@ export function NarrationTimeline({
     // dispatches the button's click on keyup regardless, which would toggle
     // twice - so the keyup is prevented there too, under the same rules.
     const onKeyUp = (event: KeyboardEvent) => {
+      // K released: J and L shuttle again (E5c). Cleared wherever the keyup
+      // lands, since the flag was raised outside any box.
+      if (event.code === "KeyK" || event.key === "k" || event.key === "K") kHeldRef.current = false;
       if ((event.code !== "Space" && event.key !== " ") || typing(event)) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest?.("button, a")) event.preventDefault();
     };
+    // A K held while the window loses focus never sees its keyup.
+    const onBlur = () => { kHeldRef.current = false; };
     document.addEventListener("keydown", onKey);
     document.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     return () => {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      kHeldRef.current = false;
     };
   }, [active]);
 
@@ -3077,7 +3248,14 @@ export function NarrationTimeline({
             markers are a thing of their own - a key, a flag on the ruler
             and chapters in the render - and no row above could take them
             without losing what it says; the twelve words the row costs are
-            paid for by a word or two off four others and the context. */}
+            paid for by a word or two off four others and the context.
+            Twelve since E5c, the LAST row the harness's height cap allows:
+            the shuttle is three keys with three facts (what each does, that
+            a repeat climbs the rate, that K held turns J and L into the
+            frame step), none of which a row above could carry, and the list
+            was one word under its word budget already. A word each off two
+            rows pays part; the harness's word cap moved for the rest and
+            says why. The next gesture has to MERGE. */}
         <dl className="os-tl-actions">
           <dt>Drag the green or red handle, or Ctrl+drag</dt>
           <dd>Select a range; snaps to pins and joins, Alt: no snap</dd>
@@ -3089,8 +3267,10 @@ export function NarrationTimeline({
           <dd>Split the unlocked lanes at the playhead</dd>
           <dt>M</dt>
           <dd>Drop a marker at the playhead; Ctrl+[ / ] jump between them</dd>
+          <dt>J / K / L</dt>
+          <dd>Shuttle back, stop, forward; again: 2×, 4×, 8×; K held + J or L steps a frame</dd>
           <dt>A lane's name, or its lock</dt>
-          <dd>Edit only that channel, or leave that lane alone</dd>
+          <dd>Edit only that channel, or lock it</dd>
           <dt>Drag a sentence block</dt>
           <dd>Re-time it; [ / ] nudge; Reset timing restores</dd>
           <dt>The + on Music</dt>
@@ -3098,7 +3278,7 @@ export function NarrationTimeline({
           <dt>Drag a clip, or either end</dt>
           <dd>Move or trim it; Delete removes it</dd>
           <dt>The eye on Music</dt>
-          <dd>Hear the voice alone; the render still mixes it</dd>
+          <dd>The voice alone; the render still mixes it</dd>
           <dt>Ctrl+Z</dt>
           <dd>Undo</dd>
         </dl>
@@ -3202,7 +3382,11 @@ export function NarrationTimeline({
               type="button"
               className="os-tl-btn os-tl-play"
               aria-label={playing ? "Pause" : "Play"}
-              title={playing ? "Pause (Space)" : waitingToPlay ? "Starting as soon as the first sentence is ready…" : "Play (Space)"}
+              title={playing
+                ? "Pause (Space, or K) — L again shuttles forward at 2×, 4×, 8×; J shuttles back"
+                : waitingToPlay
+                  ? "Starting as soon as the first sentence is ready…"
+                  : "Play (Space, or L) — J shuttles back, K stops; K held with J or L steps a frame"}
               onClick={togglePlay}
             >
               {playing ? <Pause size={18} /> : <Play size={18} />}
@@ -3222,6 +3406,15 @@ export function NarrationTimeline({
             <span className="os-tl-clock">
               <span ref={clockRef}>{timecode(0)}</span> / {timecode(total)}
             </span>
+            {/* The shuttle's direction and rate (E5c) - "◀◀ 4×", "▶▶ 2×" - written through the ref by
+                `applyShuttle`, empty when stopped or playing at 1×. A live region, so a screen reader
+                hears the rate change; polite, so it never interrupts. */}
+            <span
+              ref={shuttleLabelRef}
+              className="os-tl-shuttle"
+              aria-live="polite"
+              title="J / K / L shuttle back, stop, forward; pressed again, 2×, 4×, 8×. Above 1× and backwards the picture runs silent."
+            />
           </div>
           <div className="os-tl-prep">
             {prep.running ? (

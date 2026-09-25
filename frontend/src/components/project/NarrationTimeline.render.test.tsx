@@ -333,15 +333,17 @@ describe("the strip's summary is a list of the basic gestures, and the rest is a
     expect(terms.length).toBe(meanings.length);
     expect(terms.length).toBeGreaterThanOrEqual(9);
     // The basics the owner listed: a range, the cut, (E5a) the trim, the
-    // split, (E5b) the marker, the channel and the lock - one row since E5a,
-    // so the trim's row kept the list at ten and the marker's makes eleven -
-    // a block, the library, a clip, the eye, undo.
+    // split, (E5b) the marker, (E5c) the shuttle, the channel and the lock -
+    // one row since E5a, so the trim's row kept the list at ten, the
+    // marker's made eleven and the shuttle's twelve - a block, the library,
+    // a clip, the eye, undo.
     expect(terms).toEqual([
       "Drag the green or red handle, or Ctrl+drag",
       "Scissors, or Delete",
       "Drag a piece&#x27;s edge",
       "S",
       "M",
+      "J / K / L",
       "A lane&#x27;s name, or its lock",
       "Drag a sentence block",
       "The + on Music",
@@ -349,12 +351,15 @@ describe("the strip's summary is a list of the basic gestures, and the rest is a
       "The eye on Music",
       "Ctrl+Z",
     ]);
-    expect(terms).toHaveLength(11);
+    expect(terms).toHaveLength(12);
     // The handle row says it snaps and how to stop it for one drag; the trim
-    // row says what a piece's edge does; the marker row names the jump keys.
+    // row says what a piece's edge does; the marker row names the jump keys;
+    // the shuttle row says what each key does, that a repeat climbs the rate,
+    // and that K held turns J and L into the frame step.
     expect(meanings[0]).toBe("Select a range; snaps to pins and joins, Alt: no snap");
     expect(meanings[2]).toBe("Trim the cut; drag it back out to restore");
     expect(meanings[4]).toBe("Drop a marker at the playhead; Ctrl+[ / ] jump between them");
+    expect(meanings[5]).toBe("Shuttle back, stop, forward; again: 2×, 4×, 8×; K held + J or L steps a frame");
   });
 
   it("points at the Timeline document for everything else", () => {
@@ -390,7 +395,14 @@ describe("the strip's summary is a list of the basic gestures, and the rest is a
     const help = html.slice(html.indexOf('class="os-tl-help'), html.indexOf('class="os-tl-panel"'));
     const words = help.replace(/<[^>]*>/g, " ").split(/\s+/).filter(Boolean).length;
     const context = help.slice(0, help.indexOf("<dl")).replace(/<[^>]*>/g, " ").split(/\s+/).filter(Boolean).length;
-    expect(words, "the summary is creeping back towards the 415 words of prose").toBeLessThan(170);
+    // 190 since E5c, from the 170 set for ten rows: E5a's trim row was paid
+    // for by a merge, E5b's marker row by twelve words off other rows, and
+    // that spent the last of it - the list stood at 169 - so the shuttle's
+    // row (the twelfth, the last the row cap below allows) could not be paid
+    // for without hollowing out rows that say something; three words came
+    // off two of them and the cap moved for the rest. The height is the
+    // ROWS, and that cap has not moved: a thirteenth gesture has to merge.
+    expect(words, "the summary is creeping back towards the 415 words of prose").toBeLessThan(190);
     expect(context, "two short lines of context, then the list").toBeLessThan(45);
     expect([...actions(html).matchAll(/<dt>/g)].length).toBeLessThanOrEqual(12);
   });
@@ -549,5 +561,34 @@ describe("the markers on the ruler (E5b)", () => {
     const [flag] = flags(markup({ markers: [INTRO] }));
     expect(flag).toContain("Click to select; double-click to rename; drag to move it (Alt: no snapping); Delete removes it.");
     expect(flag).toContain("Ctrl+[ and Ctrl+] jump between markers. Markers become the rendered video&#x27;s chapters.");
+  });
+});
+
+describe("the shuttle's readout on the transport (E5c)", () => {
+  /** The transport row's markup, from its opening tag to the prepare controls beside it. */
+  function transport(html: string): string {
+    const at = html.indexOf('class="os-tl-transport"');
+    expect(at, "the transport is not in the markup").toBeGreaterThan(-1);
+    return html.slice(at, html.indexOf('class="os-tl-prep"', at));
+  }
+
+  it("is beside the clock, a polite live region, and empty at rest", () => {
+    const row = transport(markup());
+    const label = row.match(/<span([^>]*)class="os-tl-shuttle"([^>]*)><\/span>/);
+    expect(label, "the shuttle label is not on the transport, or is not empty").not.toBeNull();
+    expect(`${label![1]} ${label![2]}`).toContain('aria-live="polite"');
+    // After the clock, in the same keys group; exactly one of it.
+    expect(row.indexOf('class="os-tl-clock"')).toBeLessThan(row.indexOf('class="os-tl-shuttle"'));
+    expect(row.split('class="os-tl-shuttle"')).toHaveLength(2);
+    // A render is a stopped audition, and stopped says nothing (lib/shuttle.test.ts
+    // holds the label's table; the component writes it through the ref).
+    expect(row).not.toMatch(/[◀▶]/);
+  });
+
+  it("names the keys on the Play button and on the label's own title", () => {
+    const row = transport(markup());
+    expect(row).toContain('aria-label="Play"');
+    expect(row).toContain('title="Play (Space, or L) — J shuttles back, K stops; K held with J or L steps a frame"');
+    expect(row).toContain('title="J / K / L shuttle back, stop, forward; pressed again, 2×, 4×, 8×. Above 1× and backwards the picture runs silent."');
   });
 });

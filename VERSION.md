@@ -22,10 +22,7 @@ render depends any longer on the machine having a prober of its own (an install 
 place from an older installer still does, and says so at every start) —, and the Docs page,
 which serves the user-facing documents and a full guide to the Timeline inside the app —
 the prober and the Docs page in 0.9.1 (released 2026-09-23) —;
-see CHANGELOG.md). Still to come: the rest of the edit timeline (E5's J/K/L — its
-trim handles, the snapping of cuts and the markers that become the render's
-chapters are built and unreleased, for the next release), and the
-rest of the administration work — notifications,
+see CHANGELOG.md). Still to come: the rest of the administration work — notifications,
 a branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
 Enterprise remains the shipping product until parity.
 

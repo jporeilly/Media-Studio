@@ -475,6 +475,9 @@ p { margin: 0 0 8px; }
 .os-tl-sep { width: 1px; height: 18px; background: #3a3a3a; margin: 0 5px; }
 .os-tl-status { font-size: 11.5px; color: var(--tl-muted); }
 .os-tl-clock { font-variant-numeric: tabular-nums; font-size: 12px; margin-left: 10px; white-space: nowrap; }
+/* The shuttle's readout beside the clock (E5c): "◀◀ 4×", "▶▶ 2×", empty when stopped or playing at 1×. A fixed
+   minimum width, so the transport does not shift when the label comes and goes. */
+.os-tl-shuttle { display: inline-block; min-width: 4.2em; margin-left: 8px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--tl-muted); white-space: nowrap; }
 /* Small monochrome icon buttons, as Camtasia's; `.text` for the two that carry a label. */
 .os-tl-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 26px; min-width: 26px; padding: 0 5px; border: 0; border-radius: 5px; background: transparent; color: var(--tl-text); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
 .os-tl-btn:hover:not(:disabled) { background: var(--tl-hover); }

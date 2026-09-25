@@ -31,8 +31,8 @@ the whole app suite looks and feels the same.
 > download; **E4 the music lane in 0.9.0, released 2026-09-22** — a studio-wide music
 > library, clips placed on a fourth lane and moved, trimmed, levelled and faded there,
 > auditioned in the browser against the voice and mixed under it by one more render pass;
-> trim handles on a piece's edges, snapping of cuts to the sentence pins and markers that
-> become the render's chapters are built and unreleased; J/K/L is not built), re-voicing in
+> trim handles on a piece's edges, snapping of cuts to the sentence pins, markers that
+> become the render's chapters and the J/K/L shuttle are built and unreleased), re-voicing in
 > a new voice or a translated language that keeps step with
 > the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
 > configurable password policy, projects that belong to whoever imported them with an audit
@@ -40,9 +40,7 @@ the whole app suite looks and feels the same.
 > **Docs** page in the app that serves this README, the install guide, the changelog, the
 > version note and a full guide to the Timeline (0.9.1, released 2026-09-23, which also
 > ships the ffprobe the re-voice needs on any machine but the developer's) are
-> in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the transition-sound library, the
-> rest of the edit timeline (E5's J/K/L — its trim handles, snapping of cuts and markers
-> are built and unreleased), and
+> in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the transition-sound library, and
 > the rest of the administration work (notifications, a branding lock, an admin page of its
 > own, per-kind job limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
 > `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).
