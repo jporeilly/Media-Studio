@@ -14,7 +14,7 @@ Requires Pillow (in the app's requirements.txt / venv).
 """
 import os
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICONS = os.path.join(REPO, "src-tauri", "icons")

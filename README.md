@@ -105,5 +105,4 @@ deliberately not served.
 - [INSTALL.md](INSTALL.md) — install, update and uninstall the Windows desktop edition
 - [VERSION.md](VERSION.md) — version carriers and bump policy
 - [CHANGELOG.md](CHANGELOG.md) — changes
-- [CLAUDE.md](CLAUDE.md) — the development workflow and architecture
-- [desktop/README.md](desktop/README.md) — building the desktop installer, and how the shell works
+- `CLAUDE.md` and `desktop/README.md` (in the repository, not served by the app's Docs page) — the development workflow and architecture; building the desktop installer, and how the shell works

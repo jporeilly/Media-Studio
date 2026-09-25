@@ -167,8 +167,7 @@ Windows shows SmartScreen on first run.
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Media-Studio-Enterprise\provisioning\check-environment.ps1"
 ```
 
-(PowerShell does not expand `%LOCALAPPDATA%`; use `$env:LOCALAPPDATA`.) From a
-checkout the same script is `desktop\scripts\check-environment.ps1`. It prints
+From a checkout the same script is `desktop\scripts\check-environment.ps1`. It prints
 one OK / WARN / FAIL row per dependency with a fix attached, and `-Json` emits
 the same as JSON. Only WebView2, the bundled Python and its core packages are
 FAILs; everything else is a WARN that names the feature it affects.
