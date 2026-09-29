@@ -154,3 +154,38 @@ export function voiceChange(
   const next = typed.trim() || null;
   return next === (current ?? null) ? null : { voice: next };
 }
+
+/**
+ * How many sentences carry an adjustment - an offset, a mute, a voice or a
+ * speed. What a new transcription drops, counted the way the server counts it
+ * (services/transcription.py): a cleared value is not stored, so a zero
+ * offset, an unticked Mute or an empty box is not an adjustment.
+ */
+export function adjustedSentences(segments: Segment[] | null | undefined): number {
+  return (segments ?? []).filter(
+    (s) => (s.offset ?? 0) !== 0 || !!s.muted || !!s.voice || (s.speed !== null && s.speed !== undefined),
+  ).length;
+}
+
+/**
+ * What the Transcribe again dialog says a new transcription loses and keeps
+ * (services/transcription.py is the rule): the words and every sentence's
+ * adjustments go, because they belong to sentences that will no longer exist;
+ * everything placed by time rather than by sentence stays.
+ */
+export function retranscribeEffects(adjusted: number): { loses: string[]; keeps: string[] } {
+  const adjustments = adjusted === 0
+    ? "Every sentence's offset, mute, voice and speed (none are set now)."
+    : `Every sentence's offset, mute, voice and speed: ${adjusted} sentence${adjusted === 1 ? " has" : "s have"} some, and none carry over, even to a sentence heard at the same moment.`;
+  return {
+    loses: [
+      "The transcript's words, with every correction made to them: Whisper writes the sentences afresh.",
+      adjustments,
+      "The Timeline's undo history.",
+    ],
+    keeps: [
+      "The Timeline's cuts, markers and music clips: they are placed by time, not by sentence.",
+      "The last re-voiced video and its tracks, until the next re-voice replaces them.",
+    ],
+  };
+}

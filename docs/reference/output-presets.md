@@ -6,14 +6,14 @@ A deck or PDF render is H.264 video with AAC audio in an MP4.
 
 | Preset | Resolution | Video bitrate | Description |
 | --- | --- | --- | --- |
-| YouTube 1080p (`youtube_1080p`) | 1920 × 1080 | codec default | 1080p for YouTube; codec-default quality. |
-| YouTube 4K (`youtube_4k`) | 3840 × 2160 | codec default | 2160p (4K) for YouTube; codec-default quality. |
-| LinkedIn / Teams (`linkedin_teams`) | 1920 × 1080 | codec default | 1080p for LinkedIn and Microsoft Teams. |
-| Zoom webinar (`zoom_webinar`) | 1280 × 720 | codec default | 720p, a lighter file for Zoom webinars. |
-| Vimeo 1080p (`vimeo_1080p`) | 1920 × 1080 | 10 Mbit/s | Vimeo recommended: H.264 High, ~10 Mbps, AAC 320k |
-| Vimeo 4K (`vimeo_4k`) | 3840 × 2160 | 30 Mbit/s | Vimeo recommended 4K: H.264 High, ~30 Mbps, AAC 320k |
+| YouTube 1080p (`youtube_1080p`) | 1920 × 1080 | codec default | 1920×1080 for YouTube; the encoder's default quality. |
+| YouTube 4K (`youtube_4k`) | 3840 × 2160 | codec default | 3840×2160 (4K) for YouTube; the encoder's default quality. |
+| LinkedIn / Teams (`linkedin_teams`) | 1920 × 1080 | codec default | 1920×1080 for LinkedIn and Microsoft Teams; the encoder's default quality. |
+| Zoom webinar (`zoom_webinar`) | 1280 × 720 | codec default | 1280×720, a lighter file for Zoom webinars; the encoder's default quality. |
+| Vimeo 1080p (`vimeo_1080p`) | 1920 × 1080 | 10 Mbit/s | 1920×1080 for Vimeo; video at 10 Mbps. |
+| Vimeo 4K (`vimeo_4k`) | 3840 × 2160 | 30 Mbit/s | 3840×2160 (4K) for Vimeo; video at 30 Mbps. |
 
-The descriptions are the app's own labels, shown under the preset on the Generate card. The encoder is given only the resolution and, for Vimeo, the video bitrate: every deck render is libx264 `ultrafast` with AAC at the encoder's default bitrate. No profile and no audio bitrate are passed, so the "H.264 High" and "AAC 320k" in the Vimeo labels are Vimeo's recommendation, not a description of the file.
+The descriptions are shown under the preset on the Generate card, and each says what the render is given: the resolution and, for Vimeo, the video bitrate. Every deck render is libx264 `ultrafast` with AAC at the encoder's default bitrate; no H.264 profile and no audio bitrate are passed.
 
 The default is YouTube 1080p, and an unknown preset id falls back to it. "Codec default" means no bitrate is passed to the encoder and its own constant-quality setting applies; the Vimeo presets name a bitrate because Vimeo re-encodes every upload and a higher source bitrate survives that pass with visibly better quality.
 

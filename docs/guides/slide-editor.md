@@ -34,7 +34,7 @@ The editor reads and writes the engine's own project for the deck, `data\project
 
 The previews are `slide_NNN.png` (a deck) or `page_NNN.png` (a PDF) in the inner project's image folder. Rendering them is a job of kind `render-slides`; a second request while one runs joins it rather than starting another. The app records where the images came from, PowerPoint, the title-only fallback, or the PDF's pages, because the AI assistant shows the model a slide's image only when it is a real render. Previews rendered before that record existed have no recorded source, which is what **Render again** fixes.
 
-While any job holds the project (a video render, the previews, an AI action) every save is refused; when the job was started from this page the notes box is also read-only. The job carries its own copy of the slides and would write over the edit.
+While any job holds the project (a video render, the previews, an AI action), whoever started it, the notes box is read-only and every save is refused. The job carries its own copy of the slides and would write over the edit.
 
 The export lands at `data\projects\<id>\exports\<name>-notes.pptx` and is rebuilt on every download.
 

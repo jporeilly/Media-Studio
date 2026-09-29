@@ -49,7 +49,7 @@ A single project can be backed up on its own: its directory `data\projects\<id>\
 2. Put `data\` (or the one project directory, keeping its twelve-character name) and `assets\music\` back where they were. A directory whose name is not a project id is not listed.
 3. Start the app. Accounts, sessions and the audit log come from `media_studio.db`; settings from `config.json`; the projects are listed from disk.
 
-A project restored without its `audio.wav` keeps its transcript, but a new cut or marker cannot be stored and a stored cut cannot be rendered until `audio.wav` is restored or the edit is cleared, because the edit is measured against that file. A music file restored under a different name is a different file: clips refer to files by name.
+A project restored without its `audio.wav` keeps its transcript, but a new cut or marker cannot be stored and a stored cut cannot be rendered until `audio.wav` is back, because the edit is measured against that file. Restore the file, or press **Transcribe again** on the Transcript card, which extracts it afresh from the video but replaces the transcript and drops every sentence's adjustments (the cuts, markers and music stay); or clear the edit. A music file restored under a different name is a different file: clips refer to files by name.
 
 ## Under the hood
 

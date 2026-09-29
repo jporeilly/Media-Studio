@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from api import __version__, store
 from services import jobs
 from utils.config import config
+from utils.logger import attach_to_uvicorn
 
 APP_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIST = APP_DIR / "frontend" / "dist"
@@ -37,6 +38,11 @@ async def lifespan(app: FastAPI):
     # Database + admin seed. Kept small for now; grows as features land.
     store.init_db()
     store.seed_admin()
+    # uvicorn's warnings and errors - the traceback of an unhandled 500 among
+    # them - into app.log too. Here rather than at import: uvicorn.run applies
+    # its own logging config after main.py has imported this module, and that
+    # replaces the handlers of its loggers.
+    attach_to_uvicorn()
     yield
 
 

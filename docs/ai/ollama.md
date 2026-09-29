@@ -44,7 +44,7 @@ The assistant shows the model a slide's image only when the model's family is on
 
 The assistant probes the server (3 seconds) before it creates a job and refuses with a 503 when it is unreachable; a model call that fails is a 502 for a synchronous action and a counted failure inside a job, and a loop stops early only when the server no longer answers a probe. Per-slide calls wait up to 120 seconds, a QA pass up to 180, the Q&A document 60 and Analyze's suggestions 30. Each call is one `/api/generate` request with the prompt, the system prompt and, for vision, the slide's PNG encoded in the body.
 
-The translation of a re-voice is one request per text, given 60 seconds; a failed request (the server down, a timeout) returns the original text and prints a warning on the backend's console (not in `app.log`), so the re-voice proceeds untranslated rather than failing. The assistant's own translation and tone actions report a failure instead.
+The translation of a re-voice is one request per text, given 60 seconds; a failed request (the server down, a timeout) returns the original text and logs a warning in `data\logs\app.log`, so the re-voice proceeds untranslated rather than failing. The assistant's own translation and tone actions report a failure instead.
 
 The environment checker reports Ollama as a warning when nothing listens on port 11434.
 

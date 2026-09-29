@@ -116,9 +116,42 @@ def get_project(pid: str, user: dict = Depends(current_user)):
     return require_project(pid, user)
 
 
+# The fields of the project's running job the page needs to follow it: which
+# job, which card owns it, whether it is still in flight, and who started it
+# (the Cancel rule). Its progress is read from ``GET /api/jobs/{id}``.
+ACTIVE_JOB_FIELDS = ("id", "kind", "status", "user_id")
+
+
+@router.get("/{pid}/job")
+def get_active_job(pid: str, user: dict = Depends(current_user)):
+    """The job holding this project, whoever started it:
+    ``{"active_job": {id, kind, status, user_id}}``, or ``{"active_job": null}``
+    when none is queued or running (a finished job is not active).
+
+    A small route of its own rather than a field on the project's GET: the
+    page asks it every few seconds while it follows no job, to notice one
+    started after a reload, in another tab or by someone else, and the record
+    it would otherwise re-read carries the whole transcript. Jobs live in
+    memory, so the record on disk is also the wrong place to describe one.
+    Guarded like every project route (``require_project``); the job's own
+    progress is then read from ``GET /api/jobs/{id}``, which the project's
+    owner may read whoever started it.
+    """
+    require_project(pid, user)
+    active = jobs.active_for(pid)
+    return {"active_job": {key: active.get(key) for key in ACTIVE_JOB_FIELDS} if active else None}
+
+
 @router.delete("/{pid}", status_code=204)
 def delete_project(pid: str, user: dict = Depends(current_user)):
+    """Delete a project and its whole directory. Refused with 409 while a job
+    holds the project (``jobs.require_idle``), like every other writer: the
+    job has its own copy of the project and would go on writing into a
+    directory that is being removed (on Windows a file it holds open made the
+    delete fail with "Something is still using it", a message that named no
+    job)."""
     record = require_project(pid, user)
+    jobs.require_idle(pid)
     try:
         deleted = store.delete_project(pid)
     except store.ProjectDeleteError as exc:
@@ -133,7 +166,11 @@ def delete_project(pid: str, user: dict = Depends(current_user)):
 
 @router.post("/{pid}/transcribe")
 def transcribe(pid: str, body: TranscribeRequest | None = None, user: dict = Depends(current_user)):
-    """Start transcribing a video project. Returns a job id to poll at /api/jobs/{id}."""
+    """Start transcribing a video project - for the first time, or again over
+    the transcript it has (``services.transcription`` says what a second
+    transcription replaces, drops and keeps). The same Whisper-model rule
+    either way. Returns a job id to poll at /api/jobs/{id}; 409 while another
+    job holds the project (``jobs.start``)."""
     record = require_project(pid, user)
     if record.get("kind") != "video":
         raise HTTPException(status_code=400, detail="Only video projects can be transcribed.")

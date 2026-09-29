@@ -320,7 +320,9 @@ class GenerateRequest(BaseModel):
 class RevoiceRequest(BaseModel):
     provider: str | None = None  # as GenerateRequest
     voice_id: str | None = None
-    speed: float = 1.0
+    # The same 0.5-2 bound as a deck render's speed and a sentence's own
+    # (``services.narration``): outside it the request is a 422, never a job.
+    speed: float = Field(1.0, ge=MIN_SPEED, le=MAX_SPEED)
     language: str | None = None  # display name from /api/languages; None = keep original
 
 

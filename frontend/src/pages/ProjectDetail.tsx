@@ -1,14 +1,17 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Eye, FileText, Film, Mic, Presentation, Wand2 } from "lucide-react";
 import { api, errorMessage } from "../api/client";
-import { JobProgress, type Job } from "../components/project/JobProgress";
+import { CancelJobButton, JobNotice, JobProgress } from "../components/project/JobProgress";
 import { SlidesCard } from "../components/project/SlidesCard";
 import { TranscriptCard } from "../components/project/TranscriptCard";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner } from "../components/ui";
+import { useAuth } from "../context/AuthContext";
 import { renderSummary } from "../lib/edit";
 import { duration, relativeTime } from "../lib/format";
+import { REVOICE_CANCEL_TITLE, noticeCard, type JobCard } from "../lib/jobs";
+import { useFollowedJob } from "../lib/useFollowedJob";
 import { type Segment } from "../lib/narration";
 import { slidesQueryKey } from "../lib/slides";
 import { narrationPlanKey, type EditPayload } from "../lib/timeline";
@@ -39,6 +42,8 @@ interface Project {
   language?: string;
   duration?: number;
   transcribed_device?: string;
+  /** When the transcript was made: the Transcript card is keyed on it, so nothing held for the old sentences survives a new transcription. */
+  transcribed_at?: string;
   output_video?: string;
   outputs?: Outputs;
   rendered_at?: string;
@@ -91,7 +96,7 @@ function OptionGroup({ title, hint, children }: { title: string; hint?: string; 
 export default function ProjectDetailPage() {
   const { id = "" } = useParams();
   const qc = useQueryClient();
-  const [jobId, setJobId] = useState<string | null>(null);
+  const { user } = useAuth();
   // The editable copy of the transcript. It stays on the page rather than
   // inside TranscriptCard because the Re-voice card below only exists once
   // there is one.
@@ -168,9 +173,38 @@ export default function ProjectDetailPage() {
     setVoiceId(""); // re-picked from the new provider's list
   };
 
+  // The one job this page follows: one it started, or the project's running job whoever started it - after a
+  // reload, in another tab, or someone else's - adopted from GET /api/projects/{id}/job (a small route rather
+  // than the project record, which carries the whole transcript). The rules - the poll, the lost job, the
+  // give-up and the one more try, the line a card keeps, Cancel for the starter or an administrator - are
+  // lib/useFollowedJob.ts's, shared with the Settings page's update.
+  //
+  // When a job ends, pull the freshly-saved project (transcript or video) and the slides (a render-slides job
+  // wrote their images; an AI job wrote notes) - on an error too: an AI job that stopped early keeps what it
+  // had written, and the editor must show those notes, not the ones from before.
+  const afterJob = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["project", id] });
+    qc.invalidateQueries({ queryKey: slidesQueryKey(id) });
+    // A transcribe rewrites the sentences AND re-extracts audio.wav, which is
+    // the scale the whole timeline is drawn against. Both are held with a
+    // long staleTime (the peaks for ever), so without this the audition would
+    // go on showing the old recording's waveform and the old sentences.
+    qc.invalidateQueries({ queryKey: narrationPlanKey(id) });
+    qc.invalidateQueries({ queryKey: ["waveform", id] });
+    // A transcribe re-measures the source the edit's ranges are checked against.
+    qc.invalidateQueries({ queryKey: ["edit", id] });
+  }, [qc, id]);
+  const followedJob = useFollowedJob({
+    activeUrl: project.data ? `/api/projects/${id}/job` : null,
+    viewer: user,
+    onEnded: afterJob,
+  });
+  const { job: jobData, jobActive, activeKind, follow } = followedJob;
+  const jobStatus = jobData?.status;
+
   const transcribe = useMutation({
     mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/transcribe`, {}),
-    onSuccess: (r) => setJobId(r.job_id),
+    onSuccess: (r) => follow(r.job_id, "transcribe"),
   });
 
   // previewSeconds > 0 renders only the opening seconds to a separate preview clip.
@@ -180,45 +214,13 @@ export default function ProjectDetailPage() {
       const body = generateBody({ provider, voice_id: voiceId, speed, preset: presetId }, options, previewSeconds);
       return api.post<{ job_id: string }>(`/api/projects/${id}/generate`, body);
     },
-    onSuccess: (r) => setJobId(r.job_id),
+    onSuccess: (r) => follow(r.job_id, "generate"),
   });
 
   const revoice = useMutation({
     mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/revoice`, { provider, voice_id: voiceId, speed, language }),
-    onSuccess: (r) => setJobId(r.job_id),
+    onSuccess: (r) => follow(r.job_id, "revoice"),
   });
-
-  const job = useQuery({
-    queryKey: ["job", jobId],
-    queryFn: () => api.get<Job>(`/api/jobs/${jobId}`),
-    enabled: !!jobId,
-    refetchInterval: (q) => {
-      const s = q.state.data?.status;
-      return s === "done" || s === "error" ? false : 1200;
-    },
-  });
-
-  // When a job ends, pull the freshly-saved project (transcript or video) and
-  // the slides (a render-slides job wrote their images; an AI job wrote notes)
-  // - on an error too: an AI job that stopped early keeps what it had written,
-  // and the editor must show those notes, not the ones from before. The job
-  // stays polled on an error so its message stays visible; a done job is dropped.
-  useEffect(() => {
-    const status = job.data?.status;
-    if (status === "done" || status === "error") {
-      qc.invalidateQueries({ queryKey: ["project", id] });
-      qc.invalidateQueries({ queryKey: slidesQueryKey(id) });
-      // A transcribe rewrites the sentences AND re-extracts audio.wav, which is
-      // the scale the whole timeline is drawn against. Both are held with a
-      // long staleTime (the peaks for ever), so without this the audition would
-      // go on showing the old recording's waveform and the old sentences.
-      qc.invalidateQueries({ queryKey: narrationPlanKey(id) });
-      qc.invalidateQueries({ queryKey: ["waveform", id] });
-      // A transcribe re-measures the source the edit's ranges are checked against.
-      qc.invalidateQueries({ queryKey: ["edit", id] });
-    }
-    if (status === "done") setJobId(null);
-  }, [job.data?.status, id, qc]);
 
   if (project.isLoading) {
     return <Card><Spinner label="Loading project…" /></Card>;
@@ -229,13 +231,18 @@ export default function ProjectDetailPage() {
 
   const p = project.data;
   const Icon = KIND_ICON[p.kind];
-  const jobStatus = job.data?.status;
-  // Only one job runs at a time; its kind tells which card owns the progress
-  // bar / error (a render-slides job belongs to the Slides card, a transcribe
-  // or re-voice to the video cards), so the other cards stay put.
-  const activeKind = job.data?.kind;
-  const jobActive = jobStatus === "queued" || jobStatus === "running";
-  const jobErrText = jobStatus === "error" ? job.data?.error || job.data?.message : null;
+  // Only one job runs at a time; its kind (`activeKind`, above) tells which card
+  // owns the progress bar / error (a render-slides job belongs to the Slides
+  // card, a transcribe or re-voice to the video cards), so the other cards stay put.
+  const jobErrText = jobStatus === "error" ? jobData?.error || jobData?.message : null;
+  // A job the viewer did not start is shown read-only: Cancel is for its starter or an administrator.
+  const mayCancel = followedJob.mayCancel;
+  // The line the page keeps once it let go of a job, on the card that ran it (lib/jobs.ts noticeCard).
+  const noticeOn = noticeCard(followedJob.notice, p.kind);
+  const noticeFor = (card: JobCard) => (noticeOn === card ? followedJob.notice?.text ?? null : null);
+  const dismissNotice = followedJob.dismissNotice;
+  const generateNotice = noticeFor("generate");
+  const revoiceNotice = noticeFor("revoice");
   const running = generate.isPending || (jobActive && activeKind === "generate");
   const jobError = generate.isError ? errorMessage(generate.error) : activeKind === "generate" ? jobErrText : null;
 
@@ -338,9 +345,12 @@ export default function ProjectDetailPage() {
           projectName={p.name}
           projectKind={p.kind}
           provider={provider}
-          job={job.data}
+          job={jobData}
           jobActive={jobActive}
-          onJobStarted={setJobId}
+          mayCancel={mayCancel}
+          jobNotice={noticeFor("slides")}
+          onDismissJobNotice={dismissNotice}
+          onJobStarted={follow}
           onVoiceSuggested={setVoiceId}
           qaDoc={p.outputs?.qa_doc}
         />
@@ -348,11 +358,12 @@ export default function ProjectDetailPage() {
 
       {canGenerate && (
         <Card title="Generate video" style={{ marginTop: 16 }}>
+          {generateNotice && <JobNotice text={generateNotice} onDismiss={dismissNotice} />}
           {jobError && <ErrorBox message={jobError} />}
           {!running && voicesError && <ErrorBox message={voicesError} />}
 
           {running ? (
-            <JobProgress job={job.data} />
+            <JobProgress job={jobData} />
           ) : (
             <div style={{ display: "grid", gap: 16 }}>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
@@ -555,16 +566,22 @@ export default function ProjectDetailPage() {
 
       {isVideo && (
         <TranscriptCard
+          // A new transcription is a new set of sentences: the card starts afresh with it, so nothing it or
+          // the Timeline held by sentence index (a half-typed box, the Timeline's undo of an offset drag) can
+          // land on a sentence it was never meant for. `transcribed_at` is stamped by every transcription.
+          key={p.transcribed_at ?? ""}
           projectId={id}
           segments={segments}
           setSegments={setSegments}
-          job={job.data}
+          job={jobData}
           jobActive={jobActive}
           transcribing={transcribing}
           transcribeError={transcribeError}
           transcribePending={transcribe.isPending}
           onTranscribe={() => transcribe.mutate()}
           otherJobNotice={otherJobNotice}
+          jobNotice={noticeFor("transcript")}
+          onDismissJobNotice={dismissNotice}
           provider={provider}
           voiceId={voiceId}
           speed={speed}
@@ -575,11 +592,26 @@ export default function ProjectDetailPage() {
 
       {isVideo && segments && segments.length > 0 && (
         <Card title="Re-voice" subtitle="Regenerate the narration in a new voice (and optionally a language), keeping the original video." style={{ marginTop: 16 }}>
+          {revoiceNotice && <JobNotice text={revoiceNotice} onDismiss={dismissNotice} />}
           {revoiceError && <ErrorBox message={revoiceError} />}
           {!revoicing && voicesError && <ErrorBox message={voicesError} />}
 
           {revoicing ? (
-            <JobProgress job={job.data} />
+            <div style={{ display: "grid", gap: 10 }}>
+              <JobProgress job={jobData} />
+              {/* The re-voice stops before the next sentence it would synthesise, while the picture is cut or
+                  the music mixed (services/revoice.py); its closing line then stays on this card. The same
+                  look and rule as the Slides card's Cancel: the starter or an administrator. */}
+              {jobData && activeKind === "revoice" && mayCancel && (
+                <CancelJobButton
+                  job={jobData}
+                  pending={followedJob.cancelPending}
+                  title={REVOICE_CANCEL_TITLE}
+                  onCancel={followedJob.cancel}
+                />
+              )}
+              {!!followedJob.cancelError && <ErrorBox message={errorMessage(followedJob.cancelError)} />}
+            </div>
           ) : (
             <div style={{ display: "grid", gap: 16 }}>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>

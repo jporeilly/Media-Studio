@@ -17,7 +17,7 @@ At the top: **Narration provider** (Edge TTS or Kokoro), **Voice** (the provider
 | **Subtitles** | **Mode**: None; Per slide (one cue per slide from its notes, an SRT); Whisper, word-level (SRT and VTT with word timings, a second pass after the render) |
 | **Extra formats** | **WebM**, **GIF (first 30 s)**, **Audio-only MP3** |
 
-Under the fields: "A job is running for this project (*kind*) — it must finish first." while a job started from this page holds the project (one started in another tab or by someone else is not shown; the server refuses the render with a 409), the voice list's notice when it has one, and any value out of range as an error.
+Under the fields: "A job is running for this project (*kind*) — it must finish first." while a job holds the project, whoever started it and wherever, the voice list's notice when it has one, and any value out of range as an error.
 
 Once rendered: a preview player ("Preview — the first 15 seconds"), the video player, **Download video**, and a button per sidecar that exists: **Subtitles (SRT)**, **Subtitles (VTT)**, **WebM**, **GIF**, **Audio (MP3)**.
 

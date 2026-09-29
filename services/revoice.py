@@ -45,6 +45,32 @@ downloads. No drawn markers, no remux: the file keeps whatever chapters the
 source had, as it always did. A remux that fails logs and leaves the
 un-chaptered file; it never fails the job, exactly as the deck path treats
 its own chapters.
+
+**A cancel** (``POST /api/jobs/{id}/cancel``) is looked at between the stages
+and inside the long ones: after the translation, while the picture is cut,
+before every sentence is synthesised (``_revoice_video``'s ``cancel_check``),
+before the music pass and while it runs. It never leaves a half-written file
+where the record says there is one, and the job finishes ``done`` with
+``result = {"cancelled": True, "stage": ...}`` and a closing line saying what
+is on disk:
+
+- **before the mux** (``stage`` "translation", "cut" or "synthesis"): nothing
+  the record names was written. The record is UNCHANGED, the previous
+  re-voice, if there was one, is still the video and the narration track it
+  names, and the job's scratch directories are removed. (At the cut and the
+  synthesis the engine's working project under ``<pid>/revoice/`` - its own
+  ``project.json``, ``audio/`` and ``images/`` - has been rewritten, as every
+  run rewrites it; nothing reads it but the next run.) -
+  ``CANCELLED_BEFORE_RENDER``;
+- **at the music pass** (``stage`` "mix"): the mux had already replaced
+  ``<stem>_revoiced.mp4`` with the new narration, so the record DESCRIBES
+  that voice-only file (stamped before the pass, as above) and the partial
+  mix is removed - ``CANCELLED_VOICE_ONLY``.
+
+The mux and the chapters' remux are short and are not interrupted: a cancel
+that arrives once the last check is behind the job - after the mux of a
+render with no music, or after the music pass of one with music - is too
+late, and the job completes (the file then carries its chapters too).
 """
 
 import shutil
@@ -58,6 +84,23 @@ from utils.logger import get_logger
 logger = get_logger("REVOICE")
 
 MISSING_MUSIC = "music file '{name}' is missing — remove the clip or upload the file again"
+
+# A cancelled re-voice's closing line, which the Re-voice card shows once the
+# job is over: what the cancel left behind, in the user's terms.
+CANCELLED_BEFORE_RENDER = "Re-voice cancelled before the new video was written; the project is as it was."
+CANCELLED_VOICE_ONLY = (
+    "Re-voice cancelled while the music was being mixed: the re-voiced video has the new narration "
+    "but not the music{chapters}. Re-voice again for the full render."
+)
+
+
+def _cancelled(stage: str, report, message: str = CANCELLED_BEFORE_RENDER) -> dict:
+    """End the job as cancelled at ``stage``: its closing line (reported at
+    1.0, which ``services.jobs`` keeps as the job's message) says what is on
+    disk, and the result names the stage (see the module docstring)."""
+    report(1.0, message)
+    logger.info("Re-voice cancelled at the %s stage", stage)
+    return {"cancelled": True, "stage": stage}
 
 
 def _music_clips(clips: list) -> list[dict]:
@@ -99,21 +142,24 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
     ``_revoice_video`` (keeps the frames, swaps the audio), lays the edit's
     music clips under the result when there are any, records
     ``revoiced_video`` on the project, and returns
-    ``{"video", "language", "failed_sentences"}`` - or ``{"cancelled": True}``
-    when the job was cancelled while the picture was being cut or the music
-    mixed. Raises ``RuntimeError`` if the re-voice produced no file or the
+    ``{"video", "language", "failed_sentences"}`` - or
+    ``{"cancelled": True, "stage": ...}`` when the job was cancelled (after
+    the translation, while the picture was cut, while the sentences were
+    synthesised, or at the music mix; the module docstring says what each
+    leaves). Raises ``RuntimeError`` if the re-voice produced no file or the
     music could not be mixed, and ``ValueError`` when every sentence is muted
     (or cut away) - which would otherwise fail inside the job as a bare
     "Re-voice failed" - or when a clip's music file has left the library
     (refused before any work; never rendered as silence).
 
-    **A cancel during the music pass leaves the re-voiced file without
-    music on disk** - ``_revoice_video`` has already rewritten
-    ``<stem>_revoiced.mp4`` in place by then - and the record describes
-    exactly that: the voice-only render, stamped with a fresh ``revoiced_at``
-    (the page's cache token: the bytes DID change) and no ``music_rendered``.
-    The same holds for a mix that fails. The next render replaces the file; a
-    cancel is not a rollback.
+    **A cancel before the mux changes nothing**: the record is untouched and
+    the previous re-voice's files are still the ones it names. **A cancel
+    during the music pass leaves the re-voiced file without music on disk** -
+    ``_revoice_video`` has already rewritten ``<stem>_revoiced.mp4`` in place
+    by then - and the record describes exactly that: the voice-only render,
+    stamped with a fresh ``revoiced_at`` (the page's cache token: the bytes
+    DID change) and no ``music_rendered``. The same holds for a mix that
+    fails. The next render replaces the file; a cancel is not a rollback.
     """
     record = store.get_project(pid)
     if not record:
@@ -177,10 +223,19 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         subtag = (translator.get_available_languages().get(language) or "").lower()
         source_lang = (record.get("language") or "").split("-")[0].lower()
         if subtag and subtag != "en" and subtag != source_lang:
+            # A job cancelled while it queued stops before the model call.
+            if jobs.cancel_requested_here():
+                return _cancelled("translation", _report)
             _report(0.05, f"Translating to {language}…")
             notes_text = translator.translate_notes(
                 [joined], language, config.ollama_url, ollama_model(),
             )[0]
+
+    # The translation is one model call and is not interrupted; a cancel that
+    # arrived during it (or while the job queued) stops here, with nothing
+    # written.
+    if jobs.cancel_requested_here():
+        return _cancelled("translation", _report)
 
     # Reconstruct a re-voiceable ProjectState: ONE section spanning the whole
     # video. The transcript's Whisper segments drive the sentence-level timing.
@@ -256,7 +311,9 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
             )
             if not cut:
                 if jobs.cancel_requested_here():
-                    return {"cancelled": True}
+                    # cut_picture left nothing behind; the scratch directory
+                    # goes in the ``finally`` below.
+                    return _cancelled("cut", _report)
                 raise RuntimeError("The picture could not be cut; the server log has the reason.")
         pm.state.source_video_path = str(render_source)
         pm.save()
@@ -278,12 +335,24 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
 
         _report(0.1, "Re-voicing…")
         processor = processing.VideoProcessor(voice_id=voice_id, speed=speed, provider=provider or "")
+        # The synthesis is the long part of a re-voice, one voice-service
+        # round trip per sentence: the engine asks the job's flag before
+        # each sentence and once more before the mux, and on a cancel it
+        # returns False having written nothing outside its own scratch
+        # directory (which it removes).
         ok = processor._revoice_video(
             pm, render_source, out, progress=progress, video_duration=told_seconds,
+            cancel_check=jobs.cancel_requested_here,
         )
     finally:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
+    if not ok and getattr(processor, "cancelled", False):
+        # The engine saw the cancel itself, before the mux: the record is
+        # untouched and ``out`` - the previous re-voice, if there was one -
+        # is the file it already names. (A False for any other reason is a
+        # failure, cancel or not.)
+        return _cancelled("synthesis", _report)
     if not ok or not out.exists():
         raise RuntimeError("Re-voice failed")
 
@@ -349,14 +418,23 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         current.pop("revoice_failed_sentences", None)
     store.save_project(current)
 
+    # The chapters this render will carry, worked out now (a pure function of
+    # the record read at the start - see below, where they are written) so a
+    # cancel at the music pass can say whether the file lacks them too.
+    chapters = edit.chapters_for(record, source_duration)
+
     # The music, as a second pass over the muxed output and in place: the
     # picture copied, the voice's level untouched, the standalone narration
-    # track (voice only) not opened. The one step besides the cut that looks
-    # at the cancel flag - a mix of a long output can run for seconds - and a
-    # cancel here leaves the voice-only file the record above describes.
+    # track (voice only) not opened. Asked about a cancel before it starts
+    # and while it runs - a mix of a long output can run for seconds - and a
+    # cancel here leaves the voice-only file the record above describes (the
+    # pass writes aside and removes its part file).
     if music_clips:
         from core import video_creator
 
+        voice_only = CANCELLED_VOICE_ONLY.format(chapters=" or the chapters" if chapters else "")
+        if jobs.cancel_requested_here():
+            return _cancelled("mix", _report, voice_only)
         count = len(music_clips)
         _report(0.95, f"Mixing {count} music clip{'' if count == 1 else 's'}…")
         mixed = video_creator.mix_music(
@@ -365,7 +443,7 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
         )
         if not mixed:
             if jobs.cancel_requested_here():
-                return {"cancelled": True}
+                return _cancelled("mix", _report, voice_only)
             raise RuntimeError("The music could not be mixed; the server log has the reason.")
         # The file changed again, so its stamp does too (the page's cache
         # token is that timestamp), and the edit stamp with it - the output
@@ -378,15 +456,14 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
 
     # The chapters, on the FINAL file - after the mux and after the music
     # pass, which rewrote it in place - so they are on the file the user
-    # downloads. Computed here and now from the record the job is rendering
+    # downloads. Computed at render time from the record the job is rendering
     # (trap 42: the stored markers projected through the picture's list AS
     # STORED at render time; the same ``record`` the picture was cut from,
     # so the chapters and the cut cannot disagree about the list - and
     # ``require_idle`` holds every edit off while this job runs). No drawn
     # markers, no remux. A remux that fails logs and leaves the file as it
     # was; it never fails the job, as the deck path never lets its chapters
-    # fail a render.
-    chapters = edit.chapters_for(record, source_duration)
+    # fail a render. (``chapters`` was computed above the music pass.)
     if not chapters and source_duration is None and applied.markers:
         # Reachable only when audio.wav went after the markers were stored
         # (the PUT that stores them needs it): with no length the last
