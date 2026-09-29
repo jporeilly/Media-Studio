@@ -45,20 +45,14 @@ import { api, errorMessage, qs } from "../../api/client";
 import { timecode } from "../../lib/format";
 import {
   CLIP_EDGE_PX,
-  DEFAULT_MUSIC_GAIN,
   EPSILON,
   FRAME_SECONDS,
   anchoredScrollLeft,
   atFrameFloor,
   caughtAfterClamp,
   clickSelectsPiece,
-  clipAt,
   clipEnd,
-  clipGain,
   clipLength,
-  clipPeaks,
-  clipSnapTargets,
-  clipsAfterDelete,
   canCut,
   drawnMarkers,
   LANES,
@@ -70,18 +64,15 @@ import {
   snapClip,
   describeJoin,
   dragOffsets,
-  fitFades,
   joins,
   laneLocks,
   maxZoom,
-  mintClipId,
   missingAcross,
   missingAcrossRefusal,
   moveClip,
   moveMarker,
   musicAfterTrim,
   newMarker,
-  newMusicClip,
   nextEditForTrim,
   pieceAt,
   pieceEdgeAt,
@@ -106,10 +97,8 @@ import {
   trimPiece,
   unmovedRelease,
   wholeKeep,
-  withoutMissing,
   zoomFromSlider,
   zoomToSelection,
-  type ClipZone,
   type DragKind,
   type DrawnMarker,
   type Join,
@@ -122,7 +111,6 @@ import {
   type Track,
   type TrimChange,
 } from "../../lib/edit";
-import { useStudioSettings } from "../../lib/studioSettings";
 import {
   clampTime,
   frameTimes,
@@ -137,12 +125,15 @@ import {
   type PlanSentence,
   type WaveformPeaks,
 } from "../../lib/timeline";
-import { Button, ErrorBox, Input, Spinner } from "../ui";
-import { MusicLibrary, type MusicFile } from "./MusicLibrary";
-import type { Drag, EditState, SavedSentence, Selection } from "./timeline/types";
+import { Button, ErrorBox, Spinner } from "../ui";
+import { MusicLibrary } from "./MusicLibrary";
+import { ClipInspector } from "./timeline/ClipInspector";
+import { MusicLane } from "./timeline/MusicLane";
+import { NO_BLOCKS, type Drag, type EditState, type SavedSentence, type Selection } from "./timeline/types";
 import { useAudition } from "./timeline/useAudition";
 import { type AfterCommit, useEditCommits } from "./timeline/useEditCommits";
 import { drawn, useEditGestures } from "./timeline/useEditGestures";
+import { fileSecondsOf, useMusicLane } from "./timeline/useMusicLane";
 
 interface Props {
   projectId: string;
@@ -200,7 +191,6 @@ const locksKey = (projectId: string) => `ms:tl-locks:${projectId}`;
 /** Where the magnet is remembered, beside the locks (E5a, spec §13.4): on by default, off only when it was switched off. */
 const snapKey = (projectId: string) => `ms:tl-snap:${projectId}`;
 const UNLOCKED: Locks = { video: false, narration: false, music: false };
-const NO_BLOCKS: ReadonlySet<number> = new Set();
 
 const NO_MUSIC: MusicClip[] = [];
 const NO_MARKERS: Marker[] = [];
@@ -583,24 +573,11 @@ export function NarrationTimeline({
   const [selectedClip, setSelectedClip] = useState<string | null>(null);
   const selectedClipRef = useRef(selectedClip);
   selectedClipRef.current = selectedClip;
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  const libraryOpenRef = useRef(libraryOpen);
-  libraryOpenRef.current = libraryOpen;
-  /** The clip elements by id, for the drag's per-frame paint. */
-  const clipNodes = useRef(new Map<string, HTMLButtonElement>());
-  const attachClip = useCallback((id: string) => (node: HTMLButtonElement | null) => {
-    if (node) clipNodes.current.set(id, node);
-    else clipNodes.current.delete(id);
-  }, []);
+  // The library's open state, the clip nodes, the inspector's draft, the
+  // waveform inside each clip and the lane's gestures are `useMusicLane`
+  // (R1c), called below once the drag primitives it takes exist; the
+  // dragged clip's label stays here, because the body's release hides it.
   const clipLabelRef = useRef<HTMLDivElement | null>(null);
-  /** The inspector's half-typed values, cleared when the selection or the plan moves on. */
-  const [clipDraft, setClipDraft] = useState<{ gain?: number; fadeIn?: string; fadeOut?: string }>({});
-  useEffect(() => { setClipDraft({}); }, [selectedClip, musicSignature]);
-  // A clip the edit removed - by a cut, an undo, or a delete - is no longer selected.
-  useEffect(() => {
-    // The clips ride with their signature (`musicRef` is not reactive).
-    setSelectedClip((held) => (held !== null && !musicRef.current.some((clip) => clip.id === held) ? null : held));
-  }, [musicSignature]);
 
   // ── the selected marker, and the one being named (E5b) ───────────────────
   //
@@ -661,29 +638,6 @@ export function NarrationTimeline({
     storedMusic, musicRef, musicSignature, selection, selectionRef, setSelection, dragRef, ppsRef, positionRef, totalRef,
     inHandleRef, outHandleRef, bandRef, inLabelRef, outLabelRef,
   });
-
-  // ── the waveform inside each clip ────────────────────────────────────────
-  //
-  // `GET /api/music/{name}/peaks` is the cached JSON the library wrote at
-  // upload - a few kilobytes, in the FILE's seconds - so it is fetched on the
-  // first DRAW of a clip, once per file, and sliced per clip (`clipPeaks`).
-  const [filePeaks, setFilePeaks] = useState<Record<string, WaveformPeaks>>({});
-  const peaksAsked = useRef(new Set<string>());
-  useEffect(() => {
-    if (!active) return;
-    let dropped = false;
-    void (async () => {
-      for (const name of musicFiles) {
-        if (peaksAsked.current.has(name)) continue;
-        peaksAsked.current.add(name);
-        try {
-          const answer = await api.get<WaveformPeaks>(`/api/music/${encodeURIComponent(name)}/peaks`);
-          if (!dropped) setFilePeaks((held) => ({ ...held, [name]: answer }));
-        } catch { /* no waveform for this clip: it still draws, plays and edits */ }
-      }
-    })();
-    return () => { dropped = true; };
-  }, [active, musicFiles]);
 
   const zoomMax = maxZoom(total, width);
   // A resize re-clamps whatever zoom is set: the ceiling is a function of the width.
@@ -895,46 +849,6 @@ export function NarrationTimeline({
     projectId, jobActive, plan, committedRef, committedOffsetsRef, sourceDurationRef, setSelection, onOffsetsSaved, afterCommitRef,
     refusal, setRefusal, editLockedRef,
   });
-  /**
-   * Paint a clip where the drag has it NOW - through the DOM, never through
-   * state: a setState per pointer move would re-render every block and every
-   * clip. A move is a transform; a trim rewrites the left and the width,
-   * which is why `clearClipDrag` writes the plan's values back rather than
-   * clearing them (React only re-writes a style it sees change).
-   */
-  const paintClip = useCallback((drag: Drag, next: MusicClip, snapped: number | null) => {
-    const base = drag.clip;
-    if (!base) return;
-    const pps = ppsRef.current;
-    const node = clipNodes.current.get(base.id);
-    if (node) {
-      if (drag.kind === "clip") node.style.transform = `translateX(${(next.at - base.at) * pps}px)`;
-      else {
-        node.style.left = `${next.at * pps}px`;
-        node.style.width = `${Math.max(3, clipLength(next) * pps)}px`;
-      }
-    }
-    const label = clipLabelRef.current;
-    if (label) {
-      label.style.display = "";
-      label.style.transform = `translateX(${next.at * pps}px)`;
-      const what = drag.kind === "clip" ? timecode(next.at) : `${timecode(next.at)} · ${clipLength(next).toFixed(2)} s`;
-      label.textContent = snapped === null ? what : `${what} ⌖`;
-    }
-  }, []);
-
-  /** Back to where the plan draws them: after a refusal, an unchanged release, or the plan that landed. */
-  const clearClipDrag = useCallback(() => {
-    const pps = ppsRef.current;
-    for (const clip of musicRef.current) {
-      const node = clipNodes.current.get(clip.id);
-      if (!node) continue;
-      node.style.transform = "";
-      node.style.left = `${clip.at * pps}px`;
-      node.style.width = `${Math.max(3, clipLength(clip) * pps)}px`;
-    }
-    if (clipLabelRef.current) clipLabelRef.current.style.display = "none";
-  }, []);
 
   // ── a trim in flight (E5a) ───────────────────────────────────────────────
   //
@@ -1004,30 +918,8 @@ export function NarrationTimeline({
     if (markerLabelRef.current) markerLabelRef.current.style.display = "none";
   }, []);
 
-  /** Take the blocks a move painted through their transforms, and the clips and flags a drag painted, back to the plan's. */
-  const clearMoved = useCallback(() => {
-    blockNodes.current.forEach((node) => { node.style.transform = ""; });
-    dragGhosts.current.forEach((node) => { node.style.display = "none"; });
-    if (moveLabelRef.current) moveLabelRef.current.style.display = "none";
-    clearClipDrag();
-    clearTrim();
-    clearMarkerDrag();
-  }, [clearClipDrag, clearMarkerDrag, clearTrim]);
-  afterCommitRef.current = { clearMoved, dropPending: () => setPending(null) };
   /** Nothing to cut or split into: every lane is locked. */
   const allLocked = LANES.every((lane) => locks[lane]);
-
-  /**
-   * A clip gesture: the whole `music` list, with the two tracks and the
-   * markers exactly as they stand, in ONE PUT on release (trap 8). The rest
-   * rides along because every edit operation carries the whole edit — that
-   * is what lets undo and redo put back a state rather than a fragment
-   * (decision 10); `editBody` sends only the keys that changed.
-   */
-  const commitMusic = useCallback((clips: MusicClip[]) => {
-    const before = committedRef.current;
-    commitEdit({ video: before.video, narration: before.narration, music: clips, markers: before.markers });
-  }, [commitEdit]);
 
   // ── the markers: drop, name, move, remove, jump (E5b) ────────────────────
   //
@@ -1115,83 +1007,6 @@ export function NarrationTimeline({
     if (to !== null) seek(to);
   }, [seek]);
 
-  // ── the music clips: add, remove, and the inspector's boxes ──────────────
-  //
-  // The studio's `music_volume` is a new clip's level (decision 2): the one
-  // static bed under the voice the owner ruled on, never ducking; 0.15 when
-  // the settings cannot be read.
-  const studio = useStudioSettings();
-  const studioGainRef = useRef<number | undefined>(undefined);
-  studioGainRef.current = studio.data?.settings?.music_volume;
-
-  /** A clip's file length as the read-back reports it; `null` for a file the library has lost. */
-  const fileSecondsOf = (clip: MusicClip): number | null => clip.file_duration ?? null;
-
-  /** The Library's "Add at playhead" (spec §12.5): the defaults of decision 2, committed at once. */
-  const addMusic = useCallback((file: MusicFile) => {
-    if (editLockedRef.current || locksRef.current.music) return;
-    const clips = musicRef.current;
-    if (clips.length >= MAX_CLIPS) {
-      setRefusal(`The music is limited to ${MAX_CLIPS} clips — remove one first.`);
-      return;
-    }
-    const clip = newMusicClip({
-      id: mintClipId(clips.map((held) => held.id)),
-      file: file.name,
-      fileDuration: file.duration,
-      at: positionRef.current,
-      outputDuration: durationRef.current,
-      gain: studioGainRef.current ?? DEFAULT_MUSIC_GAIN,
-    });
-    if (!clip) {
-      setRefusal("There is no room for a clip at the playhead — move it earlier, or use a longer track.");
-      return;
-    }
-    setLibraryOpen(false);
-    setSelectedClip(clip.id);
-    commitMusic([...clips, clip]);
-  }, [commitMusic]);
-
-  /**
-   * Delete / Backspace with a clip selected: the clip goes, not the range
-   * selection. The rule for WHAT goes is `clipsAfterDelete` (lib/edit.ts),
-   * where it is tested — the one clip, missing or not, since E4c lets the
-   * server keep the other missing clips it already holds.
-   */
-  const removeClip = useCallback(() => {
-    const id = selectedClipRef.current;
-    if (id === null || editLockedRef.current || locksRef.current.music) return;
-    commitMusic(clipsAfterDelete(musicRef.current, id));
-  }, [commitMusic]);
-
-  /**
-   * The banner's button: every clip whose file has gone, in one PUT. A
-   * different gesture from Delete since E4c, with a rule of its own
-   * (`withoutMissing`, lib/edit.ts). The guard is what keeps it honest once
-   * the user has taken the banner's other way out and put the file back — the
-   * plan refetches (the library's own mutations invalidate it,
-   * `libraryChangeKeys`), nothing is missing any more, and this does nothing
-   * rather than removing live clips (trap 37).
-   */
-  const removeMissingClips = useCallback(() => {
-    if (editLockedRef.current || locksRef.current.music) return;
-    const clips = musicRef.current;
-    const kept = withoutMissing(clips);
-    if (kept === clips) return;
-    commitMusic(kept);
-  }, [commitMusic]);
-
-  /** The inspector's boxes: one field of one clip, with the fades kept legal whatever is typed. */
-  const changeClip = useCallback((id: string, patch: Partial<MusicClip>) => {
-    if (editLockedRef.current || locksRef.current.music) return;
-    const clips = musicRef.current;
-    const held = clips.find((clip) => clip.id === id);
-    if (!held) return;
-    const next = { ...held, ...patch };
-    const [fade_in, fade_out] = fitFades(clipLength(next), next.fade_in, next.fade_out);
-    commitMusic(clips.map((clip) => (clip.id === id ? { ...next, fade_in, fade_out } : clip)));
-  }, [commitMusic]);
-
   // The cut, the split, the nudge and the reset - and the blocks they act
   // on - are `useEditGestures` (R1a, timeline/useEditGestures.ts); `drawn`
   // is imported from it for the block move's release below.
@@ -1266,6 +1081,35 @@ export function NarrationTimeline({
     event.stopPropagation();
     event.preventDefault();
   }, [secondsAt, snapTargetsNow]);
+
+  // ── the Music lane is `useMusicLane` (R1c, timeline/useMusicLane.ts) ─────
+  //
+  // The library's open state, the clip nodes and the inspector's draft, the
+  // waveform inside each clip, `paintClip` and `clearClipDrag`, `commitMusic`,
+  // the studio's gain, `addMusic`, `removeClip`, `removeMissingClips`,
+  // `changeClip` and the clip's two pointer handlers. Called here, after
+  // `beginDrag` and `secondsAt`, which its pointer handlers take, and before
+  // the body handlers, whose clip branches call its painters and its commit.
+  // `clearMoved` follows it, because it composes the hook's `clearClipDrag`.
+  const {
+    libraryOpen, setLibraryOpen, libraryOpenRef, attachClip, clipDraft, setClipDraft, filePeaks, studioGainRef,
+    addMusic, removeClip, removeMissingClips, changeClip, commitMusic, paintClip, clearClipDrag, onClipPointerDown, onClipClick,
+  } = useMusicLane({
+    active, musicRef, musicSignature, musicFiles, locksRef, editLocked, editLockedRef, commitEdit, committedRef, setRefusal,
+    positionRef, durationRef, ppsRef, joinsRef, beginDrag, secondsAt, suppressClick, selectedClip, setSelectedClip, selectedClipRef,
+    setSelectedMarker, setSelectedBlocks, clipLabelRef,
+  });
+
+  /** Take the blocks a move painted through their transforms, and the clips and flags a drag painted, back to the plan's. */
+  const clearMoved = useCallback(() => {
+    blockNodes.current.forEach((node) => { node.style.transform = ""; });
+    dragGhosts.current.forEach((node) => { node.style.display = "none"; });
+    if (moveLabelRef.current) moveLabelRef.current.style.display = "none";
+    clearClipDrag();
+    clearTrim();
+    clearMarkerDrag();
+  }, [clearClipDrag, clearMarkerDrag, clearTrim]);
+  afterCommitRef.current = { clearMoved, dropPending: () => setPending(null) };
 
   /** Paint the marquee's band over the Narration lane between two moments, through its ref. */
   const paintMarquee = useCallback((a: number, b: number) => {
@@ -1732,56 +1576,6 @@ export function NarrationTimeline({
     onSelect(sentence.index);
     seek(landedAt ?? sentence.pinned_start);
   }, [onSelect, seek, sentences]);
-
-  /**
-   * Down on a clip: a MOVE from its body, a TRIM from either 8 px edge —
-   * which end the pointer has is `clipAt`'s answer, at the current zoom, so
-   * the zones never eat a short clip's body. The snap candidates are
-   * gathered once per drag (the playhead, the picture's joins, 0, the
-   * picture's end and the other clips' ends); Ctrl drags freely, as
-   * everywhere. The pointer is captured lazily by the body's move handler,
-   * never here — an eager capture retargets the click that selects the clip.
-   */
-  const onClipPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>, clip: MusicClip) => {
-    if (event.ctrlKey || event.metaKey || event.button !== 0) return;
-    event.stopPropagation();
-    if (editLocked || locksRef.current.music) return;  // the click still selects
-    // Grabbing a clip selects it, as Camtasia's does: the inspector under the
-    // strip is then already on the clip being dragged.
-    setSelectedClip(clip.id);
-    setSelectedMarker(null);
-    setSelectedBlocks(NO_BLOCKS);
-    const zone: ClipZone = clipAt([clip], secondsAt(event.clientX), CLIP_EDGE_PX / ppsRef.current)?.zone ?? "body";
-    const snapTo = clipSnapTargets({
-      playhead: positionRef.current,
-      duration: durationRef.current,
-      joins: joinsRef.current.map((join) => join.at),
-      clips: musicRef.current,
-      exclude: clip.id,
-    });
-    const grabbed = zone === "out" ? clipEnd(clip) : clip.at;
-    beginDrag(event, zone === "body" ? "clip" : "trim", clip.at, grabbed, { clip, zone, snapTo });
-  }, [beginDrag, editLocked, secondsAt]);
-
-  /**
-   * A click on a clip SELECTS it, and does nothing else: the playhead, the
-   * transport and any running playback are left exactly as they are.
-   *
-   * Deliberately unlike a sentence block, whose click also seeks (E3), and
-   * the two are meant to differ (the owner's ruling, 2026-09-21). `seek`
-   * halts playback and starts it again at the target, so seeking here would
-   * jump the playhead back to the clip's start every time the inspector was
-   * reached for — and adjusting a bed's level or its fades WHILE the audition
-   * plays is the whole point of having the inspector under the strip.
-   * Camtasia does not seek on a clip click either.
-   */
-  const onClipClick = useCallback((event: MouseEvent<HTMLButtonElement>, clip: MusicClip) => {
-    event.stopPropagation();
-    if (suppressClick.current || event.ctrlKey || event.metaKey) return;
-    setSelectedClip(clip.id);
-    setSelectedMarker(null);
-    setSelectedBlocks(NO_BLOCKS);
-  }, []);
 
   /**
    * Down on a marker's flag (E5b): a MOVE along the ruler, snapped to the
@@ -2778,74 +2572,17 @@ export function NarrationTimeline({
                   fades as triangles at its ends, and an 8 px trim zone at
                   each edge. A missing file is hatched: the audition skips it
                   and the render refuses on it. */}
-              <div className={`os-tl-music${locks.music ? " locked" : ""}`}>
-                {storedMusic.map((held) => {
-                  const length = clipLength(held);
-                  const width = Math.max(3, length * pps);
-                  const held_peaks = filePeaks[held.file];
-                  const pooledClip = held_peaks
-                    ? poolPeaks(clipPeaks(held_peaks.peaks, held_peaks.bucket_seconds, held), Math.round(width))
-                    : [];
-                  const classes = ["os-tl-clip",
-                    held.id === selectedClip ? "selected" : "",
-                    held.missing ? "missing" : ""].filter(Boolean).join(" ");
-                  return (
-                    <button
-                      type="button"
-                      key={held.id}
-                      ref={attachClip(held.id)}
-                      className={classes}
-                      aria-pressed={held.id === selectedClip}
-                      aria-label={`Music clip ${held.file} at ${timecode(held.at)}`}
-                      title={`${held.file}\n${timecode(held.at)} – ${timecode(clipEnd(held))}`
-                        + ` (${timecode(held.in)} – ${timecode(held.out)} of the file)`
-                        + `\nLevel ${Math.round(clipGain(held.gain) * 100)}%`
-                        + `, fades ${held.fade_in.toFixed(1)} s in / ${held.fade_out.toFixed(1)} s out`
-                        + (held.missing
-                          ? "\n\nMISSING: this file is no longer in the library, so it is silent here and the"
-                            + " render will refuse. Drag to move it, set its level and fades, or Delete to remove"
-                            + " it — it cannot be trimmed while the file is gone. Or upload the file again under"
-                            + " the same name."
-                          : "\n\nDrag to move it (Alt or Ctrl: no snapping); drag an end to trim it; Delete removes it.")}
-                      style={{ left: held.at * pps, width }}
-                      onPointerDown={(event) => onClipPointerDown(event, held)}
-                      onClick={(event) => onClipClick(event, held)}
-                    >
-                      {pooledClip.length > 0 && (
-                        <svg
-                          className="os-tl-clip-wave"
-                          viewBox={`0 0 ${Math.max(1, pooledClip.length)} 100`}
-                          preserveAspectRatio="none"
-                          aria-hidden="true"
-                        >
-                          <path d={waveformPath(pooledClip, 100)} />
-                        </svg>
-                      )}
-                      {held.fade_in > 0 && (
-                        <span className="os-tl-clip-fade in" style={{ width: Math.min(width, held.fade_in * pps) }} aria-hidden="true" />
-                      )}
-                      {held.fade_out > 0 && (
-                        <span className="os-tl-clip-fade out" style={{ width: Math.min(width, held.fade_out * pps) }} aria-hidden="true" />
-                      )}
-                      <span className="os-tl-clip-name">{held.missing ? `${held.file} — missing` : held.file}</span>
-                      {/* The trim zones: the cursor only - the pointer-down
-                          bubbles to the clip, which asks `clipAt` which end
-                          it has. A missing clip has a body and no edges
-                          (E4c: its slice cannot change), so it gets no
-                          zones and no ew-resize cursor - `clipAt` answers
-                          "body" for it wherever it is pressed. */}
-                      {!held.missing && (
-                        <>
-                          <span className="os-tl-clip-edge in" aria-hidden="true" />
-                          <span className="os-tl-clip-edge out" aria-hidden="true" />
-                        </>
-                      )}
-                    </button>
-                  );
-                })}
-                {/* The dragged clip's new time, painted through its ref. */}
-                <div className="os-tl-clip-label" ref={clipLabelRef} style={{ display: "none" }} aria-hidden="true" />
-              </div>
+              <MusicLane
+                storedMusic={storedMusic}
+                locks={locks}
+                pps={pps}
+                selectedClip={selectedClip}
+                filePeaks={filePeaks}
+                attachClip={attachClip}
+                clipLabelRef={clipLabelRef}
+                onClipPointerDown={onClipPointerDown}
+                onClipClick={onClipClick}
+              />
 
               {/* Siblings of the lanes so they span all of them: the selection
                   band (painted through its ref while a handle is dragged), a
@@ -2896,87 +2633,16 @@ export function NarrationTimeline({
           two fades. Each box commits on change (a slider release, a blur or
           Enter) as the List view's do - one PUT of the whole `music` list. */}
       {inspected && (
-        <div className="os-tl-inspector">
-          <span className="os-tl-clip-file" title={inspected.file}>{inspected.file}</span>
-          <span
-            className="os-tl-status"
-            title={inspected.missing
-              ? "This file is no longer in the library, so the clip cannot be trimmed: its slice is of a length "
-                + "nobody knows now. Move it, set its level and fades, remove it, or put the file back under the same name."
-              : undefined}
-          >
-            at {timecode(inspected.at)} · {timecode(inspected.in)}–{timecode(inspected.out)} of the file
-            {" "}· {clipLength(inspected).toFixed(2)} s
-            {inspected.missing && " · the file is missing, so it cannot be trimmed"}
-          </span>
-          <label className="os-tl-inspector-field">
-            Level
-            <input
-              type="range"
-              className="os-tl-range os-tl-level"
-              min={0}
-              max={100}
-              step={1}
-              list="os-tl-gain-default"
-              disabled={editLocked || locks.music}
-              value={Math.round((clipDraft.gain ?? clipGain(inspected.gain)) * 100)}
-              aria-label="Music level"
-              title={`A linear level, as the render applies it. The studio's default is `
-                + `${Math.round((studioGainRef.current ?? DEFAULT_MUSIC_GAIN) * 100)}%.`}
-              onChange={(e) => setClipDraft((held) => ({ ...held, gain: Number(e.target.value) / 100 }))}
-              onPointerUp={() => { if (clipDraft.gain !== undefined) changeClip(inspected.id, { gain: clipDraft.gain }); }}
-              onKeyUp={(e) => {
-                if (e.key !== "Enter" && !e.key.startsWith("Arrow") && e.key !== "Home" && e.key !== "End") return;
-                if (clipDraft.gain !== undefined) changeClip(inspected.id, { gain: clipDraft.gain });
-              }}
-              onBlur={() => { if (clipDraft.gain !== undefined) changeClip(inspected.id, { gain: clipDraft.gain }); }}
-            />
-            <datalist id="os-tl-gain-default">
-              <option value={Math.round((studioGainRef.current ?? DEFAULT_MUSIC_GAIN) * 100)} />
-            </datalist>
-            <span className="os-tl-inspector-value">{Math.round((clipDraft.gain ?? clipGain(inspected.gain)) * 100)}%</span>
-          </label>
-          <label className="os-tl-inspector-field">
-            Fade in
-            <Input
-              type="number"
-              min={0}
-              step={0.5}
-              style={{ width: 82 }}
-              disabled={editLocked || locks.music}
-              value={clipDraft.fadeIn ?? String(inspected.fade_in)}
-              onChange={(e) => setClipDraft((held) => ({ ...held, fadeIn: e.target.value }))}
-              onBlur={(e) => { const s = Number(e.target.value); if (Number.isFinite(s)) changeClip(inspected.id, { fade_in: Math.max(0, s) }); }}
-              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-            />
-            s
-          </label>
-          <label className="os-tl-inspector-field">
-            Fade out
-            <Input
-              type="number"
-              min={0}
-              step={0.5}
-              style={{ width: 82 }}
-              disabled={editLocked || locks.music}
-              value={clipDraft.fadeOut ?? String(inspected.fade_out)}
-              onChange={(e) => setClipDraft((held) => ({ ...held, fadeOut: e.target.value }))}
-              onBlur={(e) => { const s = Number(e.target.value); if (Number.isFinite(s)) changeClip(inspected.id, { fade_out: Math.max(0, s) }); }}
-              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-            />
-            s
-          </label>
-          <span className="os-tl-spacer" />
-          <button
-            type="button"
-            className="os-tl-btn text"
-            disabled={editLocked || locks.music}
-            title="Remove this clip from the Music lane (Delete)"
-            onClick={removeClip}
-          >
-            <Trash2 size={13} /> Remove clip
-          </button>
-        </div>
+        <ClipInspector
+          inspected={inspected}
+          editLocked={editLocked}
+          locks={locks}
+          clipDraft={clipDraft}
+          setClipDraft={setClipDraft}
+          studioGainRef={studioGainRef}
+          changeClip={changeClip}
+          removeClip={removeClip}
+        />
       )}
 
       <MusicLibrary

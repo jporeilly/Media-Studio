@@ -89,3 +89,11 @@ export const START_LEAD = 0.08;
 /** The lead given to a clip whose buffer arrives mid-play, so its `start` is not already in the past. */
 export const LATE_LEAD = 0.02;
 export const EMPTY_SCHEDULE: Schedule = { clips: [], overrunning: [], pushed: [], squeezed: [], end: 0 };
+
+// The block selection's empty set, moved here with `useMusicLane` (R1c): the
+// clip's two pointer handlers clear the blocks with it, as the root's marker
+// handlers and its key map still do, so the one constant is shared by import
+// and `setSelectedBlocks(NO_BLOCKS)` stays the same reference on both sides.
+export const NO_BLOCKS: ReadonlySet<number> = new Set();
+/** The inspector's half-typed values (R1c, `useMusicLane` holds them; `ClipInspector` edits them). */
+export type ClipDraft = { gain?: number; fadeIn?: string; fadeOut?: string };

@@ -692,7 +692,11 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
   // code: components/project/timeline/useEditCommits.test.ts and
   // useEditGestures.test.ts. Since R1b the audition's are too - the fade
   // envelope, `paint`'s ⌖, the wait for the first sentence - on
-  // useAudition.test.ts. What is still the root's is pinned here.
+  // useAudition.test.ts. Since R1c the Music lane's - a clip click selecting
+  // without a seek, ONE clip removed through `clipsAfterDelete` and EVERY
+  // missing one through `withoutMissing`, `commitMusic` carrying the markers
+  // unchanged - on useMusicLane.test.ts. What is still the root's is pinned
+  // here.
   it("keeps the trim's own clip-cap check and the scissors' rule on the root, where they still live", () => {
     // The third of the three checks the ripple can cross - the trim release's
     // - is the root's; the cut's and the split's are tested as behaviour.
@@ -713,40 +717,33 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(timeline).toMatch(/cancelled \|\| editLockedRef\.current \|\| !base \|\| !next/);
   });
 
-  it("selects a music clip WITHOUT seeking, while a sentence block still seeks", () => {
+  it("still seeks on a sentence block's click - the contrast a clip's click is tested against on the lane", () => {
     // The owner's ruling, 2026-09-21: `seek` halts and restarts playback, so a
     // clip click that seeked jumped the playhead back to the clip's start
     // every time the inspector was reached for. The two gestures are meant to
-    // differ - a block click still seeks, deliberately (E3).
-    expect(handler("onClipClick")).not.toMatch(/seek\(/);
-    expect(handler("onClipClick")).toMatch(/setSelectedClip\(clip\.id\)/);
+    // differ - a block click still seeks, deliberately (E3); the clip's click
+    // is a behaviour test on the lane since R1c (useMusicLane.test.ts, "a
+    // click on a clip's button SELECTS it…"), with no `seek` in the lane's
+    // whole source.
     expect(handler("onBlockClick")).toMatch(/seek\(landedAt \?\? sentence\.pinned_start\)/);
   });
 
-  it("removes ONE clip from the key and EVERY missing clip from the banner's button, each through its own rule", () => {
-    // What goes is tested as behaviour below: `clipsAfterDelete` for the
-    // key and the inspector's button, `withoutMissing` for the banner's.
-    // Two gestures since E4c, so two rules - and the banner's guard is what
-    // keeps it honest after the file has come back and the plan has
-    // refetched: a list with nothing missing comes back as the same array,
-    // and nothing is committed.
-    expect(handler("removeClip")).toMatch(/commitMusic\(clipsAfterDelete\(musicRef\.current, id\)\)/);
-    expect(handler("removeMissingClips")).toMatch(/const kept = withoutMissing\(clips\);/);
-    expect(handler("removeMissingClips")).toMatch(/if \(kept === clips\) return;/);
-    expect(handler("removeMissingClips")).toMatch(/commitMusic\(kept\)/);
-    expect(handler("removeMissingClips")).not.toMatch(/clipsAfterDelete/);
-  });
+  // ONE clip removed from the key through `clipsAfterDelete` and EVERY missing
+  // clip from the banner's button through `withoutMissing` - two gestures since
+  // E4c, two rules - are behaviour tests since R1c: useMusicLane.test.ts,
+  // "removes the selected clip alone through clipsAfterDelete…" and "removes
+  // EVERY missing clip from the banner's button through withoutMissing…".
 
   // The cut's and the split's refusal across a MISSING clip before any PUT
   // (the Reviewer's M1) is a behaviour test since R1a: useEditGestures.test.ts,
   // "refuses a cut across a MISSING clip…" and "refuses a split through a
   // MISSING clip…". The trim's is still pinned on the release, below.
 
-  it("draws no trim zones on a missing clip, and the refusal copy carries no frozen-lane paragraph", () => {
-    // The edge overlays are what carry the ew-resize cursor; a missing clip
-    // has a body and no edges (E4c), so they are not rendered for it - the
-    // render harness proves the markup, this pins the condition.
-    expect(timeline).toMatch(/\{!held\.missing && \(\s*<>\s*<span className="os-tl-clip-edge in"/);
+  it("carries no frozen-lane paragraph anywhere in the root's own text (E4c: the lane stays editable)", () => {
+    // The edge overlays a missing clip does NOT get (E4c: a body and no edges)
+    // are the render harness's since R1c ("draws trim zones on a live clip
+    // and none on a missing one"), now that the markup is MusicLane.tsx's;
+    // the same negative stands over the lane's three files in its own test.
     // `editRefusal` takes the detail and the kind, nothing about the lane:
     // since R1a a behaviour test on the stack (useEditCommits.test.ts, "says
     // what was not saved…") beside `editRefusal`'s own table below.
@@ -1434,13 +1431,14 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
     expect(timeline).toMatch(/if \(key === "Escape"\) \{\s*if \(selectedMarkerRef\.current !== null\) \{ setSelectedMarker\(null\); return true; \}\s*if \(selectedClipRef\.current !== null\)/);
   });
 
-  it("carries the markers UNCHANGED through a clip commit, and every marker gesture goes through commitMarkers (trap 39)", () => {
+  it("sends every marker gesture through commitMarkers, the tracks and the clips riding along unchanged (trap 39)", () => {
     // The stack's side - `editBody` against what the server holds, `commitEdit`
     // sending nothing while the markers are the same - and the cut's and the
     // split's `markers: before.markers` are behaviour tests since R1a
-    // (useEditCommits.test.ts, useEditGestures.test.ts); the trim's stays
-    // pinned on the release above.
-    expect(handler("commitMusic")).toMatch(/music: clips, markers: before\.markers/);
+    // (useEditCommits.test.ts, useEditGestures.test.ts); `commitMusic`'s
+    // `markers: before.markers` since R1c (useMusicLane.test.ts, "hands
+    // commitEdit the whole edit… the markers the SAME list"); the trim's
+    // stays pinned on the release above.
     expect(handler("commitMarkers")).toMatch(/commitEdit\(\{ video: before\.video, narration: before\.narration, music: before\.music, markers: list \}\)/);
     expect(handler("commitMarkers")).toMatch(/if \(editLockedRef\.current\) return;/);
     // Every marker gesture goes through `commitMarkers`, never a PUT of its own.
@@ -1483,10 +1481,10 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
     expect(timeline).toMatch(/else if \(event\.key === "Escape"\) \{ event\.preventDefault\(\); finishNameBox\(false\); \}/);
     expect(timeline).toMatch(/onBlur=\{\(\) => finishNameBox\(true\)\}/);
     expect(timeline).toMatch(/maxLength=\{MAX_MARKER_NAME\}/);
-    // A flag's press never reaches the ruler's scrub; selecting a marker gives up the clip, and a clip the marker.
+    // A flag's press never reaches the ruler's scrub; selecting a marker gives up the clip (and a clip the
+    // marker - the lane's half, a behaviour test on useMusicLane.test.ts since R1c).
     expect(handler("onMarkerPointerDown")).toMatch(/event\.stopPropagation\(\);/);
     expect(handler("onMarkerClick")).toMatch(/setSelectedMarker\(marker\.id\);\s*setSelectedClip\(null\);/);
-    expect(handler("onClipClick")).toMatch(/setSelectedClip\(clip\.id\);\s*setSelectedMarker\(null\);/);
     expect(handler("onMarkerDoubleClick")).toMatch(/setNameBox\(\{ id: marker\.id, draft: marker\.name \}\)/);
   });
 
