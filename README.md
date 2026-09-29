@@ -8,42 +8,38 @@ Kokoro narration, faster-whisper transcription, moviepy/ffmpeg assembly, Ollama-
 notes/QA/translation — behind a modern SPA that shares the **OpenSight** design system so
 the whole app suite looks and feels the same.
 
-> **Status: in progress — the studio is ported.** Projects (import decks, PDFs and videos),
-> a slide editor (thumbnails, speaker notes with undo, per-slide voice and pause, export of
-> the edited notes back to PPTX) with an AI assistant on it (generate and enhance notes, QA
-> review with per-issue fixes, tone, translation, pacing, analysis and a Q&A document, via a
-> local Ollama), narrated-video generation with transitions, intro/outro cards, watermark,
-> subtitles, extra formats and Vimeo output presets, video transcription with an editable
-> transcript whose sentences can each be nudged, muted, given their own voice and speed and
-> played back one at a time, and a timeline view of those sentences over a filmstrip and the
-> original audio's waveform that plays the whole new narration against the picture without
-> running a re-voice (phases 1 to 3b of the narration timeline — the drag lives on the edit
-> timeline's Narration lane), that transcript downloadable as SRT, TXT or JSON — timed as the
-> re-voice will speak it or as it was spoken in the source —, an **edit
-> timeline** in Camtasia's shape on a video project — the ranges of its source that are kept,
-> one list **per track** (video, narration) that a split, a trim and a ripple delete all
-> change, made on the strip itself (select a range with the playhead's green and red handles
-> or Ctrl+drag, **Cut**, undo; click a track's name to edit just that channel while the other
-> stays locked; `S` splits at the playhead into pieces that can be clicked and cut; drag a
-> sentence block along the Narration lane, with snapping, to re-time it) and rendered by
-> **Render**, the re-voice with the picture cut first (E1 the model and the render and E2 the
-> gesture in 0.7.0; E3 the tracks in 0.8.0, released 2026-09-18 together with the transcript
-> download; **E4 the music lane in 0.9.0, released 2026-09-22** — a studio-wide music
-> library, clips placed on a fourth lane and moved, trimmed, levelled and faded there,
-> auditioned in the browser against the voice and mixed under it by one more render pass;
-> trim handles on a piece's edges, snapping of cuts to the sentence pins, markers that
-> become the render's chapters and the J/K/L shuttle in **0.10.0, released 2026-09-25**), re-voicing in
-> a new voice or a translated language that keeps step with
-> the picture, Edge TTS or local Kokoro narration with studio-wide defaults, accounts with a
-> configurable password policy, projects that belong to whoever imported them with an audit
-> log of every change for admins, self-update from Git, a Windows desktop installer, and a
-> **Docs** page in the app that serves this README, the install guide, the changelog, the
-> version note and a full guide to the Timeline (0.9.1, released 2026-09-23, which also
-> ships the ffprobe the re-voice needs on any machine but the developer's) are
-> in (see [CHANGELOG.md](CHANGELOG.md)). Still to come: the transition-sound library, and
-> the rest of the administration work (notifications, a branding lock, an admin page of its
-> own, per-kind job limits). Until parity, the NiceGUI app remains the shipping product; its source lives at
-> `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).
+## What it does
+
+- **A deck or a PDF becomes a narrated video.** Import a PowerPoint deck or a PDF, write
+  or edit the speaker notes slide by slide, and render an MP4 narrated in the voice you
+  choose, with transitions, intro and outro cards, a watermark, subtitles, WebM, GIF and
+  MP3 copies, and presets for YouTube, LinkedIn and Teams, Zoom and Vimeo. A deck's edited
+  notes can be exported back into the deck.
+- **A video gets a new voice.** Import a video and transcribe it. Fix the words;
+  nudge, mute or give any sentence its own voice and speed; then re-voice the video with a
+  new narration that keeps step with the picture, in the original language or translated
+  into another. The transcript downloads as SRT, TXT or JSON.
+- **An edit timeline.** Cut the picture and the narration together or on their own lanes,
+  split, trim and re-time sentences, lay music from a library the whole studio shares
+  under the voice, and drop markers that become chapters in the MP4, all heard against
+  the picture before anything is rendered.
+- **An AI assistant on the slides.** A local Ollama model writes and rewrites speaker
+  notes, reviews them for grammar, tone, flow and transitions and fixes what it finds,
+  adapts them to an audience, translates them, paces them, scores the deck for video and
+  drafts a Q&A document.
+- **Narration online or on the machine.** Microsoft's Edge TTS voices over the internet,
+  or Kokoro's voices running locally.
+- **For a team.** Accounts with two roles, a password policy, projects that belong to
+  whoever imported them, an audit log of every change, and updates pulled from Git from
+  inside the app.
+
+The app's **Docs** page has a guide for each of these. What changed in each release, and
+when, is in [CHANGELOG.md](CHANGELOG.md).
+
+**Still to come:** the transition-sound library, and the rest of the administration
+work: notifications, a branding lock, an administration page of its own, and per-kind job
+limits. Until parity, the NiceGUI app remains the shipping product; its source lives at
+`jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).
 
 ## Stack
 
@@ -65,8 +61,8 @@ npm run dev
 ```
 
 Open http://localhost:5681. Default login is `admin` / `admin`; a fresh database asks you to set a
-new password at first login before anything else works. Admins create further accounts under
-Settings › Accounts and set the password rules under Settings › Password policy.
+new password at first login before anything else works. Admins create further accounts on the
+**Accounts** card of the Settings page and set the password rules on its **Password policy** card.
 
 ## Build (production)
 
@@ -88,20 +84,26 @@ source.
 a small Tauri/WebView2 shell with a vendored Python runtime and a matched ffmpeg and ffprobe
 (`app\bin\`), so a machine needs nothing pre-installed. It installs per-user into
 `C:\Media-Studio-Enterprise\` (no admin rights), and the app inside is a git checkout, so
-**Settings › Updates** can pull new commits — backend and UI — and restart in place on a
-machine that has `git` and access to the repo. An update never touches `app\bin\`, so a
-release that changes the binaries has to be installed with its installer: 0.9.1, the first
-to ship ffprobe, is one. Data and rendered videos live inside that folder (`app\data\`,
-`app\assets\finished\`) and survive an uninstall. [INSTALL.md](INSTALL.md) covers install,
-first launch, updating and uninstall; [desktop/README.md](desktop/README.md) covers the build.
+the **Updates** card on the Settings page can pull new commits — backend and UI — and restart
+in place on a machine that has `git` and access to the repo. An update never touches
+`app\bin\`, so a release that changes the binaries has to be installed with its installer:
+0.9.1, the first to ship ffprobe, is one. Data lives inside that folder and survives an
+uninstall: accounts, settings and every project with its rendered videos in `app\data\`, the
+music library in `app\assets\music\`. [INSTALL.md](INSTALL.md) covers install, first launch,
+updating and uninstall; `desktop/README.md` (in the repository) covers the build.
 
 ## Documentation
 
 The app's **Docs** page (in the sidebar) serves this README, INSTALL.md, the changelog,
-VERSION.md and the guides under `docs/guides/`. The design journal in `docs/porting/` is
-deliberately not served.
+VERSION.md and the guides in four sections: `docs/guides/` (Using Media Studio),
+`docs/admin/` (Administration), `docs/ai/` (Narration, transcription and AI) and
+`docs/reference/` (Reference). The design journal in `docs/porting/` is deliberately not
+served.
 
+- [Getting started](docs/guides/getting-started.md) — the first launch, the three kinds of project, and where to go next
 - [The Timeline](docs/guides/timeline.md) — the full help for editing a video project: the lanes, cutting, locks, splitting, re-timing, the Music lane and every key
+- [Data and backup](docs/admin/data-and-backup.md) — where everything lives, and how to back it up
+- [Troubleshooting](docs/admin/troubleshooting.md) — symptoms, causes and fixes
 - [INSTALL.md](INSTALL.md) — install, update and uninstall the Windows desktop edition
 - [VERSION.md](VERSION.md) — version carriers and bump policy
 - [CHANGELOG.md](CHANGELOG.md) — changes

@@ -1,32 +1,20 @@
 # Version
 
 **Current version:** 0.10.0
-**Status:** 0.x, in progress — the studio is ported (Projects, the slide editor and its AI
-assistant, generation options, transcription, re-voice, per-sentence narration adjustments
-on a transcript — phases 1 to 3b of the narration timeline, so an offset, a mute, a voice, a
-speed, a per-sentence preview, a timeline view with a filmstrip, a waveform and live
-audition of the whole narration against the picture, the drag of a sentence along its
-lane, and the transcript downloadable as SRT, TXT or JSON in either timing view —, an edit
-timeline in
-Camtasia's shape on a video project — the kept ranges of its source, one list per track,
-selected on the strip with the playhead's green and red handles, Cut, undone, and rendered by
-Render as the re-voice with the picture cut first; E1 the model and the render and E2 the
-gesture in 0.7.0 (released 2026-09-17); E3 the tracks — lock a track and cut the others,
-split at the playhead into pieces, drag the narration — and the transcript download in 0.8.0
-(released 2026-09-18); E4 the music lane — a studio-wide music library, clips placed on a
-fourth lane and moved, trimmed, levelled and faded there, auditioned in the browser and
-mixed under the voice by one more render pass — in 0.9.0 (released 2026-09-22) —, studio settings,
-accounts, project ownership and the audit log, self-update, the Windows desktop installer —
-which now ships a matched ffprobe beside its ffmpeg, so neither the re-voice nor a narrated
-render depends any longer on the machine having a prober of its own (an install updated in
-place from an older installer still does, and says so at every start) —, and the Docs page,
-which serves the user-facing documents and a full guide to the Timeline inside the app —
-the prober and the Docs page in 0.9.1 (released 2026-09-23) —; E4c, E5a, E5b and E5c — the
-missing-clip rule, trim handles and snapping, markers that become chapters, and the J/K/L
-shuttle — in 0.10.0 (released 2026-09-25) —;
-see CHANGELOG.md). Still to come: the rest of the administration work — notifications,
-a branding lock, an admin page of its own, per-kind job limits. The NiceGUI Slide Studio
-Enterprise remains the shipping product until parity.
+
+Media Studio Enterprise is at 0.x: the studio is ported, and its version string is
+kept by hand in the eleven files listed below. What each release changed, and when, is in
+[CHANGELOG.md](CHANGELOG.md).
+
+## What it does
+
+Import a slide deck or a PDF and render it into a narrated video; import a video to
+transcribe it, give it a new or a translated narration, and edit it on a timeline with music
+and chapters; let a local AI model write and review the speaker notes; and run it for a
+team, with accounts and roles, an audit log and updates from inside the app. The
+[README](README.md) says a little more about each, the app's Docs page has a guide for each,
+and the README's **Still to come** is the one list of what is not in yet. The NiceGUI Slide
+Studio Enterprise remains the shipping product until parity.
 
 ## Where the version string lives
 
@@ -50,12 +38,12 @@ Cargo.toml still carries an older number alongside the current one.
 
 ### The desktop exe's version is compile-time
 
-The installed desktop app updates itself with `git pull` (Settings › Updates). A pull
-brings the new `__init__.py`, so the version the API and the UI report changes — but the
-shell's file version (`Cargo.toml` / `tauri.conf.json`, compiled into
+The installed desktop app updates itself with `git pull` (the Updates card on the Settings
+page). A pull brings the new `__init__.py`, so the version the API and the UI report changes —
+but the shell's file version (`Cargo.toml` / `tauri.conf.json`, compiled into
 `media-studio-desktop.exe` and recorded by the installer in Add/Remove Programs) does
 not. So a version bump implies a new installer; between installers, an updated install
-legitimately shows the new version in Settings and the installer's in Add/Remove
+legitimately shows the new version in the app's sidebar and the installer's in Add/Remove
 Programs.
 
 ## Bump policy
