@@ -13,13 +13,15 @@ OpenSight serves its whole ``docs/`` tree; this repo's ``docs/porting/`` is
 the owner's rulings and the paths of files on a developer's machine. It is not
 documentation, it is not written for a reader outside this workflow, and it
 would swamp the guides in the sidebar. So the served set is enumerated from
-disk — the four root documents and ``docs/guides/`` — and a request is answered
-by LOOKING ITS SLUG UP IN THAT SET (:func:`_resolve`), never by joining the
-slug onto a directory. A spelling that is not a served document is refused
-whatever it is: there is no path for a crafted slug to walk down, because no
-path is ever built from one. The shape check (:func:`_slug_problem`) sits in
-front of it as the second lock, the way ``services/music.py`` checks a name
-before ``MUSIC_DIR`` is ever joined to it.
+disk — the four root documents and the folders named in
+:data:`SERVED_FOLDERS` (``docs/guides/``, ``docs/admin/``, ``docs/ai/`` and
+``docs/reference/``, each a section of the Docs page) — and a request is
+answered by LOOKING ITS SLUG UP IN THAT SET (:func:`_resolve`), never by
+joining the slug onto a directory. A spelling that is not a served document is
+refused whatever it is: there is no path for a crafted slug to walk down,
+because no path is ever built from one. The shape check
+(:func:`_slug_problem`) sits in front of it as the second lock, the way
+``services/music.py`` checks a name before ``MUSIC_DIR`` is ever joined to it.
 
 Three routes, as OpenSight has:
 
@@ -51,19 +53,51 @@ from utils.config import APP_DIR
 router = APIRouter(prefix="/docs", tags=["docs"])
 
 DOCS_DIR = APP_DIR / "docs"
-#: The one folder under ``docs/`` that is served. ``docs/porting/`` is NOT (see
-#: the module docstring); a new folder of guides is added here on purpose, never
-#: by being dropped on disk.
-GUIDES_DIR = DOCS_DIR / "guides"
+#: The folders under ``docs/`` that are served, in the order their sections
+#: are listed. ``docs/porting/`` is NOT one of them (see the module docstring);
+#: a new folder of guides is added here on purpose, never by being dropped on
+#: disk. Each is confirmed to be that folder of ``docs/`` and not a link to
+#: another (:func:`_is_own_folder`), then walked on its own, every file
+#: confirmed to REALLY sit inside it (:func:`_under`).
+SERVED_FOLDERS = ("guides", "admin", "ai", "reference")
 
 #: The documents at the root of the checkout, in the order they are listed.
 ROOT_DOCS = ["README.md", "INSTALL.md", "CHANGELOG.md", "VERSION.md"]
 #: The ones that introduce the app, as against the ones that record it.
 START_HERE = ("README.md", "INSTALL.md")
 
-#: Folder under ``docs/`` -> the section it is listed under.
-SECTIONS = {"guides": "Using Media Studio"}
-SECTION_ORDER = ["Start here", "Using Media Studio", "Project"]
+#: Folder under ``docs/`` -> the section it is listed under. One entry per
+#: served folder; a folder that is served but not named here would fall back
+#: to its own name, title-cased, which is the same rule OpenSight applies.
+SECTIONS = {
+    "guides": "Using Media Studio",
+    "admin": "Administration",
+    "ai": "Narration, transcription and AI",
+    "reference": "Reference",
+}
+#: The sections in the order the Docs page lists them: the two root documents
+#: that introduce the app first, the four folders, and the two root documents
+#: that record it last.
+SECTION_ORDER = [
+    "Start here", "Using Media Studio", "Administration", "Narration, transcription and AI", "Reference", "Project",
+]
+#: The reading order inside each served folder, by file name relative to the
+#: folder: the order the Docs page lists the guides in, and so the order its
+#: Previous / Next pager walks. A file that is not named here is still served,
+#: after the named ones, sorted by path - so a new guide is never hidden, and
+#: ``tests/test_docs.py`` fails until it is given its place.
+READING_ORDER: dict[str, tuple[str, ...]] = {
+    "guides": (
+        "getting-started.md", "projects.md", "slide-editor.md", "ai-assistant.md", "generate-video.md",
+        "transcript.md", "re-voice.md", "timeline.md", "music.md", "markers-and-chapters.md", "jobs.md",
+    ),
+    "admin": (
+        "accounts-and-roles.md", "password-policy.md", "studio-settings.md", "updates.md", "audit-log.md",
+        "data-and-backup.md", "troubleshooting.md",
+    ),
+    "ai": ("narration-engines.md", "transcription.md", "ollama.md"),
+    "reference": ("keyboard-shortcuts.md", "output-presets.md", "limits.md"),
+}
 
 #: A slug's shape: no backslash, no control character, and short enough to be a
 #: path on any file system. The ``..``/``.`` segment rule is in
@@ -129,25 +163,55 @@ def _under(path: Path, directory: Path) -> bool:
     return here.startswith(root + os.sep)
 
 
+def _is_own_folder(directory: Path, folder: str) -> bool:
+    """Whether the served folder ``docs/<folder>`` REALLY is that folder of
+    ``docs/`` — not itself a link to somewhere else.
+
+    :func:`_under` compares each file with the folder it was found under,
+    resolving BOTH, so it cannot see through the folder itself: with
+    ``docs/admin`` a junction to ``docs/porting`` every journal file really
+    does sit inside the resolved ``docs/admin``, and was listed, served and
+    searchable (the D1 review's m13, proved on a temporary tree). So the
+    folder is compared with where it has to be: ``realpath(DOCS_DIR)/folder``,
+    both sides case-folded the way Windows compares paths.
+    """
+    real = os.path.normcase(os.path.realpath(str(directory)))
+    expected = os.path.normcase(os.path.join(os.path.realpath(str(DOCS_DIR)), folder))
+    return real == expected
+
+
+def _reading_key(folder: str, name: str) -> tuple[int, int, str]:
+    """Where a file sits in its folder's list: the named files in
+    :data:`READING_ORDER`'s order, then every other file by its path."""
+    order = READING_ORDER.get(folder, ())
+    return (0, order.index(name), name) if name in order else (1, 0, name)
+
+
 def _served_paths() -> dict[str, Path]:
     """Every document this route serves: ``{relative posix path: file}``, in
     listing order — the root documents as :data:`ROOT_DOCS` spells them, then
-    ``docs/guides/`` sorted.
+    each folder of :data:`SERVED_FOLDERS` in turn, in :data:`READING_ORDER`.
 
     This is the whitelist. It is built by LOOKING AT DISK, never from anything
-    a caller sent, and every guide is confirmed to REALLY sit inside
-    :data:`GUIDES_DIR` (:func:`_under`, which resolves links), so a junction or
-    a symlink planted under it cannot smuggle the journal in either.
+    a caller sent. A served folder that is itself a link elsewhere is skipped
+    whole (:func:`_is_own_folder`), and every guide is confirmed to REALLY sit
+    inside the folder it was found under (:func:`_under`, which resolves
+    links), so a junction or a symlink cannot smuggle the journal in, whether
+    it is planted inside a folder or replaces one. A folder that is not on
+    disk is simply an empty section.
     """
     found: dict[str, Path] = {}
     for name in ROOT_DOCS:
         path = APP_DIR / name
         if path.is_file():
             found[name] = path
-    if GUIDES_DIR.is_dir():
-        for path in sorted(GUIDES_DIR.rglob("*.md")):
-            if path.is_file() and _under(path, GUIDES_DIR):
-                found[path.relative_to(APP_DIR).as_posix()] = path
+    for folder in SERVED_FOLDERS:
+        directory = DOCS_DIR / folder
+        if not directory.is_dir() or not _is_own_folder(directory, folder):
+            continue
+        files = [path for path in directory.rglob("*.md") if path.is_file() and _under(path, directory)]
+        for path in sorted(files, key=lambda p: _reading_key(folder, p.relative_to(directory).as_posix())):
+            found[path.relative_to(APP_DIR).as_posix()] = path
     return found
 
 
@@ -158,7 +222,8 @@ def _resolve(slug: str) -> tuple[str, Path] | None:
     for by key, so there is no way to spell one that reaches a file the
     whitelist does not hold. ``guides/timeline`` is accepted for
     ``docs/guides/timeline`` — the short form a help link uses — exactly as
-    OpenSight accepts it.
+    OpenSight accepts it, and the same short form works for every served
+    folder (``admin/updates``, ``ai/ollama``, ``reference/limits``).
     """
     if _slug_problem(slug):
         return None
@@ -228,7 +293,9 @@ def _section(rel: str) -> str:
     if len(parts) >= 3 and parts[0] == "docs":
         folder = parts[1]
         return SECTIONS.get(folder, folder.replace("-", " ").title())
-    return "Reference"
+    # Unreachable for a served path (every one is a root document or under
+    # docs/<folder>/); named so that it can never land in a real section.
+    return "Other"
 
 
 def _headings(text: str) -> list[dict]:
@@ -314,8 +381,8 @@ def get_doc(slug: str, user: dict = Depends(current_user)):
     """One document: its markdown and the headings the contents rail is built
     from. 400 for a slug that is not a name (a ``..`` segment, a backslash, a
     control character, an absolute path), 404 for one that names nothing this
-    route serves — which is every document outside ``docs/guides/`` and the
-    four root files, ``docs/porting/`` first among them."""
+    route serves — which is every document outside :data:`SERVED_FOLDERS` and
+    the four root files, ``docs/porting/`` first among them."""
     problem = _slug_problem(slug)
     if problem:
         raise HTTPException(status_code=400, detail=problem)
