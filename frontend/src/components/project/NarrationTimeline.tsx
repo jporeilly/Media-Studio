@@ -57,10 +57,6 @@ import {
   drawnMarkers,
   LANES,
   MAX_CLIPS,
-  MAX_MARKERS,
-  MAX_MARKER_NAME,
-  markerNeighbours,
-  markersAfterDelete,
   snapClip,
   describeJoin,
   dragOffsets,
@@ -72,22 +68,18 @@ import {
   moveClip,
   moveMarker,
   musicAfterTrim,
-  newMarker,
   nextEditForTrim,
   pieceAt,
   pieceEdgeAt,
   pieces,
   projectPeaks,
   releaseSuppressesClick,
-  renameMarker,
   round3,
   sameMarkers,
   sameMusic,
-  sanitizeMarkerName,
   sliderFromZoom,
   snap,
   snapTargets,
-  sortMarkers,
   stepZoom,
   ticks,
   toSource,
@@ -100,7 +92,6 @@ import {
   zoomFromSlider,
   zoomToSelection,
   type DragKind,
-  type DrawnMarker,
   type Join,
   type Keep,
   type Lane,
@@ -128,12 +119,15 @@ import {
 import { Button, ErrorBox, Spinner } from "../ui";
 import { MusicLibrary } from "./MusicLibrary";
 import { ClipInspector } from "./timeline/ClipInspector";
+import { MarkerRuler } from "./timeline/MarkerRuler";
 import { MusicLane } from "./timeline/MusicLane";
 import { NO_BLOCKS, type Drag, type EditState, type SavedSentence, type Selection } from "./timeline/types";
 import { useAudition } from "./timeline/useAudition";
 import { type AfterCommit, useEditCommits } from "./timeline/useEditCommits";
 import { drawn, useEditGestures } from "./timeline/useEditGestures";
+import { useMarkers } from "./timeline/useMarkers";
 import { fileSecondsOf, useMusicLane } from "./timeline/useMusicLane";
+import { useTimelineKeys } from "./timeline/useTimelineKeys";
 
 interface Props {
   projectId: string;
@@ -183,9 +177,6 @@ const THUMB_PX = 120;
 const DRAG_SLOP_PX = 3;
 /** A dragged block snaps to a candidate within this many pixels at the current zoom, as Camtasia's do. */
 const SNAP_PX = 8;
-/** `[` / `]` move the selected blocks this much; with Shift, five times as much. */
-const NUDGE_SECONDS = 0.05;
-const NUDGE_LARGE_SECONDS = 0.25;
 /** Where a project's lock state is remembered: the client's, per visit, never on the record (decision 2 of §11.7). */
 const locksKey = (projectId: string) => `ms:tl-locks:${projectId}`;
 /** Where the magnet is remembered, beside the locks (E5a, spec §13.4): on by default, off only when it was switched off. */
@@ -510,11 +501,10 @@ export function NarrationTimeline({
   // What stays here: the two refs the strip's own stable callbacks read -
   // the playhead, which the hook writes on every halt, start, frame and
   // key (and the scrub writes as before), and the audition's length, which
-  // the hook alone writes - and the one ref only the keyboard reads.
+  // the hook alone writes. (The one ref only the keyboard reads, `K` held,
+  // is `useTimelineKeys`' since R1d.)
   const positionRef = useRef(0);
   const totalRef = useRef(0);
-  /** `K` is down: `J` and `L` step a frame instead of shuttling, until its keyup (or the window loses focus). */
-  const kHeldRef = useRef(false);
 
   // ── the selection ────────────────────────────────────────────────────────
   //
@@ -595,29 +585,11 @@ export function NarrationTimeline({
   const [selectedMarker, setSelectedMarker] = useState<string | null>(null);
   const selectedMarkerRef = useRef(selectedMarker);
   selectedMarkerRef.current = selectedMarker;
-  const [pending, setPending] = useState<DrawnMarker | null>(null);
-  const pendingRef = useRef(pending);
-  pendingRef.current = pending;
-  const [nameBox, setNameBox] = useState<{ id: string; draft: string } | null>(null);
-  /** Mirrors `nameBox` synchronously, so a box closes exactly once whichever event closes it first. */
-  const nameBoxRef = useRef(nameBox);
-  nameBoxRef.current = nameBox;
-  /** The flag elements by id, for the drag's per-frame paint. */
-  const markerNodes = useRef(new Map<string, HTMLButtonElement>());
-  const attachMarker = useCallback((id: string) => (node: HTMLButtonElement | null) => {
-    if (node) markerNodes.current.set(id, node);
-    else markerNodes.current.delete(id);
-  }, []);
+  // The pending marker, the name box, the flag nodes and the reconcile
+  // effect are `useMarkers` (R1d), called below once the drag primitives it
+  // takes exist; the dragged flag's label stays here, because the body's
+  // release hides it.
   const markerLabelRef = useRef<HTMLDivElement | null>(null);
-  // A pending marker the plan now draws is pending no longer; a selected
-  // marker the edit removed - a delete, an undo - is no longer selected (the
-  // pending one is kept: it is not in the plan yet).
-  useEffect(() => {
-    setPending((held) => (held && markersRef.current.some((marker) => marker.id === held.id) ? null : held));
-    setSelectedMarker((held) => (
-      held !== null && !markersRef.current.some((marker) => marker.id === held) && pendingRef.current?.id !== held ? null : held
-    ));
-  }, [markersSignature]);
 
   // ── the audition (R1b, timeline/useAudition.ts) ──────────────────────────
   //
@@ -894,118 +866,8 @@ export function NarrationTimeline({
     trimLabels.current.forEach((node) => { node.style.display = "none"; });
   }, []);
 
-  // ── a marker in flight (E5b) ─────────────────────────────────────────────
-  //
-  // The flag follows the pointer along the ruler, snapped, as a clip does
-  // along its lane: a transform on the flag and a label with the moment,
-  // through refs, never state. The strip draws the flag where it landed
-  // from the plan the server answers with.
-  const paintMarker = useCallback((drag: Drag, at: number, snapped: number | null) => {
-    const base = drag.marker;
-    if (!base) return;
-    const pps = ppsRef.current;
-    const node = markerNodes.current.get(base.id);
-    if (node) node.style.transform = `translateX(${(at - base.timeline_at) * pps}px)`;
-    const label = markerLabelRef.current;
-    if (label) {
-      label.style.display = "";
-      label.style.transform = `translateX(${at * pps}px)`;
-      label.textContent = snapped === null ? timecode(at) : `${timecode(at)} ⌖`;
-    }
-  }, []);
-  const clearMarkerDrag = useCallback(() => {
-    markerNodes.current.forEach((node) => { node.style.transform = ""; });
-    if (markerLabelRef.current) markerLabelRef.current.style.display = "none";
-  }, []);
-
   /** Nothing to cut or split into: every lane is locked. */
   const allLocked = LANES.every((lane) => locks[lane]);
-
-  // ── the markers: drop, name, move, remove, jump (E5b) ────────────────────
-  //
-  // A marker is a named moment of the picture's SOURCE (spec §13.2): every
-  // change is the whole `markers` list in ONE PUT through `commitEdit`, the
-  // tracks and the clips riding along unchanged - and a cut, a split or a
-  // trim carries the markers along unchanged in turn, because nothing
-  // rewrites a marker (trap 39). The rules live in lib/edit.ts (`newMarker`,
-  // `renameMarker`, `moveMarker`, `markersAfterDelete`, `markerNeighbours`),
-  // where they are tested.
-  const commitMarkers = useCallback((list: Marker[]) => {
-    if (editLockedRef.current) return;
-    const before = committedRef.current;
-    commitEdit({ video: before.video, narration: before.narration, music: before.music, markers: list });
-  }, [commitEdit]);
-
-  /**
-   * `M`: a marker at the playhead, named "Marker N", drawn at once with its
-   * name box open - the PUT waits for the box (see `finishNameBox`), so the
-   * keys typed into it can never reach the strip's own bindings.
-   */
-  const dropMarker = useCallback(() => {
-    if (editLockedRef.current || pendingRef.current) return;
-    const marker = newMarker(markersRef.current, positionRef.current, keepRef.current, sourceDurationRef.current);
-    if (!marker) {
-      setRefusal(`The markers are limited to ${MAX_MARKERS} — remove one first.`);
-      return;
-    }
-    setPending(marker);
-    setNameBox({ id: marker.id, draft: marker.name });
-    setSelectedMarker(marker.id);
-    setSelectedClip(null);
-    setSelectedBlocks(NO_BLOCKS);
-  }, []);
-
-  /**
-   * The name box closes: `keep` is Enter or a click elsewhere (the typed
-   * name), else Escape. A PENDING marker lands either way - with the typed
-   * name, or the default when the box was given up or emptied - in the one
-   * PUT that adds it; an existing marker is renamed through `renameMarker`
-   * only when the name really changed, and Escape reverts it. The typed
-   * text goes through `sanitizeMarkerName` (a paste's tabs and newlines
-   * dropped), and a job that took the project while the box was open is
-   * said, not swallowed, on either path.
-   */
-  const finishNameBox = useCallback((keep: boolean) => {
-    const box = nameBoxRef.current;
-    if (!box) return;
-    nameBoxRef.current = null;
-    setNameBox(null);
-    const held = pendingRef.current;
-    if (held && held.id === box.id) {
-      const name = keep ? sanitizeMarkerName(box.draft) || held.name : held.name;
-      if (editLockedRef.current) {
-        // A job took the project while the box was open: the marker was
-        // never sent, so it must not stay drawn as though it had been.
-        setPending(null);
-        setRefusal("The marker was not added — wait for the last edit to be saved, then press M again.");
-        return;
-      }
-      commitMarkers(sortMarkers([...markersRef.current, { ...held, name }]));
-      return;
-    }
-    if (!keep) return;
-    const next = renameMarker(markersRef.current, box.id, sanitizeMarkerName(box.draft));
-    if (next === markersRef.current) return;
-    if (editLockedRef.current) {
-      setRefusal("The name was not saved — wait for the last edit to be saved, then rename it again.");
-      return;
-    }
-    commitMarkers(next);
-  }, [commitMarkers]);
-
-  /** Delete / Backspace with a marker selected: the marker goes, before a clip and before the range. */
-  const removeMarker = useCallback(() => {
-    const id = selectedMarkerRef.current;
-    if (id === null || editLockedRef.current) return;
-    commitMarkers(markersAfterDelete(markersRef.current, id));
-  }, [commitMarkers]);
-
-  /** Ctrl+[ / Ctrl+]: the playhead to the previous / next DRAWN marker, if there is one. */
-  const jumpToMarker = useCallback((direction: 1 | -1) => {
-    const { previous, next } = markerNeighbours(drawnMarkers(markersRef.current), positionRef.current);
-    const to = direction < 0 ? previous : next;
-    if (to !== null) seek(to);
-  }, [seek]);
 
   // The cut, the split, the nudge and the reset - and the blocks they act
   // on - are `useEditGestures` (R1a, timeline/useEditGestures.ts); `drawn`
@@ -1100,6 +962,24 @@ export function NarrationTimeline({
     setSelectedMarker, setSelectedBlocks, clipLabelRef,
   });
 
+  // ── the markers are `useMarkers` (R1d, timeline/useMarkers.ts) ───────────
+  //
+  // The pending marker and the name box, the flag nodes and the reconcile
+  // effect, `paintMarker` and `clearMarkerDrag`, `commitMarkers`,
+  // `dropMarker`, `finishNameBox`, `removeMarker`, `jumpToMarker`, the flag's
+  // three handlers and the flags the ruler draws. Called here, after
+  // `beginDrag`, `snapTargetsNow` and `seek`, which it takes, and before
+  // `clearMoved`, which composes its `clearMarkerDrag`, and the body
+  // handlers, whose marker branches call its painter and its commit.
+  const {
+    pending, nameBox, setNameBox, attachMarker, flags, nameBoxAt, commitMarkers, dropMarker, finishNameBox, removeMarker,
+    jumpToMarker, paintMarker, clearMarkerDrag, onMarkerPointerDown, onMarkerClick, onMarkerDoubleClick, dropPending,
+  } = useMarkers({
+    storedMarkers, markersRef, markersSignature, editLocked, editLockedRef, commitEdit, committedRef, setRefusal, positionRef,
+    keepRef, sourceDurationRef, ppsRef, seek, beginDrag, snapTargetsNow, suppressClick, setSelectedMarker, selectedMarkerRef,
+    setSelectedClip, setSelectedBlocks, markerLabelRef,
+  });
+
   /** Take the blocks a move painted through their transforms, and the clips and flags a drag painted, back to the plan's. */
   const clearMoved = useCallback(() => {
     blockNodes.current.forEach((node) => { node.style.transform = ""; });
@@ -1109,7 +989,7 @@ export function NarrationTimeline({
     clearTrim();
     clearMarkerDrag();
   }, [clearClipDrag, clearMarkerDrag, clearTrim]);
-  afterCommitRef.current = { clearMoved, dropPending: () => setPending(null) };
+  afterCommitRef.current = { clearMoved, dropPending };
 
   /** Paint the marquee's band over the Narration lane between two moments, through its ref. */
   const paintMarquee = useCallback((a: number, b: number) => {
@@ -1577,37 +1457,6 @@ export function NarrationTimeline({
     seek(landedAt ?? sentence.pinned_start);
   }, [onSelect, seek, sentences]);
 
-  /**
-   * Down on a marker's flag (E5b): a MOVE along the ruler, snapped to the
-   * one candidate set without its own moment; grabbing it selects it, and
-   * gives up the clip and the blocks. The press must not reach the ruler,
-   * whose own pointer-down is a scrub. Ctrl leaves the event alone (Ctrl+drag
-   * is the range everywhere); the pointer is captured lazily by the body.
-   */
-  const onMarkerPointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>, marker: DrawnMarker) => {
-    if (event.ctrlKey || event.metaKey || event.button !== 0) return;
-    event.stopPropagation();
-    setSelectedMarker(marker.id);
-    setSelectedClip(null);
-    setSelectedBlocks(NO_BLOCKS);
-    if (editLocked || pendingRef.current?.id === marker.id) return;  // the click still selects; a pending flag is not sent yet
-    beginDrag(event, "marker", marker.timeline_at, marker.timeline_at, { marker, snapTo: snapTargetsNow(marker.id) });
-  }, [beginDrag, editLocked, snapTargetsNow]);
-  /** A click on a flag SELECTS the marker and nothing else - no seek, as a clip's click seeks nothing. */
-  const onMarkerClick = useCallback((event: MouseEvent<HTMLButtonElement>, marker: DrawnMarker) => {
-    event.stopPropagation();
-    if (suppressClick.current || event.ctrlKey || event.metaKey) return;
-    setSelectedMarker(marker.id);
-    setSelectedClip(null);
-    setSelectedBlocks(NO_BLOCKS);
-  }, []);
-  /** A double-click on a flag opens its name box: Enter renames, Escape reverts. */
-  const onMarkerDoubleClick = useCallback((event: MouseEvent<HTMLButtonElement>, marker: DrawnMarker) => {
-    event.stopPropagation();
-    if (editLockedRef.current || pendingRef.current?.id === marker.id) return;
-    setNameBox({ id: marker.id, draft: marker.name });
-  }, []);
-
   // ── the transport's other moves ──────────────────────────────────────────
   /** Shift+Comma / Shift+Period: grow the selection a frame at its start or end (from the playhead with none). */
   const extendSelection = useCallback((direction: 1 | -1) => {
@@ -1635,164 +1484,17 @@ export function NarrationTimeline({
     applyZoom(zoomToSelection(sel, totalRef.current, widthRef.current), { seconds: sel.start, screenPx: widthRef.current * 0.05 });
   }, [applyZoom]);
 
-  // ── the keyboard ─────────────────────────────────────────────────────────
+  // ── the keyboard is `useTimelineKeys` (R1d, timeline/useTimelineKeys.ts) ─
   //
-  // TechSmith's own bindings, one listener on the document while this view is
-  // open, ignored inside anything typed into (the List tab's boxes, the
-  // Re-voice card's fields). Every key handled is prevented: Space must not
-  // scroll the page and Backspace must not navigate. The handler lives in a
-  // ref so the listener is bound once per `active` rather than on every
-  // render.
-  const keyHandler = useRef<(event: KeyboardEvent) => boolean>(() => false);
-  keyHandler.current = (event) => {
-    // The Library modal has the keyboard while it is open: its own Escape
-    // closes it, and Space must not play behind it.
-    if (libraryOpenRef.current) return false;
-    const ctrl = event.ctrlKey || event.metaKey;
-    const shift = event.shiftKey;
-    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-    const code = event.code;
-    // The nudge keys, by the physical key (the two right of P) OR by what it
-    // typed: on a QWERTZ layout `[` is AltGr+8 - Alt AND Ctrl held, as
-    // Windows reports AltGr - so these are the one exception to the Alt
-    // bail-out below, and to "plain Ctrl+[ / ] are Camtasia's marker keys,
-    // untouched". `{` / `}` (Shift on a US layout, AltGr+7 / AltGr+0 on
-    // QWERTZ) are the quarter-second step.
-    const bracket = code === "BracketLeft" || key === "[" || key === "{" ? -1
-      : code === "BracketRight" || key === "]" || key === "}" ? 1 : 0;
-    if (event.altKey && bracket === 0) return false;
-    const once = !event.repeat;
-    if (bracket !== 0 && (!ctrl || event.altKey)) {
-      const large = shift || key === "{" || key === "}";
-      if (once) nudge(bracket * (large ? NUDGE_LARGE_SECONDS : NUDGE_SECONDS));
-      return true;
-    }
-    // Space by `key` as well as by `code`: virtual keyboards and automation
-    // set the one without the other.
-    const space = code === "Space" || key === " ";
-    // Play/pause, a cut and undo/redo fire ONCE per press: held down they
-    // would toggle at the repeat rate and fire an undo per repeat (which is
-    // how the commit race above was hit by accident). The repeat is still
-    // swallowed, so a held Space cannot scroll the page either. Frame
-    // stepping and the selection keys keep repeating - holding them is how
-    // they are used.
-    // The nudge keys and the split fire once per press too: a held `]`
-    // would be a request per repeat.
-    if (!ctrl && !shift) {
-      if (space) { if (once) togglePlay(); return true; }
-      if (code === "Comma") { stepBy(-1); return true; }
-      if (code === "Period") { stepBy(1); return true; }
-      // Escape clears the marker first, then the music clip, then the block
-      // selection, then (a fourth press) the range - a selection of a thing
-      // wins over the range while it exists.
-      if (key === "Escape") {
-        if (selectedMarkerRef.current !== null) { setSelectedMarker(null); return true; }
-        if (selectedClipRef.current !== null) { setSelectedClip(null); return true; }
-        if (selectedBlocksRef.current.size > 0) { setSelectedBlocks(NO_BLOCKS); return true; }
-        if (!selectionRef.current) return false;
-        setSelection(null);
-        return true;
-      }
-      // Camtasia's plain Delete leaves space on the timeline; this one has no
-      // gaps (the edit is ranges of one source), so it closes the gap too.
-      // With a marker selected these keys remove THE MARKER; with a music
-      // clip selected, THE CLIP (Camtasia's "delete selected media"): the
-      // marker wins, then the clip, then the range, and Escape is how each
-      // is given up.
-      if (key === "Backspace" || key === "Delete") {
-        if (once) {
-          if (selectedMarkerRef.current !== null) removeMarker();
-          else if (selectedClipRef.current !== null) removeClip();
-          else cutSelection();
-        }
-        return true;
-      }
-      // TechSmith's S: split the selected / unlocked tracks at the playhead.
-      if (code === "KeyS" || key === "s") { if (once) splitAtPlayhead(false); return true; }
-      // Camtasia's M: a marker at the playhead, its name box open (E5b).
-      if (code === "KeyM" || key === "m") { if (once) dropMarker(); return true; }
-      // J / K / L (E5c): the shuttle - or, with K held, a frame step. Once
-      // per press: held, L would climb 2×, 4×, 8× at the repeat rate. K's
-      // repeats keep its flag up while it is down (its keyup clears it), and
-      // the step under it repeats as Comma and Period do.
-      if (code === "KeyK" || key === "k") { kHeldRef.current = true; if (once) shuttleKey("K"); return true; }
-      if (code === "KeyJ" || key === "j") { if (kHeldRef.current) stepBy(-1); else if (once) shuttleKey("J"); return true; }
-      if (code === "KeyL" || key === "l") { if (kHeldRef.current) stepBy(1); else if (once) shuttleKey("L"); return true; }
-      return false;
-    }
-    if (shift && !ctrl) {
-      if (code === "Comma") { extendSelection(-1); return true; }
-      if (code === "Period") { extendSelection(1); return true; }
-      return false;
-    }
-    if (ctrl && !shift) {
-      // Camtasia's Ctrl+[ / Ctrl+]: the previous / next marker (E5b). Plain
-      // [ and ] are E3's nudge, handled above; AltGr's Ctrl+Alt is the nudge
-      // too, so this is reached only with Ctrl alone.
-      if (bracket !== 0) { jumpToMarker(bracket); return true; }
-      if (key === "z") { if (once) undo(); return true; }
-      if (key === "y") { if (once) redo(); return true; }
-      if (key === "x" || key === "Delete") {
-        if (once) {
-          if (selectedMarkerRef.current !== null) removeMarker();
-          else if (selectedClipRef.current !== null) removeClip();
-          else cutSelection();
-        }
-        return true;
-      }
-      if (key === "Home") { seek(0); return true; }
-      if (key === "End") { jumpToEnd(); return true; }
-      return false;
-    }
-    // Ctrl+Shift
-    if (key === "z") { if (once) redo(); return true; }
-    if (key === "d") { setSelection(null); return true; }
-    // Ctrl+Shift+S: split every track at the playhead, locks or not.
-    if (code === "KeyS" || key === "s") { if (once) splitAtPlayhead(true); return true; }
-    if (key === "Home") { extendTo("start"); return true; }
-    if (key === "End") { extendTo("end"); return true; }
-    if (code === "Equal" || code === "NumpadAdd" || key === "+" || key === "=") { zoomStep(1); return true; }
-    if (code === "Minus" || code === "NumpadSubtract" || key === "-" || key === "_") { zoomStep(-1); return true; }
-    if (code === "Digit7") { zoomFit(); return true; }
-    if (code === "Digit8") { zoomSelection(); return true; }
-    if (code === "Digit9") { zoomAll(); return true; }
-    return false;
-  };
-  useEffect(() => {
-    if (!active) return;
-    const typing = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      return !!target?.closest?.("input, textarea, select, [contenteditable]:not([contenteditable='false'])");
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.isComposing || event.defaultPrevented || typing(event)) return;
-      if (keyHandler.current(event)) event.preventDefault();
-    };
-    // Space while a button has focus (Play keeps it after a mouse click): in
-    // Chromium a default-prevented keydown never arms the button, so its
-    // keyup dispatches no click and Space toggles exactly once. Firefox
-    // dispatches the button's click on keyup regardless, which would toggle
-    // twice - so the keyup is prevented there too, under the same rules.
-    const onKeyUp = (event: KeyboardEvent) => {
-      // K released: J and L shuttle again (E5c). Cleared wherever the keyup
-      // lands, since the flag was raised outside any box.
-      if (event.code === "KeyK" || event.key === "k" || event.key === "K") kHeldRef.current = false;
-      if ((event.code !== "Space" && event.key !== " ") || typing(event)) return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest?.("button, a")) event.preventDefault();
-    };
-    // A K held while the window loses focus never sees its keyup.
-    const onBlur = () => { kHeldRef.current = false; };
-    document.addEventListener("keydown", onKey);
-    document.addEventListener("keyup", onKeyUp);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("blur", onBlur);
-      kHeldRef.current = false;
-    };
-  }, [active]);
+  // TechSmith's bindings, one listener on the document while this view is
+  // open: the key map (`keyAction`), `K` held, and the listener. Called here,
+  // after every move the keys make.
+  useTimelineKeys({
+    active, libraryOpenRef, selectedMarkerRef, selectedClipRef, selectedBlocksRef, selectionRef, nudge, togglePlay, stepBy,
+    setSelectedMarker, setSelectedClip, setSelectedBlocks, setSelection, removeMarker, removeClip, cutSelection, splitAtPlayhead,
+    dropMarker, shuttleKey, extendSelection, jumpToMarker, undo, redo, seek, jumpToEnd, extendTo, zoomStep, zoomFit,
+    zoomSelection, zoomAll,
+  });
 
   if (!active) return null;
   if (plan.isLoading) return <Spinner label="Reading the narration…" />;
@@ -1877,16 +1579,6 @@ export function NarrationTimeline({
     }
     return `Select the ${lane} channel: the other lanes lock, so a cut or a split edits just this one`;
   };
-  // ── the markers' drawing (E5b) ───────────────────────────────────────────
-  //
-  // The flags are the DRAWN markers - one in removed picture has no
-  // `timeline_at` and is not on the ruler (trap 39) - plus the one `M` has
-  // just dropped while the plan does not have it yet. The name box sits on
-  // whichever flag is being named.
-  const drawnFlags = drawnMarkers(storedMarkers);
-  const flags: DrawnMarker[] = pending && !storedMarkers.some((held) => held.id === pending.id) ? [...drawnFlags, pending] : drawnFlags;
-  const nameBoxAt = nameBox ? flags.find((held) => held.id === nameBox.id)?.timeline_at : undefined;
-
   // ── the Music lane's drawing ─────────────────────────────────────────────
   const inspected = selectedClip !== null ? storedMusic.find((held) => held.id === selectedClip) ?? null : null;
   const musicStatus = musicPrep.running
@@ -2327,54 +2019,21 @@ export function NarrationTimeline({
                 onClick={(e) => e.stopPropagation()}
               >
                 <Ruler total={total} pps={pps} scrollEl={scrollEl} />
-                <div className="os-tl-markers">
-                  {flags.map((held) => (
-                    <button
-                      type="button"
-                      key={held.id}
-                      ref={attachMarker(held.id)}
-                      className={["os-tl-marker",
-                        held.id === selectedMarker ? "selected" : "",
-                        pending?.id === held.id ? "pending" : ""].filter(Boolean).join(" ")}
-                      style={{ left: held.timeline_at * pps }}
-                      aria-pressed={held.id === selectedMarker}
-                      aria-label={`Marker ${held.name} at ${timecode(held.timeline_at)}`}
-                      title={`${held.name} — ${timecode(held.timeline_at)}`
-                        + "\n\nClick to select; double-click to rename; drag to move it (Alt: no snapping); Delete removes it."
-                        + " Ctrl+[ and Ctrl+] jump between markers. Markers become the rendered video's chapters."}
-                      onPointerDown={(event) => onMarkerPointerDown(event, held)}
-                      onClick={(event) => onMarkerClick(event, held)}
-                      onDoubleClick={(event) => onMarkerDoubleClick(event, held)}
-                    >
-                      <span className="os-tl-marker-name">{held.name}</span>
-                    </button>
-                  ))}
-                  {nameBox && nameBoxAt !== undefined && (
-                    <input
-                      className="os-tl-marker-name-box"
-                      style={{ left: nameBoxAt * pps }}
-                      value={nameBox.draft}
-                      maxLength={MAX_MARKER_NAME}
-                      autoFocus
-                      aria-label="Marker name"
-                      placeholder="Marker name"
-                      title="The marker's name — Enter keeps it, Escape puts the old one back"
-                      onFocus={(event) => event.currentTarget.select()}
-                      onChange={(event) => setNameBox({ id: nameBox.id, draft: event.target.value })}
-                      onKeyDown={(event) => {
-                        event.stopPropagation();
-                        if (event.key === "Enter") { event.preventDefault(); finishNameBox(true); }
-                        else if (event.key === "Escape") { event.preventDefault(); finishNameBox(false); }
-                      }}
-                      onBlur={() => finishNameBox(true)}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onClick={(event) => event.stopPropagation()}
-                      onDoubleClick={(event) => event.stopPropagation()}
-                    />
-                  )}
-                  {/* The dragged flag's new moment, painted through its ref. */}
-                  <div className="os-tl-marker-label" ref={markerLabelRef} style={{ display: "none" }} aria-hidden="true" />
-                </div>
+                <MarkerRuler
+                  flags={flags}
+                  pps={pps}
+                  selectedMarker={selectedMarker}
+                  pending={pending}
+                  nameBox={nameBox}
+                  nameBoxAt={nameBoxAt}
+                  setNameBox={setNameBox}
+                  finishNameBox={finishNameBox}
+                  attachMarker={attachMarker}
+                  markerLabelRef={markerLabelRef}
+                  onMarkerPointerDown={onMarkerPointerDown}
+                  onMarkerClick={onMarkerClick}
+                  onMarkerDoubleClick={onMarkerDoubleClick}
+                />
                 <span className="os-tl-sel-label in" ref={inLabelRef} />
                 <span className="os-tl-sel-label out" ref={outLabelRef} />
                 <div

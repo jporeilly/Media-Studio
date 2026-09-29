@@ -1404,10 +1404,21 @@ describe("the Render line, with music under it", () => {
 });
 
 describe("the markers on the strip (E5b), pinned in the component's own source", () => {
-  // The rules are lib/edit.ts's (edit.test.ts holds their tables); these pin
-  // that the component calls them where the design says - the keys, the
-  // Delete precedence, the one PUT, the candidate set, the drag's release -
-  // and no more. The live walk is the owner's.
+  // The rules are lib/edit.ts's (edit.test.ts holds their tables). Since R1d
+  // the markers' own code is `useMarkers` and the keys' `useTimelineKeys`,
+  // and what was pinned here is behaviour there: `M` once per press, Ctrl+[ /
+  // ] jumping while [ / ] and AltGr's Ctrl+Alt+[ nudge, Delete and Ctrl+X
+  // giving the marker, then the clip, then the range, and Escape's order
+  // (useTimelineKeys.test.ts, "keyAction - the key map…"); the jump to the
+  // neighbouring DRAWN marker, `commitMarkers` carrying the tracks and the
+  // clips unchanged under the lock, Delete through `markersAfterDelete`, the
+  // ONE PUT when the name box closes with the sanitised name or the default,
+  // a rename only when the name changed, a flag's press beginning a marker
+  // drag with `snapTargetsNow(marker.id)`, its click selecting and its
+  // double-click naming, and the name box's Enter, Escape, blur and length
+  // (useMarkers.test.ts). What is still the root's - the candidate set and
+  // the marker branches of the body's two handlers - is pinned here; the
+  // live walk is the owner's.
   const timeline = timelineSource;
   const handler = (name: string): string => {
     const from = timeline.indexOf(`const ${name} = useCallback(`);
@@ -1415,43 +1426,11 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
     return timeline.slice(from, timeline.indexOf("\n  }, [", from));
   };
 
-  it("drops one on M, jumps on Ctrl+[ / Ctrl+], and gives Delete to the marker before the clip and the range", () => {
-    expect(timeline).toMatch(/if \(code === "KeyM" \|\| key === "m"\) \{ if \(once\) dropMarker\(\); return true; \}/);
-    // Ctrl alone with a bracket, in the Ctrl branch: plain [ ] stay E3's
-    // nudge, and so does AltGr's Ctrl+Alt (the nudge's own guard, untouched).
-    expect(timeline).toMatch(/if \(bracket !== 0 && \(!ctrl \|\| event\.altKey\)\) \{/);
-    expect(timeline).toMatch(/if \(ctrl && !shift\) \{\s*(\/\/[^\n]*\n\s*)*if \(bracket !== 0\) \{ jumpToMarker\(bracket\); return true; \}/);
-    expect(handler("jumpToMarker")).toMatch(/markerNeighbours\(drawnMarkers\(markersRef\.current\), positionRef\.current\)/);
-    // Delete / Backspace and Ctrl+Delete / Ctrl+X: the marker, else the clip, else the range - the same three lines in both branches.
-    const precedence = timeline.match(
-      /if \(selectedMarkerRef\.current !== null\) removeMarker\(\);\s*else if \(selectedClipRef\.current !== null\) removeClip\(\);\s*else cutSelection\(\);/g,
-    ) ?? [];
-    expect(precedence).toHaveLength(2);
-    // Escape gives the marker up first, then the clip.
-    expect(timeline).toMatch(/if \(key === "Escape"\) \{\s*if \(selectedMarkerRef\.current !== null\) \{ setSelectedMarker\(null\); return true; \}\s*if \(selectedClipRef\.current !== null\)/);
-  });
-
-  it("sends every marker gesture through commitMarkers, the tracks and the clips riding along unchanged (trap 39)", () => {
-    // The stack's side - `editBody` against what the server holds, `commitEdit`
-    // sending nothing while the markers are the same - and the cut's and the
-    // split's `markers: before.markers` are behaviour tests since R1a
-    // (useEditCommits.test.ts, useEditGestures.test.ts); `commitMusic`'s
-    // `markers: before.markers` since R1c (useMusicLane.test.ts, "hands
-    // commitEdit the whole edit… the markers the SAME list"); the trim's
-    // stays pinned on the release above.
-    expect(handler("commitMarkers")).toMatch(/commitEdit\(\{ video: before\.video, narration: before\.narration, music: before\.music, markers: list \}\)/);
-    expect(handler("commitMarkers")).toMatch(/if \(editLockedRef\.current\) return;/);
-    // Every marker gesture goes through `commitMarkers`, never a PUT of its own.
-    for (const name of ["finishNameBox", "removeMarker"]) expect(handler(name)).toMatch(/commitMarkers\(/);
-    expect(handler("removeMarker")).toMatch(/markersAfterDelete\(markersRef\.current, id\)/);
-  });
-
-  it("includes the drawn markers in the one candidate set, and a dragged marker leaves its own moment out", () => {
+  it("includes the drawn markers in the one candidate set less the one `exclude` names, and moves a flag through the body's two handlers", () => {
+    // The flag's press hands `snapTargetsNow` its own id (useMarkers.test.ts,
+    // "a press on a flag… the candidate set less its own moment").
     expect(handler("snapTargetsNow")).toMatch(
       /markers: drawnMarkers\(markersRef\.current\)\.filter\(\(marker\) => marker\.id !== exclude\)\.map\(\(marker\) => marker\.timeline_at\)/,
-    );
-    expect(handler("onMarkerPointerDown")).toMatch(
-      /beginDrag\(event, "marker", marker\.timeline_at, marker\.timeline_at, \{ marker, snapTo: snapTargetsNow\(marker\.id\) \}\)/,
     );
     // The drag: the magnet and Alt as every drag, clamped to the picture, ⌖
     // after the clamp, and on release `at = toSource(landed, keep)` through
@@ -1465,29 +1444,6 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
     );
   });
 
-  it("lands a dropped marker in ONE PUT when its name box closes, with the typed name or the default; a rename only when the name changed", () => {
-    expect(handler("dropMarker")).toMatch(/newMarker\(markersRef\.current, positionRef\.current, keepRef\.current, sourceDurationRef\.current\)/);
-    expect(handler("dropMarker")).toMatch(/setNameBox\(\{ id: marker\.id, draft: marker\.name \}\)/);
-    const finish = handler("finishNameBox");
-    // The typed text is sanitised (a paste's control characters dropped) on both paths.
-    expect(finish).toMatch(/const name = keep \? sanitizeMarkerName\(box\.draft\) \|\| held\.name : held\.name;/);
-    expect(finish).toMatch(/commitMarkers\(sortMarkers\(\[\.\.\.markersRef\.current, \{ \.\.\.held, name \}\]\)\)/);
-    expect(finish).toMatch(/const next = renameMarker\(markersRef\.current, box\.id, sanitizeMarkerName\(box\.draft\)\);\s*if \(next === markersRef\.current\) return;/);
-    // A job that took the project while the box was open is SAID on both paths, never swallowed (the Reviewer's NIT 3).
-    expect(finish).toMatch(/setRefusal\("The marker was not added — wait for the last edit to be saved, then press M again\."\)/);
-    expect(finish).toMatch(/if \(editLockedRef\.current\) \{\s*setRefusal\("The name was not saved — wait for the last edit to be saved, then rename it again\."\);\s*return;\s*\}\s*commitMarkers\(next\);/);
-    // The box: Enter keeps, Escape reverts, a click elsewhere keeps; 80 characters.
-    expect(timeline).toMatch(/if \(event\.key === "Enter"\) \{ event\.preventDefault\(\); finishNameBox\(true\); \}/);
-    expect(timeline).toMatch(/else if \(event\.key === "Escape"\) \{ event\.preventDefault\(\); finishNameBox\(false\); \}/);
-    expect(timeline).toMatch(/onBlur=\{\(\) => finishNameBox\(true\)\}/);
-    expect(timeline).toMatch(/maxLength=\{MAX_MARKER_NAME\}/);
-    // A flag's press never reaches the ruler's scrub; selecting a marker gives up the clip (and a clip the
-    // marker - the lane's half, a behaviour test on useMusicLane.test.ts since R1c).
-    expect(handler("onMarkerPointerDown")).toMatch(/event\.stopPropagation\(\);/);
-    expect(handler("onMarkerClick")).toMatch(/setSelectedMarker\(marker\.id\);\s*setSelectedClip\(null\);/);
-    expect(handler("onMarkerDoubleClick")).toMatch(/setNameBox\(\{ id: marker\.id, draft: marker\.name \}\)/);
-  });
-
   it("makes the flag's button the glyph alone and the name a label that takes no pointer, so the ruler under a name still seeks and scrubs (the Reviewer's MINOR 3)", () => {
     // The harness proves the markup; the stylesheet says who takes the
     // pointer, and a static render cannot compute that - so the rule is
@@ -1496,8 +1452,10 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
     expect(themeSource).toMatch(/\.os-tl-marker \{[^}]*\bwidth: 12px;[^}]*\}/);
     expect(themeSource).toMatch(/\.os-tl-marker-name \{[^}]*position: absolute;[^}]*pointer-events: none;[^}]*\}/);
     expect(themeSource).toMatch(/\.os-tl-marker-name \{[^}]*left: 12px;[^}]*\}/);
-    // The name sits INSIDE the button (its only content), so the drag's transform carries it with the glyph.
-    expect(timeline).toMatch(/onDoubleClick=\{\(event\) => onMarkerDoubleClick\(event, held\)\}\s*>\s*<span className="os-tl-marker-name">\{held\.name\}<\/span>\s*<\/button>/);
+    // That the name sits INSIDE the button, its only content - so the drag's
+    // transform carries it with the glyph - is the render harness's ("draws a
+    // flag per DRAWN marker…" asserts the button's exact content), since R1d
+    // over the markup that moved to timeline/MarkerRuler.tsx.
   });
 });
 
@@ -1506,26 +1464,15 @@ describe("the shuttle (E5c), pinned in the component's own source", () => {
   // key, the advance, the label and the throttle). Since R1b the drive itself
   // - the silent loop that never touches the audio graph, the `<video>`'s rate
   // written in one place, the throttled backwards seek, the resets - is the
-  // hook's, tested as behaviour in useAudition.test.ts; what the ROOT still
-  // does, pinned here, is the three keys and the K-held step in the key map,
-  // the transport's buttons and the label's markup. The live feel is the
-  // owner's walk.
+  // hook's, tested as behaviour in useAudition.test.ts; since R1d the three
+  // keys and the K-held step are the key map's (`keyAction`), and K's keyup
+  // and the window's blur the listener's, tested as behaviour in
+  // useTimelineKeys.test.ts ("K raises the K-held flag…", "keeps J, K and L in
+  // the plain branch…", "lowers the K-held flag on K's keyup…", "unbinds on
+  // leaving the tab…"). What the ROOT still does, pinned here, is the
+  // transport's buttons and the label's markup. The live feel is the owner's
+  // walk.
   const timeline = timelineSource;
-
-  it("binds J, K and L in the plain branch, once per press, with K held turning J and L into the frame step", () => {
-    // In the `!ctrl && !shift` branch, after M and before the Shift branch.
-    const plain = timeline.slice(timeline.indexOf("if (!ctrl && !shift) {"), timeline.indexOf("if (shift && !ctrl) {"));
-    expect(plain).toMatch(/if \(code === "KeyK" \|\| key === "k"\) \{ kHeldRef\.current = true; if \(once\) shuttleKey\("K"\); return true; \}/);
-    expect(plain).toMatch(/if \(code === "KeyJ" \|\| key === "j"\) \{ if \(kHeldRef\.current\) stepBy\(-1\); else if \(once\) shuttleKey\("J"\); return true; \}/);
-    expect(plain).toMatch(/if \(code === "KeyL" \|\| key === "l"\) \{ if \(kHeldRef\.current\) stepBy\(1\); else if \(once\) shuttleKey\("L"\); return true; \}/);
-    // K's keyup lowers the flag wherever it lands, and so does the window losing focus.
-    expect(timeline).toMatch(/const onKeyUp = \(event: KeyboardEvent\) => \{\s*(\/\/[^\n]*\n\s*)*if \(event\.code === "KeyK" \|\| event\.key === "k" \|\| event\.key === "K"\) kHeldRef\.current = false;/);
-    expect(timeline).toMatch(/const onBlur = \(\) => \{ kHeldRef\.current = false; \};/);
-    expect(timeline).toMatch(/window\.addEventListener\("blur", onBlur\);/);
-    expect(timeline).toMatch(/window\.removeEventListener\("blur", onBlur\);\s*kHeldRef\.current = false;/);
-    // The step itself - `stepBy`, the same one Comma and Period call - is the
-    // hook's, tested as behaviour (useAudition.test.ts, "steps one frame…").
-  });
 
   // The transitions (`nextShuttle`'s table driven by `shuttleKey`: K a halt
   // that gives up a waiting Play, L from a stop Space's own path, L out of a
