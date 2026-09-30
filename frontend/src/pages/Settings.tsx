@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, GitBranch, RefreshCw, RotateCcw } from "lucide-react";
 import { api, errorMessage } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { Button, Card, ErrorBox, PageHeader, Spinner } from "../components/ui";
+import { JobNotice, type Job } from "../components/project/JobProgress";
+import { useFollowedJob } from "../lib/useFollowedJob";
 import { AccountsCard } from "../components/settings/AccountsCard";
 import { AuditCard } from "../components/settings/AuditCard";
 import { PasswordCard } from "../components/settings/PasswordCard";
@@ -18,13 +20,11 @@ interface UpdateState {
   behind: number;
   latest: string | null;
 }
-interface Job {
-  id: string;
-  status: string;
-  progress: number;
-  message: string;
-  error?: string | null;
-  result?: { updated_from?: string | null; updated_to?: string | null; changed?: boolean } | null;
+/** What a finished update job returns (services/updater.py apply_update). */
+interface UpdateResult {
+  updated_from?: string | null;
+  updated_to?: string | null;
+  changed?: boolean;
 }
 interface Health {
   status: string;
@@ -43,7 +43,8 @@ export default function SettingsPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const isAdmin = user?.role === "admin";
-  const [jobId, setJobId] = useState<string | null>(null);
+  // What the last update this page followed brought, once it is done: "Update applied (a → b)".
+  const [applied, setApplied] = useState<UpdateResult | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [pollBack, setPollBack] = useState(false);
   const [restartTimedOut, setRestartTimedOut] = useState(false);
@@ -58,22 +59,24 @@ export default function SettingsPage() {
     staleTime: 0,
   });
 
+  // The update this page follows: one it started, or the update already running when the page opened
+  // (GET /api/system/update/job) - with the project page's rules (lib/useFollowedJob.ts): a 404 means the
+  // server no longer holds it, which a restart does to every job; any other failure is tried three times in
+  // a row, then the page lets go and asks after it once more when the server answers again, so an update
+  // lost in a restart gets the restart line.
+  const onUpdateEnded = useCallback((ended: Job) => {
+    if (ended.status === "done") setApplied((ended.result as UpdateResult | null) ?? {});
+    qc.invalidateQueries({ queryKey: ["system-update"] });
+  }, [qc]);
+  const followed = useFollowedJob({ activeUrl: "/api/system/update/job", viewer: user, onEnded: onUpdateEnded });
+  const followUpdate = followed.follow;
   const apply = useMutation({
     mutationFn: () => api.post<{ job_id: string }>("/api/system/update"),
-    onSuccess: (r) => setJobId(r.job_id),
-  });
-  const job = useQuery({
-    queryKey: ["job", jobId],
-    queryFn: () => api.get<Job>(`/api/jobs/${jobId}`),
-    enabled: !!jobId,
-    refetchInterval: (q) => {
-      const s = q.state.data?.status;
-      return s === "done" || s === "error" ? false : 1200;
+    onSuccess: (r) => {
+      setApplied(null);
+      followUpdate(r.job_id, "update");
     },
   });
-  useEffect(() => {
-    if (job.data?.status === "done") qc.invalidateQueries({ queryKey: ["system-update"] });
-  }, [job.data?.status, qc]);
 
   const restart = useMutation({
     mutationFn: () => api.post("/api/system/restart"),
@@ -107,11 +110,11 @@ export default function SettingsPage() {
   }, [restarting, restartTimedOut]);
 
   const u = update.data;
-  const jobStatus = job.data?.status;
-  const applying = apply.isPending || jobStatus === "queued" || jobStatus === "running";
-  const applied = jobStatus === "done";
-  const applyError = jobStatus === "error" ? job.data?.error || job.data?.message : apply.isError ? errorMessage(apply.error) : null;
-  const pct = Math.round((job.data?.progress || 0) * 100);
+  const job = followed.job;
+  const applying = apply.isPending || followed.jobActive;
+  const applyError = job?.status === "error" ? job.error || job.message : apply.isError ? errorMessage(apply.error) : null;
+  const pct = Math.round((job?.progress || 0) * 100);
+  const jobNotice = followed.notice?.text ?? null;
 
   return (
     <>
@@ -168,40 +171,51 @@ export default function SettingsPage() {
               <div style={{ color: "var(--good)", fontWeight: 500 }}>You're on the latest version.</div>
             )}
 
+            {jobNotice && <JobNotice text={jobNotice} onDismiss={followed.dismissNotice} />}
             {applyError && <ErrorBox message={applyError} />}
             {restart.isError && <ErrorBox message={`Restart failed: ${errorMessage(restart.error)}`} />}
 
             {applying ? (
               <div style={{ display: "grid", gap: 8 }}>
-                <div style={muted}>{job.data?.message || "Starting update…"}</div>
+                <div style={muted}>{job?.message || "Starting update…"}</div>
                 <div style={{ height: 8, borderRadius: 6, background: "var(--surface-3)", overflow: "hidden" }}>
                   <div style={{ height: "100%", width: `${pct}%`, background: "var(--brand)", transition: "width .3s ease" }} />
                 </div>
               </div>
-            ) : applied ? (
+            ) : applied && isAdmin ? (
               <div style={{ display: "grid", gap: 10, justifyItems: "start" }}>
                 <div style={{ color: "var(--good)" }}>
-                  Update applied ({job.data?.result?.updated_from ?? "?"} → {job.data?.result?.updated_to ?? "?"}). Restart to finish.
+                  Update applied ({applied.updated_from ?? "?"} → {applied.updated_to ?? "?"}). Restart to finish.
                 </div>
                 <Button variant="primary" icon={<RotateCcw size={16} />} onClick={() => restart.mutate()} disabled={restart.isPending}>
                   Restart now
                 </Button>
               </div>
             ) : (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <Button icon={<RefreshCw size={16} />} onClick={() => update.refetch()} disabled={update.isFetching}>
-                  {update.isFetching ? "Checking…" : "Check for updates"}
-                </Button>
-                {isAdmin && u?.update_available && !u.error && (
-                  <Button variant="primary" icon={<Download size={16} />} onClick={() => apply.mutate()}>
-                    Update now
-                  </Button>
+              <div style={{ display: "grid", gap: 10, justifyItems: "start" }}>
+                {/* An editor watching an administrator's update: restarting is an administrator's (the route
+                    answers anyone else "Insufficient permissions"), so the line says so and the card keeps its
+                    own buttons. */}
+                {applied && (
+                  <div style={{ color: "var(--good)" }}>
+                    Update applied ({applied.updated_from ?? "?"} → {applied.updated_to ?? "?"}). An administrator restarts the backend to finish.
+                  </div>
                 )}
-                {isAdmin && (
-                  <Button icon={<RotateCcw size={16} />} onClick={() => restart.mutate()} disabled={restart.isPending}>
-                    Restart backend
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <Button icon={<RefreshCw size={16} />} onClick={() => update.refetch()} disabled={update.isFetching}>
+                    {update.isFetching ? "Checking…" : "Check for updates"}
                   </Button>
-                )}
+                  {isAdmin && u?.update_available && !u.error && (
+                    <Button variant="primary" icon={<Download size={16} />} onClick={() => apply.mutate()}>
+                      Update now
+                    </Button>
+                  )}
+                  {isAdmin && (
+                    <Button icon={<RotateCcw size={16} />} onClick={() => restart.mutate()} disabled={restart.isPending}>
+                      Restart backend
+                    </Button>
+                  )}
+                </div>
               </div>
             )}
 

@@ -555,13 +555,55 @@ def test_a_cancel_during_the_mix_leaves_a_record_that_describes_the_voice_only_f
     stale = _previous_render(pid, clips=3)
 
     job = _revoice(client, pid)
-    assert job["status"] == "done" and job["message"] == "Cancelled", job
-    assert job["result"] == {"cancelled": True}
+    assert job["status"] == "done", job
+    assert job["result"] == {"cancelled": True, "stage": "mix"}
+    # The closing line the Re-voice card shows says what is on disk: the new
+    # voice, no music (and no chapters to mention: no markers here).
+    assert job["message"] == revoice.CANCELLED_VOICE_ONLY.format(chapters="")
+    assert job["message"] == (
+        "Re-voice cancelled while the music was being mixed: the re-voiced video has the new narration "
+        "but not the music. Re-voice again for the full render."
+    )
     saved = store.get_project(pid)
     assert saved["revoiced_video"] == "clip_revoiced.mp4"
     assert saved["revoiced_at"] != stale, "the bytes changed, so the page's cache token had to"
     assert "music_rendered" not in saved, "the file on disk carries none - not the 3 the last render mixed"
     assert "edit_rendered_at" not in saved, "nothing was cut either"
+    assert (store.PROJECTS_DIR / pid / "clip_revoiced.mp4").read_bytes() == b"FAKEREVOICE", "voice only, left on disk"
+    assert not list((store.PROJECTS_DIR / pid).glob("*.part*")), "no partial mix left behind"
+
+
+class _CancelledDuringTheMux(_FakeVideoProcessor):
+    """A cancel that arrives while the engine muxes: the mux is not
+    interrupted, so the new voice-only file IS on disk when the job next
+    looks - right before the music pass."""
+
+    def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="", **kwargs):
+        ok = super()._revoice_video(pm, source_video, output_path, progress=progress,
+                                    file_label=file_label, **kwargs)
+        jobs.cancel(jobs.current_job_id())
+        return ok
+
+
+def test_a_cancel_before_the_music_pass_skips_it_and_describes_the_voice_only_file(client, library, monkeypatch):
+    """The pass is not started for a job already cancelled: the record
+    describes the voice-only file the mux wrote, and - with markers drawn -
+    the closing line says the chapters are missing too."""
+    monkeypatch.setattr(processing, "VideoProcessor", _CancelledDuringTheMux)
+    log = _recorders(monkeypatch)
+    pid = _video(4.0)
+    body = {"music": [CLIP_BED], "markers": [{"id": "k1", "at": 1.0, "name": "Intro"}]}
+    assert client.put(f"/api/projects/{pid}/edit", json=body).status_code == 200
+    stale = _previous_render(pid, clips=3)
+
+    job = _revoice(client, pid)
+    assert job["status"] == "done", job
+    assert job["result"] == {"cancelled": True, "stage": "mix"}
+    assert job["message"] == revoice.CANCELLED_VOICE_ONLY.format(chapters=" or the chapters")
+    assert log == [], "the pass never started"
+    saved = store.get_project(pid)
+    assert saved["revoiced_video"] == "clip_revoiced.mp4" and saved["revoiced_at"] != stale
+    assert "music_rendered" not in saved
     assert (store.PROJECTS_DIR / pid / "clip_revoiced.mp4").read_bytes() == b"FAKEREVOICE", "voice only, left on disk"
 
 

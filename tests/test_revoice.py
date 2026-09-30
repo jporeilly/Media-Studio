@@ -31,6 +31,7 @@ class _FakeVideoProcessor:
     captured = None
     source = None  # the picture the engine was told to mux onto
     duration = "unset"  # the picture's length the engine was told (F1)
+    cancel_check = None  # what the engine was told to ask about a cancel
 
     def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", provider="", **kwargs):
         self.voice_id = voice_id
@@ -40,7 +41,8 @@ class _FakeVideoProcessor:
         _FakeVideoProcessor.last = self
 
     def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="",
-                       video_duration=None):
+                       video_duration=None, cancel_check=None):
+        _FakeVideoProcessor.cancel_check = cancel_check
         if progress:
             progress(0.9, "revoicing")
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -677,11 +679,36 @@ def test_a_cut_that_fails_fails_the_job_with_the_reason(client, monkeypatch):
     assert "revoiced_video" not in saved and "edit_rendered_at" not in saved
 
 
+def _previous_revoice(pid: str) -> dict:
+    """A re-voice made before this job: its two files on disk and its stamps
+    on the record. Returns the record as it then stands."""
+    out = store.PROJECTS_DIR / pid / "clip_revoiced.mp4"
+    out.write_bytes(b"PREVIOUS")
+    processing.narration_path_for(out).write_bytes(b"PREVIOUS-NARRATION")
+    record = store.get_project(pid)
+    record.update({"revoiced_video": out.name, "revoiced_at": "2020-01-01T00:00:00+00:00",
+                   "narration_audio": processing.narration_path_for(out).name})
+    store.save_project(record)
+    return store.get_project(pid)
+
+
+def _assert_nothing_written(pid: str, before: dict) -> None:
+    """A cancel before the mux: the record is exactly as it was and so are
+    the previous re-voice's files."""
+    out = store.PROJECTS_DIR / pid / "clip_revoiced.mp4"
+    assert store.get_project(pid) == before, "the record is unchanged"
+    assert out.read_bytes() == b"PREVIOUS", "the previous re-voice is still the file the record names"
+    assert processing.narration_path_for(out).read_bytes() == b"PREVIOUS-NARRATION"
+    assert not list(out.parent.glob("*.tmp.mp4")) and not list(out.parent.glob("*.part*")), "no half-written output"
+
+
 def test_a_cancel_during_the_cut_ends_the_job_as_cancelled(client, monkeypatch):
-    """The picture step is the one place a re-voice consults the cancel flag
-    (``_revoice_video`` never has); a cancelled cut ends the job the way the
-    AI loops end theirs, with nothing rendered and nothing stamped."""
+    """A cancel while the picture is cut ends the job the way the AI loops end
+    theirs - ``done``, ``result.cancelled`` - with the stage named, a closing
+    line that says nothing was written, the record unchanged, the previous
+    re-voice untouched and the job's scratch directory gone."""
     from services import jobs as jobs_module
+    from services import revoice as revoice_module
 
     monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
     _FakeVideoProcessor.captured = None
@@ -689,16 +716,143 @@ def test_a_cancel_during_the_cut_ends_the_job_as_cancelled(client, monkeypatch):
     def _cancel_this_job():
         jobs_module.cancel(jobs_module.current_job_id())
 
-    _cut_recorder(monkeypatch, ok=False, on_call=_cancel_this_job)
+    cuts = _cut_recorder(monkeypatch, ok=False, on_call=_cancel_this_job)
     pid = _video_with_transcript()
     _wav(pid, 4.0)
     assert client.put(f"/api/projects/{pid}/edit", json={"keep": [[0.0, 3.0]]}).status_code == 200
+    before = _previous_revoice(pid)
 
     job = _revoice(client, pid)
-    assert job["status"] == "done" and job["message"] == "Cancelled", job
-    assert job["result"] == {"cancelled": True}
+    assert job["status"] == "done", job
+    assert job["result"] == {"cancelled": True, "stage": "cut"}
+    assert job["message"] == revoice_module.CANCELLED_BEFORE_RENDER
+    assert job["message"] == "Re-voice cancelled before the new video was written; the project is as it was."
+    assert _FakeVideoProcessor.captured is None, "the engine never ran"
+    _assert_nothing_written(pid, before)
+    assert not cuts[0]["dst"].parent.exists(), "the scratch directory is removed"
+
+
+def test_the_re_voice_hands_the_engine_the_jobs_cancel_flag(client, monkeypatch):
+    """The synthesis checkpoint is the engine's (tests/test_revoice_cancel.py):
+    the job has to hand it the flag."""
+    from services import jobs as jobs_module
+
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.cancel_check = None
+    pid = _video_with_transcript()
+    assert _revoice(client, pid)["status"] == "done"
+    assert _FakeVideoProcessor.cancel_check is jobs_module.cancel_requested_here
+
+
+def test_a_cancel_the_engine_saw_ends_the_job_as_cancelled_with_nothing_written(client, monkeypatch):
+    """The engine returns False with ``cancelled`` set when it stopped on the
+    flag (before the mux, by construction): the job ends cancelled at the
+    synthesis stage and writes nothing - no stamp, no file."""
+    from services import jobs as jobs_module
+    from services import revoice as revoice_module
+
+    class _CancelledMidSynthesis(_FakeVideoProcessor):
+        def _revoice_video(self, pm, source_video, output_path, progress=None, file_label="",
+                           video_duration=None, cancel_check=None):
+            jobs_module.cancel(jobs_module.current_job_id())
+            assert cancel_check() is True, "the flag the job handed over is the job's own"
+            self.cancelled = True
+            return False
+
+    monkeypatch.setattr(processing, "VideoProcessor", _CancelledMidSynthesis)
+    pid = _video_with_transcript()
+    before = _previous_revoice(pid)
+
+    job = _revoice(client, pid)
+    assert job["status"] == "done", job
+    assert job["result"] == {"cancelled": True, "stage": "synthesis"}
+    assert job["message"] == revoice_module.CANCELLED_BEFORE_RENDER
+    _assert_nothing_written(pid, before)
+
+
+def test_an_engine_failure_is_still_a_failure_when_nothing_was_cancelled(client, monkeypatch):
+    class _Fails(_FakeVideoProcessor):
+        def _revoice_video(self, *args, **kwargs):
+            return False
+
+    monkeypatch.setattr(processing, "VideoProcessor", _Fails)
+    pid = _video_with_transcript()
+    job = _revoice(client, pid)
+    assert job["status"] == "error" and job["error"] == "Re-voice failed"
+
+
+def test_a_cancel_during_the_translation_stops_before_the_engine(client, monkeypatch):
+    """The translation is one model call and is not interrupted; the job
+    stops right after it, with nothing written."""
+    from services import jobs as jobs_module
+    from services import revoice as revoice_module
+
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.captured = None
+
+    def fake_translate_notes(notes, target_language, ollama_url, ollama_model, on_progress=None):
+        jobs_module.cancel(jobs_module.current_job_id())
+        return ["Hola."]
+
+    monkeypatch.setattr(translator, "translate_notes", fake_translate_notes)
+    pid = _video_with_transcript()
+    before = _previous_revoice(pid)
+
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v", "language": "Spanish"})
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert job["result"] == {"cancelled": True, "stage": "translation"}
+    assert job["message"] == revoice_module.CANCELLED_BEFORE_RENDER
+    assert _FakeVideoProcessor.captured is None, "the engine never ran"
+    _assert_nothing_written(pid, before)
+
+
+def test_a_re_voice_cancelled_before_it_starts_never_calls_the_model(client, monkeypatch):
+    """Cancelled while it queued: the job stops before the translation's model
+    call (up to 60 s), not after it."""
+    from services import jobs as jobs_module
+    from services import revoice as revoice_module
+
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.captured = None
+    asked = []
+    monkeypatch.setattr(translator, "translate_notes", lambda notes, *a, **k: asked.append(notes) or ["Hola."])
+    pid = _video_with_transcript()
+
+    def work(progress):
+        # The cancel lands while the job waits for a worker: its flag is up before the work begins.
+        jobs_module.cancel(jobs_module.current_job_id())
+        return revoice_module.revoice_project(pid, "v", language="Spanish", progress=progress)
+
+    job_id = jobs_module.start("revoice", work, project_id=pid)
+    job = _wait_job(client, job_id)
+    assert job["status"] == "done", job
+    assert job["result"] == {"cancelled": True, "stage": "translation"}
+    assert asked == [], "the model was never asked"
     assert _FakeVideoProcessor.captured is None
-    assert "revoiced_video" not in store.get_project(pid)
+
+
+@pytest.mark.parametrize("speed", [0.49, 2.01])
+def test_a_re_voice_speed_outside_the_bound_is_refused(client, monkeypatch, speed):
+    """The same 0.5-2 bound as a deck render's speed and a sentence's own:
+    outside it the request is a 422 and no job exists."""
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    _FakeVideoProcessor.last = None
+    pid = _video_with_transcript()
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v", "speed": speed})
+    assert r.status_code == 422, r.text
+    assert "speed" in r.text
+    assert _FakeVideoProcessor.last is None, "no job was started"
+
+
+@pytest.mark.parametrize("speed", [0.5, 2.0])
+def test_a_re_voice_speed_at_the_bound_is_accepted(client, monkeypatch, speed):
+    monkeypatch.setattr(processing, "VideoProcessor", _FakeVideoProcessor)
+    pid = _video_with_transcript()
+    r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "v", "speed": speed})
+    assert r.status_code == 200, r.text
+    assert _wait_job(client, r.json()["job_id"])["status"] == "done"
+    assert _FakeVideoProcessor.last.speed == speed
 
 
 def test_an_edit_that_cuts_every_spoken_sentence_is_refused(client, monkeypatch):

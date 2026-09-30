@@ -6,13 +6,13 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | --- | --- | --- |
 | Project upload | 2 GB per file | `api/routers/projects.py:28` |
 | Accepted project files | `.pptx`, `.pdf`, `.mp4`, `.mov`, `.mkv`, `.avi`, `.webm`, `.m4v` | `services/projects.py:54-56` |
-| Jobs | 2 worker threads for the studio; 1 job per project at a time | `services/jobs.py:34`, `services/jobs.py:8-15` |
-| Job poll | every 1.2 s | `frontend/src/pages/ProjectDetail.tsx:197` |
+| Jobs | 2 worker threads for the studio; 1 job per project at a time | `services/jobs.py:47`, `services/jobs.py:8-15` |
+| Job poll | every 1.2 s; stopped after 3 failed attempts in a row, at once on a 404; a page with no job in flight asks for its project's job (or the running update) every 5 s | `frontend/src/lib/jobs.ts:17`, `frontend/src/lib/jobs.ts:21`, `frontend/src/lib/jobs.ts:19` |
 | Speaker notes | 20,000 characters per slide | `services/slides.py:53` |
-| Alt text | 2,000 characters | `api/schemas.py:343` |
+| Alt text | 2,000 characters | `api/schemas.py:345` |
 | Pause after slide | 0–30 s | `services/slides.py:54` |
 | Notes undo history | 20 steps per slide | `core/project_manager.py:288` |
-| Narration speed | 0.5–2 for a sentence's own speed and a deck render (the server refuses outside it); the Re-voice card's box offers 0.5–2, but the server does not check a re-voice's speed | `services/narration.py:91-92`, `api/schemas.py:288`, `api/schemas.py:323` |
+| Narration speed | 0.5–2 for a sentence's own speed, a deck render and a re-voice; the server refuses outside it | `services/narration.py:91-92`, `api/schemas.py:288`, `api/schemas.py:325` |
 | Sentence offset | ±300 s | `services/narration.py:86` |
 | Sentence voice id | 200 characters | `services/narration.py:93` |
 | Offsets in one save | 5,000 sentences (bound on abuse) | `services/narration.py:90` |
@@ -25,9 +25,9 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Watermark opacity | 0.1–1 | `services/studio_settings.py:75` |
 | Intro and outro card | 1–10 s; text 200 characters | `api/schemas.py:299`, `api/schemas.py:301`, `api/schemas.py:14` |
 | Preview render | 15 s on the card; the API takes 0–120 s | `frontend/src/lib/generateOptions.ts:37`, `api/schemas.py:317` |
-| GIF export | the first 30 s, 5 fps, 480 px wide | `services/processing.py:1694-1695` |
+| GIF export | the first 30 s, 5 fps, 480 px wide | `services/processing.py:1729-1730` |
 | Frame rate | 2 fps static, 24 fps with a transition | `core/video_creator.py:33-34` |
-| Chapter title from a slide's notes | 60 characters | `services/processing.py:1534` |
+| Chapter title from a slide's notes | 60 characters | `services/processing.py:1569` |
 | Edit ranges per track | 5,000 (bound on abuse) | `services/edit.py:116` |
 | Music clips per project | 200 | `services/edit.py:343` |
 | Music clip length | at least 0.1 s | `services/edit.py:346` |
@@ -45,8 +45,8 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Zoom | up to 200 px per second | `frontend/src/lib/edit.ts:42` |
 | Re-voice speed-up | up to +30 % to fit; tempo squeeze past 1.15× the window, up to 2× | `services/processing.py:358`, `services/processing.py:300-301` |
 | QA review pass | 20 slides, 12,000 characters of notes | `services/ai_slides.py:64-65` |
-| Q&A document | 1–50 questions, 10 by default | `api/schemas.py:444` |
-| Tone instruction | 2,000 characters; a tone name 40 | `api/schemas.py:402`, `api/schemas.py:401` |
+| Q&A document | 1–50 questions, 10 by default | `api/schemas.py:446` |
+| Tone instruction | 2,000 characters; a tone name 40 | `api/schemas.py:404`, `api/schemas.py:403` |
 | Ollama waits | 3 s probe; 120 s per slide; 180 s per QA pass; 60 s per translation request | `services/ai_slides.py:61-63`, `core/translator.py:83` |
 | Model-paced pacing | an answer under 80 % of the note's length falls back to the rules | `services/ai_slides.py:125` |
 | Password length | policy minimum 4–64 (default 12); never over 72 bytes | `api/passwords.py:24-25`, `api/passwords.py:43`, `api/passwords.py:23` |

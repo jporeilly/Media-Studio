@@ -1063,6 +1063,7 @@ class VideoProcessor:
         progress: Optional[ProgressCallback] = None,
         file_label: str = "",
         video_duration: Optional[float] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> bool:
         """Re-voice a video with sentence-level time alignment.
 
@@ -1091,6 +1092,17 @@ class VideoProcessor:
 
         Sentences whose synthesis failed are counted in ``self.failed_sentences``
         for the job to report.
+
+        ``cancel_check`` (the job's ``services.jobs.cancel_requested_here``)
+        is asked before the speaking-rate measurement, before every sentence
+        is synthesised and once more before the mux - the long part of a
+        re-voice is the synthesis, one voice-service round trip per sentence.
+        On a cancel this returns False with ``self.cancelled`` True, and it
+        has written nothing outside its scratch directory, which the
+        ``finally`` below removes: ``output_path`` and its narration track
+        are exactly as they were, a previous run's included. The mux itself
+        is one short ffmpeg run and is not interrupted; once it has started
+        the render completes.
         """
         from core.video_creator import (
             replace_video_audio, trim_leading_silence_segment, _level_opening,
@@ -1101,6 +1113,15 @@ class VideoProcessor:
         import subprocess as _sp
 
         _onset_profile = get_onset_profile(self.provider)
+
+        # Whether THIS run stopped on a cancel - the job tells a cancel from a
+        # failure by it, since both return False.
+        self.cancelled = False
+
+        def _cancelled() -> bool:
+            if cancel_check is not None and cancel_check():
+                self.cancelled = True
+            return self.cancelled
 
         tmp_dir = _job_scratch("revoice_")
 
@@ -1137,6 +1158,10 @@ class VideoProcessor:
                 actual_source = Path(pm.state.source_video_path)
             picture_seconds = pad_seconds(actual_source, video_duration)
             video_end = picture_seconds or 0.0
+
+            if _cancelled():
+                logger.info("Re-voice cancelled before synthesis")
+                return False
 
             tts_baseline = DEFAULT_BASELINE_RATE
             if not is_free:
@@ -1202,6 +1227,11 @@ class VideoProcessor:
             # two muted sentences.
             total_segments = len(spoken)
             for i, (seg, sec) in enumerate(spoken):
+                # Between sentences: the one place a long re-voice spends its
+                # time. Nothing has been written outside tmp_dir yet.
+                if _cancelled():
+                    logger.info("Re-voice cancelled after %d of %d sentences", done, total_segments)
+                    return False
                 done += 1
                 # Where this sentence is pinned and when the next one is due.
                 # One helper, shared with the timeline's audition plan, so the
@@ -1324,6 +1354,11 @@ class VideoProcessor:
                     "Re-voice: %d of %d sentences could not be synthesised",
                     failed_sentences, len(spoken),
                 )
+
+            # The last check: past here the output file is rewritten.
+            if _cancelled():
+                logger.info("Re-voice cancelled after synthesis, before the mux")
+                return False
 
             if not aligned_chunks:
                 logger.error("No aligned audio chunks")

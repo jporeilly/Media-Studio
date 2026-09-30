@@ -9,7 +9,8 @@ Accounts are deactivated, never deleted.
 | | `editor` | `admin` |
 | --- | --- | --- |
 | Import, open, edit, render and delete projects | their own | every project |
-| Read and cancel a job | the ones they started | any |
+| Read a job | the ones they started, any on their own projects, and the running update (which the Settings page follows) | any |
+| Cancel a job | the ones they started | any, the update included (it records no starter, so it is an administrator's alone) |
 | The music library: list, upload, delete | yes | yes |
 | Read the studio settings and the password rules | yes | yes |
 | Change the studio settings and the password rules | no | yes |

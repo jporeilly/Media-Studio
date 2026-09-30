@@ -33,9 +33,10 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| "A job is running for this project (*kind*). Wait for it to finish, then try again." | One job per project; a render, re-voice, transcription, previews or AI action holds it, perhaps one started in another tab or by someone else, which this page does not show | Wait; for an AI job, **Cancel** on the Slides card ([Jobs](../guides/jobs.md)) |
+| "A job is running for this project (*kind*). Wait for it to finish, then try again." | One job per project; a render, re-voice, transcription, previews or AI action holds it, perhaps one started in another tab or by someone else (the project page shows it within five seconds) | Wait; for an AI job, **Cancel** on the Slides card, for a re-voice **Cancel** on the Re-voice card, if you started it or are an administrator ([Jobs](../guides/jobs.md)) |
 | "A job holds the project — cuts wait for it." on the Timeline | The same | The same; reads (Play, download) still work |
-| A job's progress stops moving and the cards still say a job is running | The backend restarted; jobs live in memory | Reload the page, then start the job again |
+| "The job stopped when the server restarted. Start it again." on a card | The backend restarted while the job ran; jobs live in memory, so the work was lost | Start the job again; the cross dismisses the line |
+| "Could not reach the job (…), so the page stopped following it." on a card | Three polls in a row failed: "Failed to fetch" when the server could not be reached, usually because it is restarting; otherwise the error the server answered | For "Failed to fetch", nothing: when the server answers again the page follows the job again if it still runs, or shows the restart line if the restart lost it; if the server stays down, restart it. For a server error, the page tries once more, then leaves the line: reload the page, and look in `app.log` |
 | "Could not delete this project: *file*. Something is still using it" | A file in the project's directory is open elsewhere (Windows) | Close the video or the export and try again; nothing was half-removed |
 | "Every sentence is muted, so there would be no narration. Unmute at least one." | Every sentence of the transcript is muted | Unmute one |
 | "The edit removes every sentence that would be spoken, so there would be no narration. Keep at least one, or clear the edit." | The Timeline's edit cuts away every sentence that is not muted | Keep at least one, or clear the edit |
@@ -60,7 +61,7 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 | Play answers "*provider* returned no audio for this sentence" | The voice service did not answer within 30 s, or the voice id is not one of its voices | Try again, or pick a voice from the list |
 | The **Details** card's **Transcribed on** reads CPU on a machine with an NVIDIA GPU; "GPU transcription failed … retrying on CPU" in the log | The CUDA runtime wheels are not installed | Install `requirements-gpu.txt` into the app's Python and **Restart backend** ([Transcription](../ai/transcription.md)) |
 | N sentences "could not be synthesised in the last re-voice" | The voice service failed on those sentences, or their offset pins them past the end of the picture | Re-voice again; pull the offset back |
-| The re-voice ignored a translation | Ollama was not reachable: a failed translation keeps the original text and prints a warning on the backend's console (not in `app.log`) | Start Ollama and re-voice again ([Ollama](../ai/ollama.md)) |
+| The re-voice ignored a translation | Ollama was not reachable: a failed translation keeps the original text and logs "Translation failed for a note: …" (or "Translation HTTP *status* for a note") in `app.log` | Start Ollama and re-voice again ([Ollama](../ai/ollama.md)) |
 | A translated re-voice ignored the offsets and mutes | A translation is spread across the video by length; per-sentence adjustments do not apply to it | Expected; keep the original language to use them |
 
 ## The AI assistant
@@ -98,7 +99,7 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 
 ## Where to look
 
-- `data\logs\app.log`: the server's log at DEBUG level, rotating. A few engine modules (the re-voice translation, the Q&A document, Analyze) and the updater print their warnings and errors only on the backend's console, not into this file
+- `data\logs\app.log`: the server's log, rotating: everything the app's own loggers write, from DEBUG up, and every other module's warnings and errors, each line once: the re-voice translation, the Q&A document, Analyze and the updater among them, the server's own (the traceback of a request that failed with a 500), and a failed job's traceback
 - The **Audit log** card: who changed what
 - `GET /api/system/health`: a liveness check that needs no sign-in
 - `pytest` from a source checkout: the installation itself

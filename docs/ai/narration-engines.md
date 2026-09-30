@@ -16,7 +16,7 @@ Voice ids look like `af_heart`: the first letter is the accent (`a` American Eng
 
 ## Speed
 
-Every speed box (the Generate card, the Re-voice card, a sentence's own) offers 0.5 to 2, and 1 is the natural rate. The server refuses a deck render's speed or a sentence's own outside that range; it does not check a re-voice's. Edge turns it into a rate percentage; Kokoro takes it as a factor. In a re-voice the job's speed is a floor: a sentence is never spoken slower than it, may be raised by up to 30 % to fit its window, and a sentence with its own speed is spoken at exactly that rate.
+Every speed box (the Generate card, the Re-voice card, a sentence's own) offers 0.5 to 2, and 1 is the natural rate. The server refuses a speed outside that range, for a deck render, a re-voice and a sentence's own alike. Edge turns it into a rate percentage; Kokoro takes it as a factor. In a re-voice the job's speed is a floor: a sentence is never spoken slower than it, may be raised by up to 30 % to fit its window, and a sentence with its own speed is spoken at exactly that rate.
 
 ## Defaults and overrides
 

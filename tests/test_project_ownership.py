@@ -31,6 +31,7 @@ PASSWORD = "Owner-pass-12345"
 # the 403 under test. A GET takes None.
 PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
     ("GET", "/api/projects/{pid}"): None,
+    ("GET", "/api/projects/{pid}/job"): None,
     ("DELETE", "/api/projects/{pid}"): None,
     ("GET", "/api/projects/{pid}/video"): None,
     ("GET", "/api/projects/{pid}/revoiced-video"): None,

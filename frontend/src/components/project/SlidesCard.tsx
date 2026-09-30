@@ -1,7 +1,7 @@
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { type UseMutationResult, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Ban, Check, ChevronDown, ChevronRight, ClipboardCheck, Download, Gauge, Image as ImageIcon, Languages,
+  Check, ChevronDown, ChevronRight, ClipboardCheck, Download, Gauge, Image as ImageIcon, Languages,
   MessageCircleQuestion, MessageSquareText, Pencil, RotateCcw, Save, Sparkles, Timer, Undo2, Wand2, X,
 } from "lucide-react";
 import { api, errorMessage } from "../../api/client";
@@ -61,7 +61,7 @@ import {
 } from "../../lib/slides";
 import { useVoices, withCurrent } from "../../lib/studioSettings";
 import { Button, Card, ErrorBox, Field, Input, Modal, Select, Spinner, Textarea } from "../ui";
-import { JobProgress, type Job } from "./JobProgress";
+import { CancelJobButton, JobNotice, JobProgress, type Job } from "./JobProgress";
 
 interface Props {
   projectId: string;
@@ -73,6 +73,11 @@ interface Props {
   job?: Job;
   /** True while any job of this project is queued or running: the server refuses writes then (409), so the editor is read-only. */
   jobActive: boolean;
+  /** Whether this viewer may cancel `job`: its starter or an administrator (lib/jobs.ts mayCancelJob); anyone else sees it read-only. */
+  mayCancel: boolean;
+  /** The line the page keeps for this card once its job is over (a job lost in a restart), with its dismiss. */
+  jobNotice?: string | null;
+  onDismissJobNotice?: () => void;
   onJobStarted: (jobId: string) => void;
   /** A translation finished with a voice for its language: the Generate card's voice follows. */
   onVoiceSuggested?: (voiceId: string) => void;
@@ -107,7 +112,10 @@ function firstError(mutations: UseMutationResult<any, unknown, any, unknown>[]):
  * a Cancel, a per-slide AI Enhance that loads a proposal into the editor with Revert, and the QA review's
  * issues under the notes with a Fix per criterion.
  */
-export function SlidesCard({ projectId, projectName, projectKind, provider, job, jobActive, onJobStarted, onVoiceSuggested, qaDoc }: Props) {
+export function SlidesCard({
+  projectId, projectName, projectKind, provider, job, jobActive, mayCancel, jobNotice, onDismissJobNotice, onJobStarted,
+  onVoiceSuggested, qaDoc,
+}: Props) {
   const qc = useQueryClient();
   const query = useSlides(projectId);
   const voices = useVoices(provider);
@@ -327,6 +335,12 @@ export function SlidesCard({ projectId, projectName, projectKind, provider, job,
   const cancel = useMutation({
     mutationFn: (jobId: string) => api.post<Job>(`/api/jobs/${jobId}/cancel`, {}),
   });
+  // A Cancel that failed says so under its own job, not under the next one.
+  const resetCancel = cancel.reset;
+  const currentJobId = job?.id;
+  useEffect(() => {
+    resetCancel();
+  }, [currentJobId, resetCancel]);
 
   const revert = (index: number) => {
     const original = aiOriginal[index];
@@ -425,6 +439,7 @@ export function SlidesCard({ projectId, projectName, projectKind, provider, job,
       {query.isLoading && <Spinner label="Loading the slides…" />}
       {query.isError && <ErrorBox message={errorMessage(query.error)} />}
       {problem && <ErrorBox message={problem} />}
+      {jobNotice && onDismissJobNotice && <JobNotice text={jobNotice} onDismiss={onDismissJobNotice} />}
       {rendering && (
         <div style={{ marginBottom: 14 }}>
           <JobProgress job={job} />
@@ -433,18 +448,10 @@ export function SlidesCard({ projectId, projectName, projectKind, provider, job,
       {aiRunning && job && (
         <div style={{ marginBottom: 14, display: "grid", gap: 10 }}>
           <JobProgress job={job} />
-          {canCancel(job.kind) && (
-            <div>
-              <Button
-                size="sm"
-                icon={<Ban size={14} />}
-                disabled={cancel.isPending || !!job.cancel_requested}
-                title={cancelTitle(job.kind)}
-                onClick={() => cancel.mutate(job.id)}
-              >
-                {job.cancel_requested ? "Cancelling…" : "Cancel"}
-              </Button>
-            </div>
+          {/* Read-only for a viewer who did not start the job (the page follows the project's job whoever
+              started it); the cancel route's rule, lib/jobs.ts mayCancelJob. */}
+          {canCancel(job.kind) && mayCancel && (
+            <CancelJobButton job={job} pending={cancel.isPending} title={cancelTitle(job.kind)} onCancel={() => cancel.mutate(job.id)} />
           )}
         </div>
       )}

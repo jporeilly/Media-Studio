@@ -17,18 +17,31 @@ under one lock, so two requests cannot both pass the check and both start.
 Cancellation is cooperative: ``cancel(job_id)`` only raises a flag. A job whose
 work loops over slides (the ``ai-*`` kinds, ``services.ai_slides``) checks
 ``cancel_requested_here()`` between slides, stops, and finishes as ``done`` with
-``result["cancelled"] = True`` and what it had written so far kept; a job that
-never looks at the flag simply runs to its end. A job remembers the user who
-started it (``user_id``): only that user, or an admin, may cancel it.
+``result["cancelled"] = True`` and what it had written so far kept; a re-voice
+(``services.revoice``) checks it between its stages and between the sentences
+it synthesises, and finishes the same way; a job that never looks at the flag
+simply runs to its end. A cancelled job's closing message is the line it
+reported at 1.0, when it reported one (the re-voice says what it left on
+disk), else "Cancelled". A job remembers the user who started it
+(``user_id``): only that user, or an admin, may cancel it.
+
+**Jobs live in memory**, so a restart of the process forgets every one of
+them: a page still polling an id then gets ``None`` here (404 at the route)
+and has to treat the job as lost. ``active_for`` is how a page that did not
+start a project's job - after a reload, in another tab, or when someone else
+started it - finds the one to follow.
 """
 
 import threading
-import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
+
+from utils.logger import get_logger
+
+logger = get_logger("JOBS")
 
 # Transcription is heavy (CPU/GPU); keep concurrency low.
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="job")
@@ -43,6 +56,16 @@ _current = threading.local()
 ProgressFn = Callable[[float, str], None]
 
 ACTIVE_STATUSES = ("queued", "running")
+
+
+class KindBusy(RuntimeError):
+    """A job of this kind that belongs to no project - an update - is already
+    queued or running (``job`` is its state); ``start_single`` refuses a
+    second. The route answers it with 409."""
+
+    def __init__(self, job: dict):
+        self.job = job
+        super().__init__(f"A job of this kind ({job['kind']}) is already running. Wait for it to finish.")
 
 
 class ProjectBusy(RuntimeError):
@@ -105,10 +128,13 @@ def submit(kind: str, work: Callable[[ProgressFn], Any], project_id: str | None 
                 job.progress = 1.0
                 job.status = "done"
                 # A job that stopped on its cancel flag says so (its result
-                # carries the tally); one that summed itself up at 1.0 keeps
-                # that line ("Enhance: 38 of 40 slides, 2 failed"); else "Complete".
+                # carries the tally) - in its own words when it summed itself
+                # up at 1.0 (the re-voice says what it left on disk), else
+                # "Cancelled"; one that ran to its end and summed itself up
+                # keeps that line ("Enhance: 38 of 40 slides, 2 failed");
+                # else "Complete".
                 if isinstance(result, dict) and result.get("cancelled"):
-                    job.message = "Cancelled"
+                    job.message = final["message"] or "Cancelled"
                 else:
                     job.message = final["message"] or "Complete"
         except Exception as exc:  # noqa: BLE001 — surface any failure to the poller
@@ -116,7 +142,10 @@ def submit(kind: str, work: Callable[[ProgressFn], Any], project_id: str | None 
                 job.status = "error"
                 job.error = str(exc)
                 job.message = str(exc)
-            traceback.print_exc()
+            # The traceback into app.log (and the console) once, through the
+            # app's logger - ``traceback.print_exc()`` reached the console only,
+            # so a failed job left nothing in the file a support request reads.
+            logger.exception("Job %s (%s) failed: %s", job.id, job.kind, exc)
         finally:
             _current.job_id = None  # the worker thread is reused by the next job
 
@@ -195,3 +224,30 @@ def start(
                 return active["id"]
             raise ProjectBusy(active)
         return submit(kind, work, project_id=project_id, user_id=user_id)
+
+
+def active_of_kind(kind: str) -> dict | None:
+    """The queued or running job of ``kind`` that belongs to NO project (the
+    newest, if several) - the update - as a dict, or None. How the Settings
+    page finds an update already in flight after a reload."""
+    with _lock:
+        active = [
+            job for job in _jobs.values()
+            if job.kind == kind and job.project_id is None and job.status in ACTIVE_STATUSES
+        ]
+        if not active:
+            return None
+        return max(active, key=lambda job: job.created_at).to_dict()
+
+
+def start_single(kind: str, work: Callable[[ProgressFn], Any], user_id: str | None = None) -> str:
+    """Submit a job that belongs to no project, one of its kind at a time:
+    the check and the submit are one step under the start lock, and a second
+    while one is queued or running raises ``KindBusy``. An update is such a
+    job - two ``git pull``/``pip install`` runs at once over the same install
+    are never wanted."""
+    with _start_lock:
+        active = active_of_kind(kind)
+        if active:
+            raise KindBusy(active)
+        return submit(kind, work, user_id=user_id)

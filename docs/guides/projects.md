@@ -18,7 +18,7 @@ In the Owner column a project imported before the app had owners shows **unassig
 
 **Delete.** Press the bin at the end of the row. The confirmation, **Delete project**, says "Delete *name*? This removes its files." The delete removes the project's whole directory: the source file, the transcript, every render and every export. There is no undo and no recycle bin.
 
-**A project busy with a job.** Each project runs one job at a time: a transcription, a render, a re-voice, the slide previews or an AI action. While one is queued or running, every other job and every change to the project's content is refused with "A job is running for this project (*kind*). Wait for it to finish, then try again." Reads still work: you can look at the slides, play a sentence, download the transcript. Deleting the project is not held by the job (on Windows it fails while the job has a file open). See [Jobs](jobs.md).
+**A project busy with a job.** Each project runs one job at a time: a transcription, a render, a re-voice, the slide previews or an AI action. While one is queued or running, every other job, every change to the project's content and deleting the project are refused with "A job is running for this project (*kind*). Wait for it to finish, then try again."; the Projects page shows that message in its status line. Reads still work: you can look at the slides, play a sentence, download the transcript. See [Jobs](jobs.md).
 
 ## Under the hood
 
@@ -26,7 +26,7 @@ A project is a directory, `data\projects\<id>\`, named by a twelve-character hex
 
 Ownership is decided in one place. An administrator may see and act on every project; an editor only on projects they imported; a project with no owner (imported before ownership existed) is treated as administrator-owned. The list you see is already filtered, and a direct request for someone else's project is refused.
 
-A delete first renames the directory out of the id space, then removes it. On Windows a directory cannot be renamed while a file inside it is open, so a project whose video is open in another program is refused whole, nothing half-removed, with the names of the files in use; close them and try again.
+A delete is refused with a 409 while a job holds the project, before anything is touched: the job has its own copy of the project and would go on writing into a directory being removed. Otherwise it first renames the directory out of the id space, then removes it. On Windows a directory cannot be renamed while a file inside it is open, so a project whose video is open in another program is refused whole, nothing half-removed, with the names of the files in use; close them and try again.
 
 The import and the delete are recorded in the audit log as `project.import` and `project.delete`.
 

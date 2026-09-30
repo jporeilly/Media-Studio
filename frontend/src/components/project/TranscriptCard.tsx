@@ -8,9 +8,11 @@ import {
   MAX_OFFSET_SECONDS,
   MAX_SPEED,
   MIN_SPEED,
+  adjustedSentences,
   draftKey,
   numberChange,
   previewUrl,
+  retranscribeEffects,
   transcriptDownloadUrl,
   voiceChange,
   words,
@@ -20,8 +22,9 @@ import {
   type SegmentOverride,
 } from "../../lib/narration";
 import { narrationPlanKey } from "../../lib/timeline";
+import { useConfirm } from "../ConfirmDialog";
 import { Button, Card, ErrorBox, Input, Select, Tabs, Textarea } from "../ui";
-import { JobProgress, type Job } from "./JobProgress";
+import { JobNotice, JobProgress, type Job } from "./JobProgress";
 import { NarrationTimeline, type SavedSentence } from "./NarrationTimeline";
 
 interface Voice {
@@ -41,8 +44,13 @@ interface Props {
   transcribing: boolean;
   transcribeError: string | null | undefined;
   transcribePending: boolean;
+  /** Starts a transcription: the first one (**Transcribe audio**) or, once there is a transcript, another
+   *  (**Transcribe again**, after the confirm dialog) - the same route and the same Whisper model either way. */
   onTranscribe: () => void;
   otherJobNotice: string | null;
+  /** The line the page keeps for this card once its job is over (a transcription lost in a restart). */
+  jobNotice?: string | null;
+  onDismissJobNotice?: () => void;
   /** The Re-voice card's selection: what a Play, or the timeline, auditions as. */
   provider: string;
   voiceId: string;
@@ -89,10 +97,11 @@ function RowField({ label, children }: { label: string; children: ReactNode }) {
  */
 export function TranscriptCard({
   projectId, segments, setSegments, job, jobActive, transcribing, transcribeError,
-  transcribePending, onTranscribe, otherJobNotice, provider, voiceId, speed,
+  transcribePending, onTranscribe, otherJobNotice, jobNotice, onDismissJobNotice, provider, voiceId, speed,
   voiceOptions, studioDefaultVoice,
 }: Props) {
   const qc = useQueryClient();
+  const { confirm, dialog } = useConfirm();
   // The Timeline is the view a video opens on. It is the visual reference -
   // the filmstrip, the waveform and every sentence in its place - and the
   // owner's first reaction to opening on the List (a column of offset boxes
@@ -335,6 +344,36 @@ export function TranscriptCard({
     </>
   );
 
+  // Transcribing again replaces the sentences, so the app's own dialog says exactly what goes and what stays
+  // before anything is sent (lib/narration.ts retranscribeEffects; services/transcription.py is the rule).
+  const transcribeAgain = async () => {
+    const { loses, keeps } = retranscribeEffects(adjustedSentences(segments));
+    const ok = await confirm({
+      title: "Transcribe again",
+      confirmLabel: "Transcribe again",
+      danger: true,
+      message: (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div>
+            Whisper transcribes the recording again, with the studio's Whisper model, and replaces the whole
+            transcript. The audio is extracted from the video again: the Timeline and its cuts are measured
+            against it, so this also brings it back if it went missing.
+          </div>
+          <div>
+            <strong>Lost</strong>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 20 }}>{loses.map((line) => <li key={line}>{line}</li>)}</ul>
+          </div>
+          <div>
+            <strong>Kept</strong>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 20 }}>{keeps.map((line) => <li key={line}>{line}</li>)}</ul>
+          </div>
+        </div>
+      ),
+    });
+    if (ok) onTranscribe();
+  };
+  const notice = jobNotice && onDismissJobNotice ? <JobNotice text={jobNotice} onDismiss={onDismissJobNotice} /> : null;
+
   if (transcribing) {
     return (
       <Card title="Transcript" actions={hasTranscript ? downloadActions(true) : undefined} style={{ marginTop: 16 }}>
@@ -348,6 +387,7 @@ export function TranscriptCard({
     return (
       <Card title="Transcript" style={{ marginTop: 16 }}>
         {transcribeError && <ErrorBox message={transcribeError} />}
+        {notice}
         <div style={{ display: "grid", gap: 12, justifyItems: "start" }}>
           <div style={{ color: "var(--muted)" }}>No transcript yet. Transcribe the audio to get an editable transcript.</div>
           {otherJobNotice && <div className="os-muted os-small">{otherJobNotice}</div>}
@@ -360,8 +400,29 @@ export function TranscriptCard({
   }
 
   return (
-    <Card title="Transcript" actions={downloadActions(false)} style={{ marginTop: 16 }}>
+    <Card
+      title="Transcript"
+      actions={
+        <>
+          {downloadActions(false)}
+          {/* The first transcription's own button, kept once there is a transcript: a new transcription is
+              also the only way to rebuild a lost audio.wav. Waits for any job, as the first one does. */}
+          <Button
+            size="sm"
+            icon={<Wand2 size={14} />}
+            disabled={transcribePending || jobActive}
+            title={jobActive ? otherJobNotice ?? undefined : "Transcribe the recording again with the studio's Whisper model. Asks first: it replaces the transcript."}
+            onClick={() => void transcribeAgain()}
+          >
+            Transcribe again
+          </Button>
+        </>
+      }
+      style={{ marginTop: 16 }}
+    >
+      {dialog}
       {transcribeError && <ErrorBox message={transcribeError} />}
+      {notice}
 
       {/* Two views over the SAME sentences. The list is where they are edited;
           the timeline is where the result is seen and heard. */}
