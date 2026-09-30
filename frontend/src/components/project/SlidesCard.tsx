@@ -49,10 +49,12 @@ import {
   parsePause,
   pauseText,
   renderHint,
+  revealDelta,
   slideLabel,
   slidesQueryKey,
   slidesSubtitle,
   stepFromKey,
+  visibleEdges,
   useSlides,
   type Drafts,
   type Slide,
@@ -141,6 +143,8 @@ export function SlidesCard({
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const handledJob = useRef<string | null>(null);
+  const railRef = useRef<HTMLDivElement>(null);
+  const lastShown = useRef<number | undefined>(undefined);
 
   const payload = query.data;
   const slides = payload?.slides ?? [];
@@ -200,6 +204,29 @@ export function SlidesCard({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [count, dialogOpen]);
+
+  // The selected thumbnail stays in view inside the rail: ← / → can step past the part that shows. Only the
+  // rail scrolls, so the page does not jump; a click lands on a thumbnail that already shows, so nothing moves.
+  // Not on the first load: the opening slide is a selection nobody made, and the page must not move by itself.
+  const shownIndex = slide?.index;
+  useEffect(() => {
+    const previous = lastShown.current;
+    lastShown.current = shownIndex;
+    if (previous === undefined || previous === shownIndex) return;
+    const rail = railRef.current;
+    const item = rail?.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (!rail || !item) return;
+    // Against the part of the rail on screen: before the page scrolls, the sticky rail runs past the window.
+    const view = { top: 0, left: 0, bottom: window.innerHeight, right: window.innerWidth };
+    const shown = visibleEdges(rail.getBoundingClientRect(), view);
+    if (!shown) return;
+    const { dx, dy } = revealDelta(shown, item.getBoundingClientRect());
+    if (dx || dy) rail.scrollBy({ left: dx, top: dy });
+    // At the end of its own scroll the rail cannot bring the last slides up while its bottom is still below
+    // the window: the page moves the rest of the way (and only then).
+    const rest = revealDelta(view, item.getBoundingClientRect()).dy;
+    if (rest) window.scrollBy({ top: rest });
+  }, [shownIndex]);
 
   // An AI job that ended - done, or stopped on an error with what it had written kept - leaves its summary
   // on the card (the page drops a done job right after); a job that rewrote notes makes every draft and
@@ -565,7 +592,7 @@ export function SlidesCard({
 
       {payload && slide && (
         <div className="os-slides">
-          <div className="os-slide-rail" role="listbox" aria-label="Slides">
+          <div className="os-slide-rail" role="listbox" aria-label="Slides" ref={railRef}>
             {slides.map((s) => {
               const dirtyRail = isDirty(s, drafts);
               const current = s.index === slide.index;

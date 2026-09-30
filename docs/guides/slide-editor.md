@@ -26,7 +26,7 @@ Above the rail sits the AI bar, which [The AI assistant](ai-assistant.md) descri
 
 **Export the deck.** **Export .pptx with notes** downloads a copy of the deck with every slide's notes replaced by the edited ones. Decks only.
 
-**Keys.** ← and → change slide whenever the focus is not in a box and no dialog is open; Ctrl+S in the notes box saves.
+**Keys.** ← and → change slide whenever the focus is not in a box and no dialog is open, and the slide list scrolls to keep the selected slide in view; Ctrl+S in the notes box saves.
 
 ## Under the hood
 

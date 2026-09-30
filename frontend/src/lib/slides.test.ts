@@ -19,9 +19,11 @@ import {
   parsePause,
   pauseText,
   renderHint,
+  revealDelta,
   slideLabel,
   slidesSubtitle,
   stepFromKey,
+  visibleEdges,
   type Slide,
 } from "./slides";
 
@@ -160,5 +162,57 @@ describe("isSlidesPayload", () => {
     expect(isSlidesPayload("<!doctype html>")).toBe(false);
     expect(isSlidesPayload({ slides: [] })).toBe(false);
     expect(isSlidesPayload(null)).toBe(false);
+  });
+});
+
+describe("revealDelta", () => {
+  // A vertical rail 100..500 (the sticky thumbnail list) and a horizontal strip 0..600 (the narrow layout).
+  const rail = { top: 100, bottom: 500, left: 0, right: 188 };
+  const strip = { top: 0, bottom: 120, left: 0, right: 600 };
+
+  it("leaves an item that already shows where it is", () => {
+    expect(revealDelta(rail, { top: 200, bottom: 300, left: 0, right: 188 })).toEqual({ dx: 0, dy: 0 });
+    expect(revealDelta(rail, { top: 100, bottom: 500, left: 0, right: 188 })).toEqual({ dx: 0, dy: 0 });
+  });
+
+  it("scrolls down just far enough for an item below the list (the → key past the last visible slide)", () => {
+    expect(revealDelta(rail, { top: 460, bottom: 580, left: 0, right: 188 })).toEqual({ dx: 0, dy: 80 });
+  });
+
+  it("scrolls up just far enough for an item above the list (the ← key)", () => {
+    expect(revealDelta(rail, { top: 40, bottom: 160, left: 0, right: 188 })).toEqual({ dx: 0, dy: -60 });
+  });
+
+  it("lines an item bigger than the list up with its start", () => {
+    expect(revealDelta(rail, { top: 150, bottom: 700, left: 0, right: 188 })).toEqual({ dx: 0, dy: 50 });
+    expect(revealDelta(rail, { top: 50, bottom: 700, left: 0, right: 188 })).toEqual({ dx: 0, dy: -50 });
+  });
+
+  it("scrolls sideways in the horizontal strip", () => {
+    expect(revealDelta(strip, { top: 0, bottom: 110, left: 560, right: 692 })).toEqual({ dx: 92, dy: 0 });
+    expect(revealDelta(strip, { top: 0, bottom: 110, left: -100, right: 32 })).toEqual({ dx: -100, dy: 0 });
+  });
+});
+
+describe("visibleEdges", () => {
+  const view = { top: 0, bottom: 900, left: 0, right: 1440 };
+
+  it("clips a rail that runs past the bottom of the window (the page not scrolled yet)", () => {
+    expect(visibleEdges({ top: 441, bottom: 1253, left: 290, right: 478 }, view)).toEqual({ top: 441, bottom: 900, left: 290, right: 478 });
+  });
+
+  it("leaves a rail that is fully on screen as it is", () => {
+    const rail = { top: 64, bottom: 876, left: 290, right: 478 };
+    expect(visibleEdges(rail, view)).toEqual(rail);
+  });
+
+  it("is null when none of the rail is on screen", () => {
+    expect(visibleEdges({ top: 950, bottom: 1500, left: 290, right: 478 }, view)).toBeNull();
+    expect(visibleEdges({ top: -600, bottom: -10, left: 290, right: 478 }, view)).toBeNull();
+  });
+
+  it("with revealDelta, brings slide 6 of the unscrolled page back above the window's edge", () => {
+    const shown = visibleEdges({ top: 441, bottom: 1253, left: 290, right: 478 }, view)!;
+    expect(revealDelta(shown, { top: 1101, bottom: 1226, left: 296, right: 472 })).toEqual({ dx: 0, dy: 326 });
   });
 });

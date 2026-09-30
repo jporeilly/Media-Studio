@@ -170,6 +170,39 @@ export function clampIndex(index: number, count: number): number {
   return Math.min(Math.max(Math.trunc(index), 0), count - 1);
 }
 
+/** A box's edges in viewport pixels, as `getBoundingClientRect()` reports them. */
+export interface Edges {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+/** How far to scroll a list so an item inside it is fully visible, by the least movement: positive scrolls
+ *  down / right, 0 when the item already shows. An item bigger than the list lines up with its start.
+ *  Only the list scrolls (unlike `scrollIntoView`, which would also move the page past the sticky rail). */
+export function revealDelta(list: Edges, item: Edges): { dx: number; dy: number } {
+  const along = (start: number, end: number, lo: number, hi: number) => {
+    if (lo < start) return lo - start;
+    if (hi > end) return Math.min(hi - end, lo - start);
+    return 0;
+  };
+  return { dx: along(list.left, list.right, item.left, item.right), dy: along(list.top, list.bottom, item.top, item.bottom) };
+}
+
+/** The part of a box that is inside the window, or null when none of it is. Before the page scrolls, the
+ *  sticky rail starts low and runs past the window's bottom edge; revealing against its whole box would
+ *  leave the selected thumbnail below the window. */
+export function visibleEdges(box: Edges, view: Edges): Edges | null {
+  const clipped = {
+    top: Math.max(box.top, view.top),
+    bottom: Math.min(box.bottom, view.bottom),
+    left: Math.max(box.left, view.left),
+    right: Math.min(box.right, view.right),
+  };
+  return clipped.bottom > clipped.top && clipped.right > clipped.left ? clipped : null;
+}
+
 /** The pause field's text as the PATCH value: blank is the default (null), else 0 to 30 seconds. */
 export function parsePause(text: string): { ok: true; value: number | null } | { ok: false; message: string } {
   const trimmed = text.trim();
