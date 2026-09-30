@@ -12,6 +12,7 @@ Uses SSML-style markers:
 from typing import List, Optional, Callable
 import re
 import logging
+from core.ollama_client import request_body
 
 logger = logging.getLogger("mediastudio.PACING")
 
@@ -150,7 +151,7 @@ def ai_pacing(notes: List[str], ollama_url: str, ollama_model: str,
         try:
             resp = requests.post(
                 f"{ollama_url.rstrip('/')}/api/generate",
-                json={"model": ollama_model, "prompt": prompt, "stream": False},
+                json=request_body(ollama_model, prompt=prompt),
                 timeout=20,
             )
             if resp.status_code == 200:

@@ -349,7 +349,7 @@ def test_vision_is_usable_only_for_a_vision_model_over_real_renders(client):
     config._config["ollama_model"] = "llama3.1:8b"
     usable, reason = ai_slides.vision_for_project(pid)
     assert usable is False and reason.startswith("llama3.1:8b is not a vision model")
-    for name in ("gemma3:12b-it-qat", "llava:7b", "moondream:1.8b", "llama3.2-vision:11b", "qwen2.5vl:7b", "minicpm-v", "bakllava"):
+    for name in ("gemma4:12b", "gemma3:12b-it-qat", "llava:7b", "moondream:1.8b", "llama3.2-vision:11b", "qwen2.5vl:7b", "minicpm-v", "bakllava"):
         assert ai_slides.vision_capable(name), name
     assert not ai_slides.vision_capable("mistral") and not ai_slides.vision_capable("")
 

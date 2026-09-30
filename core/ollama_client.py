@@ -184,6 +184,7 @@ def recommend_num_ctx(model: str, base_url: str = DEFAULT_URL) -> dict:
 
 MODEL_CATALOG = [
     # All-Rounder
+    {"name": "gemma4:12b", "category": "All-Rounder", "vram_gb": 8, "params": "12B", "quality": 4, "speed": 4, "notes": "Studio default; vision capable, thinking switched off"},
     {"name": "gemma3:27b", "category": "All-Rounder", "vram_gb": 18, "params": "27B", "quality": 5, "speed": 3, "notes": "Excellent all-round, vision capable"},
     {"name": "gemma3:12b", "category": "All-Rounder", "vram_gb": 8, "params": "12B", "quality": 4, "speed": 4, "notes": "Great balance of quality and speed"},
     {"name": "gemma3:4b", "category": "All-Rounder", "vram_gb": 3, "params": "4B", "quality": 3, "speed": 5, "notes": "Fast, good for low-end hardware"},
@@ -196,6 +197,7 @@ MODEL_CATALOG = [
     {"name": "phi4:14b", "category": "All-Rounder", "vram_gb": 9, "params": "14B", "quality": 4, "speed": 4, "notes": "Microsoft, strong reasoning"},
 
     # Vision (multimodal) — important for slide image analysis
+    {"name": "gemma4:12b", "category": "Vision", "vram_gb": 8, "params": "12B", "quality": 4, "speed": 4, "notes": "Vision capable, the studio default"},
     {"name": "gemma3:27b", "category": "Vision", "vram_gb": 18, "params": "27B", "quality": 5, "speed": 3, "notes": "Image understanding + text"},
     {"name": "gemma3:12b", "category": "Vision", "vram_gb": 8, "params": "12B", "quality": 4, "speed": 4, "notes": "Vision capable, good balance"},
     {"name": "gemma3:4b", "category": "Vision", "vram_gb": 3, "params": "4B", "quality": 3, "speed": 5, "notes": "Lightweight vision model"},
@@ -212,6 +214,7 @@ MODEL_CATALOG = [
 
     # Chat / Conversational
     {"name": "llama3.1:8b", "category": "Chat", "vram_gb": 5, "params": "8B", "quality": 4, "speed": 4, "notes": "Natural conversational style"},
+    {"name": "gemma4:12b", "category": "Chat", "vram_gb": 8, "params": "12B", "quality": 4, "speed": 4, "notes": "Chat with vision"},
     {"name": "gemma3:12b", "category": "Chat", "vram_gb": 8, "params": "12B", "quality": 4, "speed": 4, "notes": "Excellent chat with vision"},
     {"name": "command-r:35b", "category": "Chat", "vram_gb": 22, "params": "35B", "quality": 5, "speed": 3, "notes": "Cohere, built for RAG and chat"},
 ]
@@ -258,6 +261,17 @@ def recommend_models(gpu_total_mb: int = 0) -> dict:
     return categories
 
 
+def request_body(model: str, **fields) -> dict:
+    """The JSON body of one Ollama request, non-streaming unless ``stream`` is given.
+
+    Thinking is switched off: a thinking model (gemma4 thinks by default) otherwise
+    reasons before it answers, which measured 16 s against 1.4 s for one rewritten
+    sentence and made it ignore "one sentence" for a list of options. Models that
+    cannot think accept the flag and ignore it.
+    """
+    return {"model": model, "stream": False, "think": False, **fields}
+
+
 def _encode_image(image_path: str) -> Optional[str]:
     """Read an image file and return its base64 encoding, or None on failure."""
     try:
@@ -284,12 +298,7 @@ def generate(
                 and sent to vision-capable models (e.g. llava, llama3.2-vision).
                 Non-vision models will ignore them gracefully.
     """
-    body = {
-        "model": model,
-        "prompt": prompt,
-        "system": system,
-        "stream": False,
-    }
+    body = request_body(model, prompt=prompt, system=system)
     if images:
         encoded = [b64 for path in images if (b64 := _encode_image(path))]
         if encoded:
@@ -315,12 +324,7 @@ def generate_stream(
     timeout: float = 120.0,
 ) -> Generator[str, None, None]:
     """Generate a completion with streaming — yields text chunks."""
-    payload = json.dumps({
-        "model": model,
-        "prompt": prompt,
-        "system": system,
-        "stream": True,
-    }).encode()
+    payload = json.dumps(request_body(model, prompt=prompt, system=system, stream=True)).encode()
 
     req = urllib.request.Request(
         f"{base_url}/api/generate",
@@ -353,11 +357,7 @@ def chat(
         model: Ollama model name.
         system: System prompt.
     """
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "system", "content": system}] + messages,
-        "stream": False,
-    }).encode()
+    payload = json.dumps(request_body(model, messages=[{"role": "system", "content": system}] + messages)).encode()
 
     req = urllib.request.Request(
         f"{base_url}/api/chat",
@@ -378,11 +378,7 @@ def chat_stream(
     timeout: float = 120.0,
 ) -> Generator[str, None, None]:
     """Send a multi-turn chat with streaming — yields text chunks."""
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "system", "content": system}] + messages,
-        "stream": True,
-    }).encode()
+    payload = json.dumps(request_body(model, messages=[{"role": "system", "content": system}] + messages, stream=True)).encode()
 
     req = urllib.request.Request(
         f"{base_url}/api/chat",

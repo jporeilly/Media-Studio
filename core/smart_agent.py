@@ -18,6 +18,7 @@ from typing import Optional, Callable, List, Dict
 import json
 import time
 import logging
+from core.ollama_client import request_body
 
 logger = logging.getLogger("mediastudio.AGENT")
 
@@ -295,7 +296,7 @@ class SmartAgent:
         try:
             resp = requests.post(
                 f"{self.ollama_url.rstrip('/')}/api/generate",
-                json={"model": self.ollama_model, "prompt": prompt, "stream": False},
+                json=request_body(self.ollama_model, prompt=prompt),
                 timeout=30,
             )
             if resp.status_code == 200:
@@ -428,7 +429,7 @@ class SmartAgent:
                 )
                 resp = requests.post(
                     f"{self.ollama_url.rstrip('/')}/api/generate",
-                    json={"model": self.ollama_model, "prompt": prompt, "stream": False},
+                    json=request_body(self.ollama_model, prompt=prompt),
                     timeout=30,
                 )
                 if resp.status_code == 200:

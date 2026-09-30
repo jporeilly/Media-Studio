@@ -275,7 +275,7 @@ DEFAULT_CONFIG = {
     "output_folder": str(APP_DIR / "assets" / "finished"),
     "last_used_folder": "",
     "ollama_url": "http://localhost:11434",
-    "ollama_model": "gemma3:12b",
+    "ollama_model": "gemma4:12b",
     "ollama_system_prompt": "",
     "ollama_enabled": True,
     "translation_language": "",

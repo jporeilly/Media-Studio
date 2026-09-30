@@ -28,7 +28,8 @@ repository); running the app from a source checkout in
 - **Ollama** (optional): translating the narration when re-voicing a video, and the whole
   AI assistant on the slide editor (writing, reviewing, adapting, translating and pacing
   speaker notes, the deck analysis and the Q&A document), expect a local Ollama at
-  `http://localhost:11434` with the studio's model pulled (`gemma3:12b` unless changed).
+  `http://localhost:11434` with the studio's model pulled (`gemma4:12b` on a fresh install:
+  `ollama pull gemma4:12b`). gemma4 needs a recent Ollama; it was tested on 0.34.4.
 - **Git** (optional): only needed to update the app from inside Settings — see
   [Updating](#updating).
 

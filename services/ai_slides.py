@@ -72,8 +72,8 @@ NO_ISSUE = frozenset({"none", "no issues", "n/a", "-", "ok", "good", "no issue",
 NO_ISSUE_TEXT = "None"
 
 # The model families that see images: the engine catalogue's Vision entries
-# (gemma3, llava, moondream) and the other vision models Ollama ships. A
-# configured "gemma3:12b-it-qat" counts by its family.
+# (gemma4, gemma3, llava, moondream) and the other vision models Ollama ships.
+# A configured "gemma3:12b-it-qat" counts by its family.
 VISION_FAMILIES = frozenset(
     entry["name"].split(":", 1)[0] for entry in ollama_client.MODEL_CATALOG if entry["category"] == "Vision"
 ) | {"llama3.2-vision", "qwen2.5vl", "qwen2-vl", "minicpm-v", "llava-llama3", "bakllava"}
@@ -183,7 +183,7 @@ def vision_for_project(pid: str) -> tuple[bool, str | None]:
     name = model()
     if not vision_capable(name):
         return False, (
-            f"{name} is not a vision model (vision models: gemma3, llava, moondream, llama3.2-vision, "
+            f"{name} is not a vision model (vision models: gemma4, gemma3, llava, moondream, llama3.2-vision, "
             "qwen2.5vl, minicpm-v)"
         )
     record = slides.project_record(pid)
