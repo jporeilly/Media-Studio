@@ -267,6 +267,12 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             resolution=tuple(preset["resolution"]),
             speed=body.speed,
             video_bitrate=preset["video_bitrate"],
+            # The rest of the preset's encode (Q1); a preview keeps the
+            # profile and the audio bitrate and swaps the x264 preset for
+            # ``ultrafast`` inside the processor.
+            x264_preset=preset["x264_preset"],
+            h264_profile=preset["profile"],
+            audio_bitrate=preset["audio_bitrate"],
             intro_text=body.intro_text,
             intro_subtitle=body.intro_subtitle,
             intro_duration=body.intro_duration,

@@ -25,9 +25,9 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Watermark opacity | 0.1–1 | `services/studio_settings.py:75` |
 | Intro and outro card | 1–10 s; text 200 characters | `api/schemas.py:299`, `api/schemas.py:301`, `api/schemas.py:14` |
 | Preview render | 15 s on the card; the API takes 0–120 s | `frontend/src/lib/generateOptions.ts:37`, `api/schemas.py:317` |
-| GIF export | the first 30 s, 5 fps, 480 px wide | `services/processing.py:1729-1730` |
+| GIF export | the first 30 s, 5 fps, 480 px wide | `services/processing.py:1770-1771` |
 | Frame rate | 2 fps static, 24 fps with a transition | `core/video_creator.py:33-34` |
-| Chapter title from a slide's notes | 60 characters | `services/processing.py:1569` |
+| Chapter title from a slide's notes | 60 characters | `services/processing.py:1610` |
 | Edit ranges per track | 5,000 (bound on abuse) | `services/edit.py:116` |
 | Music clips per project | 200 | `services/edit.py:343` |
 | Music clip length | at least 0.1 s | `services/edit.py:346` |
@@ -43,7 +43,7 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Nudge | 0.05 s; 0.25 s with Shift | `frontend/src/components/project/NarrationTimeline.tsx:196-197` |
 | Snapping | within 8 px | `frontend/src/components/project/NarrationTimeline.tsx:194` |
 | Zoom | up to 200 px per second | `frontend/src/lib/edit.ts:42` |
-| Re-voice speed-up | up to +30 % to fit; tempo squeeze past 1.15× the window, up to 2× | `services/processing.py:358`, `services/processing.py:300-301` |
+| Re-voice speed-up | up to +30 % to fit; tempo squeeze past 1.15× the window, up to 2× | `services/processing.py:370`, `services/processing.py:312-313` |
 | QA review pass | 20 slides, 12,000 characters of notes | `services/ai_slides.py:64-65` |
 | Q&A document | 1–50 questions, 10 by default | `api/schemas.py:446` |
 | Tone instruction | 2,000 characters; a tone name 40 | `api/schemas.py:404`, `api/schemas.py:403` |

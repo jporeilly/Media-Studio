@@ -17,6 +17,7 @@ from api.schemas import GenerateRequest
 from services import file_item as file_item_module
 from services import processing
 from services import projects as store
+from services.output_presets import get_preset
 from utils.config import config
 from utils.helpers import get_output_filename
 
@@ -46,11 +47,17 @@ class _FakeVideoProcessor:
 
     last = None
 
-    def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", provider="", **kwargs):
+    def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", provider="",
+                 x264_preset=None, h264_profile=None, audio_bitrate=None, **kwargs):
+        # None, not the processor's defaults: a route that stopped passing
+        # the preset's encode must show as None, never as a lucky default.
         self.voice_id = voice_id
         self.resolution = resolution
         self.speed = speed
         self.video_bitrate = video_bitrate
+        self.x264_preset = x264_preset
+        self.h264_profile = h264_profile
+        self.audio_bitrate = audio_bitrate
         self.provider = provider
         self.kwargs = kwargs
         self.preview_seconds = None
@@ -146,6 +153,11 @@ def test_generate_on_deck_renders_and_saves_output_video(client, monkeypatch):
     # provider named the job runs on the configured one (Edge by default).
     assert _FakeVideoProcessor.last.resolution == (1920, 1080)
     assert _FakeVideoProcessor.last.video_bitrate == "10M"
+    # ... and the rest of its encode (Q1), threaded the way the bitrate is.
+    vimeo = get_preset("vimeo_1080p")
+    assert (_FakeVideoProcessor.last.x264_preset, _FakeVideoProcessor.last.h264_profile,
+            _FakeVideoProcessor.last.audio_bitrate) == (vimeo["x264_preset"], vimeo["profile"], vimeo["audio_bitrate"])
+    assert (vimeo["x264_preset"], vimeo["profile"], vimeo["audio_bitrate"]) == ("medium", "high", "192k")
     assert _FakeVideoProcessor.last.speed == 1.1
     assert _FakeVideoProcessor.last.provider == "edge_tts"
     assert _FakeVideoProcessor.last.voice_id == "en-US-AriaNeural"

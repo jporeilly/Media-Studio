@@ -304,6 +304,8 @@ def revoice_project(pid, voice_id, speed=1.0, language=None, progress=None, prov
             _report(0.08, f"Cutting the picture ({count} range{'' if count == 1 else 's'} kept)…")
             # The bitrate is the output preset's ("" = the codec default); in
             # E1 and E2 that is the default preset; choosing one is a later phase.
+            # The encode itself is the final render's - x264 medium, H.264
+            # High, 4:2:0 (``video_creator.REVOICE_X264_PRESET``, Q1).
             cut = video_creator.cut_picture(
                 source_video, applied.video, render_source,
                 video_bitrate=get_preset(DEFAULT_PRESET_ID)["video_bitrate"],

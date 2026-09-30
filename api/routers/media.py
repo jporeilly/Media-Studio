@@ -28,7 +28,8 @@ def voices(provider: str | None = None, user: dict = Depends(current_user)):
 
 @router.get("/output-presets")
 def output_presets(user: dict = Depends(current_user)):
-    """The selectable output presets (resolution + bitrate per delivery target)."""
+    """The selectable output presets (the encode per delivery target: resolution,
+    video bitrate, x264 preset, H.264 profile and audio bitrate)."""
     return {"presets": list_presets()}
 
 

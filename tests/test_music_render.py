@@ -63,9 +63,9 @@ TAIL = {"path": B, "at": 200.0, "in": 30.0, "out": 300.0, "gain": 0.15, "fade_in
 
 def test_one_clip_is_the_bed_itself_and_the_voice_is_mixed_under_duration_first():
     assert video_creator.music_filtergraph([BED], [A]) == (
-        "[1:a]atrim=start=0.000:end=290.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,"
+        "[1:a]atrim=start=0.000:end=290.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000,"
         "volume=0.150,afade=t=in:st=0.000:d=1.000,afade=t=out:st=288.000:d=2.000,adelay=12500|12500[m1];"
-        "[0:a]pan=stereo|FL=FL+FC|FR=FR+FC[v];"
+        "[0:a]pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000[v];"
         "[v][m1]amix=inputs=2:duration=first:normalize=0[a]"
     )
 
@@ -74,12 +74,12 @@ def test_the_measured_graph_two_clips_over_two_files():
     """The spec's own case, as measured on the bundled 7.1: 8.25 s over a
     336 s output with the video copied, its length preserved."""
     assert video_creator.music_filtergraph([BED, TAIL], [A, B]) == (
-        "[1:a]atrim=start=0.000:end=290.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,"
+        "[1:a]atrim=start=0.000:end=290.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000,"
         "volume=0.150,afade=t=in:st=0.000:d=1.000,afade=t=out:st=288.000:d=2.000,adelay=12500|12500[m1];"
-        "[2:a]atrim=start=30.000:end=300.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,"
+        "[2:a]atrim=start=30.000:end=300.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000,"
         "volume=0.150,afade=t=in:st=0.000:d=1.000,afade=t=out:st=268.000:d=2.000,adelay=200000|200000[m2];"
         "[m1][m2]amix=inputs=2:normalize=0:dropout_transition=0[bed];"
-        "[0:a]pan=stereo|FL=FL+FC|FR=FR+FC[v];"
+        "[0:a]pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000[v];"
         "[v][bed]amix=inputs=2:duration=first:normalize=0[a]"
     )
 
@@ -93,13 +93,13 @@ def test_three_clips_over_two_files_reuse_the_input_and_omit_zero_fades():
     again = {"path": A, "at": 100.0, "in": 0.0, "out": 4.5, "gain": 0.15, "fade_in": 1.0, "fade_out": 0}
     graph = video_creator.music_filtergraph([first, second, again], [A, B])
     assert graph == (
-        "[1:a]atrim=start=0.100:end=10.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,volume=1.000,adelay=0|0[m1];"
-        "[2:a]atrim=start=5.000:end=15.500,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,volume=0.500,"
+        "[1:a]atrim=start=0.100:end=10.000,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000,volume=1.000,adelay=0|0[m1];"
+        "[2:a]atrim=start=5.000:end=15.500,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000,volume=0.500,"
         "afade=t=out:st=10.250:d=0.250,adelay=1235|1235[m2];"
-        "[1:a]atrim=start=0.000:end=4.500,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,volume=0.150,"
+        "[1:a]atrim=start=0.000:end=4.500,asetpts=PTS-STARTPTS,pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000,volume=0.150,"
         "afade=t=in:st=0.000:d=1.000,adelay=100000|100000[m3];"
         "[m1][m2][m3]amix=inputs=3:normalize=0:dropout_transition=0[bed];"
-        "[0:a]pan=stereo|FL=FL+FC|FR=FR+FC[v];"
+        "[0:a]pan=stereo|FL=FL+FC|FR=FR+FC,aresample=48000[v];"
         "[v][bed]amix=inputs=2:duration=first:normalize=0[a]"
     )
     assert graph.count("normalize=0") == 2, "both mixes: amix otherwise divides by the input count"
@@ -118,12 +118,15 @@ def test_the_up_mix_is_unity_for_the_voice_and_for_every_clip():
     assert "aformat" not in graph, "the -3.01 dB up-mix is gone from the graph entirely"
     assert graph.count(video_creator.UPMIX_STEREO) == 3, "both clips and the voice"
     assert video_creator.UPMIX_STEREO == "pan=stereo|FL=FL+FC|FR=FR+FC"
-    # The order inside a clip's chain: the slice, re-timed, up-mixed, then
-    # levelled, faded and placed - the level and the fades act on stereo.
+    # The order inside a clip's chain: the slice, re-timed, up-mixed and
+    # resampled to 48 kHz (Q1), then levelled, faded and placed - the level
+    # and the fades act on stereo.
     for chain in graph.split(";")[:2]:
         steps = [step.split("=")[0].split("]")[-1] for step in chain.split(",")]
-        assert steps == ["atrim", "asetpts", "pan", "volume", "afade", "afade", "adelay"], chain
-    assert graph.split(";")[-2] == f"[0:a]{video_creator.UPMIX_STEREO}[v]", "the voice, up-mixed and nothing else"
+        assert steps == ["atrim", "asetpts", "pan", "aresample", "volume", "afade", "afade", "adelay"], chain
+    assert graph.split(";")[-2] == f"[0:a]{video_creator.UPMIX_STEREO},{video_creator.RESAMPLE_48K}[v]", (
+        "the voice, up-mixed and resampled, and nothing else"
+    )
 
 
 def test_a_graph_for_no_clips_is_refused_rather_than_written():
@@ -196,7 +199,9 @@ def test_the_mix_uses_the_resolved_ffmpeg_the_graph_and_copies_the_video(tmp_pat
     maps = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-map"]
     assert maps == ["0:v", "[a]"]
     assert cmd[cmd.index("-c:v") + 1] == "copy", "the picture is not touched"
-    assert cmd[cmd.index("-c:a") + 1] == "aac" and cmd[cmd.index("-b:a") + 1] == "192k"
+    # The re-voice's ONE audio bitrate, the mux's too (Q1).
+    assert cmd[cmd.index("-c:a") + 1] == "aac"
+    assert cmd[cmd.index("-b:a") + 1] == video_creator.REVOICE_AUDIO_BITRATE == "192k"
     assert cmd[cmd.index("-movflags") + 1] == "+faststart"
     part = out.with_suffix(".music.part.mp4")
     assert cmd[-1] == str(part) and part.name == "clip_revoiced.music.part.mp4", "written aside, then published"

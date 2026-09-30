@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.file_item import FileItem, VIDEO_SUFFIXES
 from services.narration import MAX_OFFSET_SECONDS, MAX_SPEED, MIN_SPEED
+from services.output_presets import PREVIEW_X264_PRESET
 from services.slides import slide_export_lock
 from services.styles import TEMP_DIR
 from utils.config import config, CONFIG_DIR
@@ -157,8 +158,19 @@ def narration_path_for(video_path: Path) -> Path:
     ffmpeg's ``apad`` inside the audio swap, so the standalone file ends where
     the last sentence's audio does. It is also voice only - background music,
     when configured, is mixed in during the swap and not into this file.
+
+    It is an MP3 at :data:`NARRATION_MP3_BITRATE`, exported from the master
+    on its own (the mux reads a lossless WAV of the same master).
     """
     return Path(video_path).with_name(f"{Path(video_path).stem}_narration.mp3")
+
+
+# The standalone narration track's MP3 bitrate (Q1). pydub's default MP3 is
+# 32 kbit/s for the TTS engines' 24 kHz mono - the old track, and the old
+# master the mux read, were that. 160k is the most an MP3 can carry at 24 kHz
+# (MPEG-2 Layer III; LAME clamps 192k down to it), so the track is not capped
+# below its source.
+NARRATION_MP3_BITRATE = "160k"
 
 
 def _split_sentences(text: str) -> list:
@@ -465,6 +477,9 @@ class VideoProcessor:
         similarity_boost: float = 0.75,
         style: float = 0.0,
         video_bitrate: str = "",
+        x264_preset: str = "medium",
+        h264_profile: str = "high",
+        audio_bitrate: str = "",
         provider: str = "",
         slide_transition: Optional[str] = None,
         transition_duration: Optional[float] = None,
@@ -492,6 +507,12 @@ class VideoProcessor:
         self.similarity_boost = similarity_boost
         self.style = style
         self.video_bitrate = video_bitrate
+        # The rest of the output preset's encode (Q1), passed through to the
+        # VideoCreator exactly as the video bitrate is; a preview swaps the
+        # x264 preset for PREVIEW_X264_PRESET (see ``_build_video``).
+        self.x264_preset = x264_preset
+        self.h264_profile = h264_profile
+        self.audio_bitrate = audio_bitrate
         # The TTS provider this run uses, fixed at construction: a job carries
         # its own choice (the request's, or the studio default at request time)
         # rather than reading config.tts_provider mid-run, so an admin changing
@@ -1366,8 +1387,14 @@ class VideoProcessor:
 
             master = assemble_master(aligned_chunks, is_free)
 
-            master_path = tmp_dir / "master_revoice.mp3"
-            master.export(str(master_path), format="mp3")
+            # Lossless (Q1): pydub's default MP3 is 32 kbit/s for the TTS's
+            # 24 kHz mono, and the mux re-encoded that - the narration went
+            # through a 32 kbit/s intermediate before its AAC. A WAV leaves
+            # the mux's AAC the only encode after the TTS's own. Nothing
+            # downstream needs an MP3 but the standalone narration track,
+            # which is exported from ``master`` on its own below.
+            master_path = tmp_dir / "master_revoice.wav"
+            master.export(str(master_path), format="wav")
             logger.info("Sentence-aligned master audio: %.1fs (%d segments)", len(master) / 1000, len(aligned_chunks))
 
             bg_music = None
@@ -1410,9 +1437,13 @@ class VideoProcessor:
                 target = narration_path_for(output_path)
                 partial = target.with_name(target.name + ".part")
                 try:
-                    shutil.copy2(master_path, partial)
+                    # An MP3 at a bitrate that does not cap it (the mux had
+                    # the WAV), made in the scratch directory and copied in.
+                    track = tmp_dir / "narration_track.mp3"
+                    master.export(str(track), format="mp3", bitrate=NARRATION_MP3_BITRATE)
+                    shutil.copy2(track, partial)
                     partial.replace(target)
-                except OSError as exc:
+                except Exception as exc:  # noqa: BLE001 - the video is made; the track is a convenience
                     partial.unlink(missing_ok=True)
                     target.unlink(missing_ok=True)
                     logger.warning("Could not keep the narration track: %s", exc)
@@ -1534,11 +1565,21 @@ class VideoProcessor:
                 progress(0.85 + 0.14 * frame / total,
                          f"{file_label}: Encoding {pct}%{eta}")
 
+            # The preview is a look at the opening seconds, not a deliverable:
+            # it keeps the fast ``ultrafast`` encode, so pressing Preview stays
+            # quick while a final render pays for ``medium``. Everything else
+            # is the final render's - the profile, 4:2:0, faststart and the
+            # audio bitrate - so it plays everywhere the final render does.
+            x264_preset = PREVIEW_X264_PRESET if preview_seconds > 0 else self.x264_preset
+
             # This job's own options (pinned at construction), never the
             # shared config: two jobs render at once.
             creator = VideoCreator(
                 resolution=self.resolution,
                 video_bitrate=self.video_bitrate,
+                x264_preset=x264_preset,
+                h264_profile=self.h264_profile,
+                audio_bitrate=self.audio_bitrate,
                 fps=fps,
                 # This run's provider, not the studio default: the clips were
                 # synthesised by self.provider and must be trimmed as such.

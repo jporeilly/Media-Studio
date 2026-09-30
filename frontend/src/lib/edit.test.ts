@@ -437,14 +437,15 @@ describe("the Render button", () => {
   const CORPUS: Keep = [[0, 47.3], [52.3, 341.008]];
 
   it("estimates from the decode reach, never the output length, rounded up to five", () => {
-    // 341 s of reach measured 16.1 s on the bundled ffmpeg; 5 + 341 × 0.05 = 22.05, up to 25.
-    expect(renderEstimate(CORPUS, 341.008)).toBe(25);
+    // 341 s of reach measured 32.1 s and 34.1 s at x264 medium on the bundled
+    // ffmpeg (Q1; 16.1 s at ultrafast); 5 + 341 × 0.1 = 39.1, up to 40.
+    expect(renderEstimate(CORPUS, 341.008)).toBe(40);
     // A short keep at the head decodes only that far, and one at the tail
     // only from its start (E1's input seek moves the origin)...
     expect(renderEstimate([[0, 10]], 341.008)).toBe(10);
     expect(renderEstimate([[331, 341.008]], 341.008)).toBe(10);
     // ... while a head plus a tail decodes everything between them.
-    expect(renderEstimate([[0, 5], [336, 341.008]], 341.008)).toBe(25);
+    expect(renderEstimate([[0, 5], [336, 341.008]], 341.008)).toBe(40);
   });
 
   it("estimates 0 when nothing is cut — the picture step is skipped", () => {
@@ -456,17 +457,17 @@ describe("the Render button", () => {
   it("says what the render will do, per track, in one sentence", () => {
     // Cut together (the two lists equal): E2's line, word for word.
     expect(renderSummary(CORPUS, CORPUS, 341.008)).toBe(
-      "Cuts 1 range (5.0 s removed) and re-voices — about 25 s, plus any sentences the audition has not fetched yet.",
+      "Cuts 1 range (5.0 s removed) and re-voices — about 40 s, plus any sentences the audition has not fetched yet.",
     );
     expect(renderSummary([[2, 6], [7.5, 11]], [[2, 6], [7.5, 11]], 12)).toBe(
       "Cuts 3 ranges (4.5 s removed) and re-voices — about 10 s, plus any sentences the audition has not fetched yet.",
     );
     // The picture alone (the narration locked, or whole).
     expect(renderSummary(CORPUS, null, 341.008)).toBe(
-      "Cuts 1 range of the picture (5.0 s removed) and re-voices — about 25 s, plus any sentences the audition has not fetched yet.",
+      "Cuts 1 range of the picture (5.0 s removed) and re-voices — about 40 s, plus any sentences the audition has not fetched yet.",
     );
     expect(renderSummary(CORPUS, [[0, 341.008]], 341.008)).toBe(
-      "Cuts 1 range of the picture (5.0 s removed) and re-voices — about 25 s, plus any sentences the audition has not fetched yet.",
+      "Cuts 1 range of the picture (5.0 s removed) and re-voices — about 40 s, plus any sentences the audition has not fetched yet.",
     );
     // Both, differently: the narration's TIMELINE is shortened; which sentences go is the plan's to say.
     expect(renderSummary(KEEP, [[0, 6.4], [7, 12]], 12)).toBe(

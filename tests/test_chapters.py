@@ -111,8 +111,9 @@ def test_embed_chapters_writes_the_metadata_file_remuxes_in_place_and_cleans_up(
     temp = tmp_path / "clip_revoiced_chaptered.mp4"
     assert call["cmd"] == [
         "ffmpeg-test", "-i", str(video), "-i", str(tmp_path / "clip_revoiced.chapters.txt"),
-        "-map_metadata", "1", "-map_chapters", "1", "-codec", "copy", "-y", str(temp),
-    ], "the resolved ffmpeg, the deck path's own remux, the chapters mapped explicitly"
+        "-map_metadata", "1", "-map_chapters", "1", "-codec", "copy", "-movflags", "+faststart",
+        "-y", str(temp),
+    ], "the resolved ffmpeg, the deck path's own remux, the chapters mapped explicitly, the index kept in front"
     assert call["kwargs"]["timeout"] == 60 and call["kwargs"]["capture_output"] is True
     assert call["meta"] == (
         ";FFMETADATA1\n"

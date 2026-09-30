@@ -33,6 +33,58 @@ logger = get_logger("VIDEO")
 STATIC_FPS = 2
 TRANSITION_FPS = 24
 
+# ── the H.264 every render writes (Q1) ────────────────────────────────────────
+#
+# Two parameters go with every libx264 encode the app runs - the deck render,
+# its preview and the re-voice's picture cut:
+#
+# - ``-profile:v <profile>``: a CEILING on the tools x264 may use, never a
+#   label. The stream is flagged by what the x264 preset actually uses:
+#   ``medium`` (8×8 transform, CABAC, B-frames) writes High; ``ultrafast``
+#   uses none of them and writes Constrained Baseline whatever profile is
+#   asked for (measured on the bundled 7.1 and on 8.0.1).
+# - ``-pix_fmt yuv420p``: 4:2:0, the only chroma layout a High-profile decoder
+#   (a browser, a phone, a TV) is required to take. moviepy 2.1.2 appends its
+#   own ``-pix_fmt yuva420p`` AFTER these parameters and ffmpeg keeps the last
+#   one; libx264 has no yuva420p, so ffmpeg then picks yuv420p itself
+#   ("auto-selecting format 'yuv420p'", on the bundled 7.1 and on 8.0.1). Ours
+#   is passed all the same so the command says what the file is, and the file
+#   stays 4:2:0 if either side changes: ``tests/test_encode_settings.py`` reads
+#   the pixel format back from a real render.
+#
+# Plus ``-movflags +faststart`` on every MP4 the app hands a user: the index
+# (``moov``) goes in front of the media (``mdat``), so a web upload or the
+# page's player can start playing before the whole file has arrived.
+PIX_FMT_420 = ["-pix_fmt", "yuv420p"]
+FASTSTART = ["-movflags", "+faststart"]
+
+
+def h264_params(profile: str) -> List[str]:
+    """``-profile:v <profile> -pix_fmt yuv420p`` for a libx264 encode (see above)."""
+    return ["-profile:v", profile, *PIX_FMT_420]
+
+
+# The re-voice has no output preset of its own. Its picture cut - the picture
+# the re-voiced file carries, whenever the edit cuts it - is encoded like a final
+# deck render (x264 ``medium``, High, 4:2:0, and the source's frame rate: see
+# ``cut_picture``); its mux and its music pass give AAC ONE bitrate, named here
+# so the two cannot drift apart - 192k, what every output preset gives the deck
+# render too (``services.output_presets``).
+#
+# ... at 48 kHz stereo (:data:`RESAMPLE_48K`, :data:`UPMIX_STEREO`). The
+# narration arrives at the TTS engine's own rate, 24 kHz mono for Edge and
+# Kokoro alike, and at 24 kHz AAC-LC cannot carry 192k at all (6144 bits per
+# channel per frame is 144 kbit/s a channel, and ffmpeg's ``aac`` wrote about
+# 100 kbit/s of mono narration there whatever it was given). Resampled to
+# 48 kHz and up-mixed at unity, the same narration is given 192 kbit/s and
+# reads at or a little under it, lower over silence (measured: see
+# ``docs/porting/generation-options.md``, *As built — Q1*).
+REVOICE_X264_PRESET = "medium"
+REVOICE_H264_PROFILE = "high"
+REVOICE_AUDIO_BITRATE = "192k"
+AUDIO_SAMPLE_RATE = 48000
+RESAMPLE_48K = f"aresample={AUDIO_SAMPLE_RATE}"
+
 
 def fps_for_transition(slide_transition: str, transition_duration: float = 0.5) -> int:
     """The frame rate a render needs: ``TRANSITION_FPS`` when a transition will
@@ -117,6 +169,11 @@ def embed_chapters(video_path: Path, chapters: List[Tuple[int, int, str]]) -> bo
     chapters of its own (a Camtasia export, say) - measured on 8.0.1 and
     the bundled 7.1, 2026-09-24. The deck's input never has chapters, so
     for the deck path the explicit map is exactly the default it always got.
+
+    ``+faststart`` (:data:`FASTSTART`) as well: this remux is the LAST write
+    of every deck render with slide titles and of every re-voice with
+    markers, and a plain remux puts the index back at the end of the file,
+    undoing the render's own faststart (Q1).
     """
     from utils.config import FFMPEG_PATH
     if not chapters:
@@ -141,7 +198,7 @@ def embed_chapters(video_path: Path, chapters: List[Tuple[int, int, str]]) -> bo
         # metadata file EXPLICITLY, or a source that has its own would keep them.
         cmd = [
             FFMPEG_PATH, "-i", str(video_path), "-i", str(meta_path),
-            "-map_metadata", "1", "-map_chapters", "1", "-codec", "copy",
+            "-map_metadata", "1", "-map_chapters", "1", "-codec", "copy", *FASTSTART,
             "-y", str(temp_output),
         ]
         result = subprocess.run(
@@ -509,6 +566,17 @@ def _pad_filter(video_duration) -> Optional[str]:
     return None if seconds is None else f"apad=whole_dur={seconds:.3f}"
 
 
+def mux_audio_filter(video_duration) -> str:
+    """The mux's one audio chain: the narration up-mixed to stereo at UNITY
+    (:data:`UPMIX_STEREO`, the music graph's own ``pan`` - never ``-ac 2``,
+    whose power-preserving rematrix takes a mono voice 3.01 dB down),
+    resampled to 48 kHz (:data:`RESAMPLE_48K`: the TTS's 24 kHz cannot carry
+    the re-voice's bitrate), then padded to the picture's length when that is
+    known (:func:`_pad_filter`) and not padded at all when it is not."""
+    pad = _pad_filter(video_duration)
+    return ",".join([UPMIX_STEREO, RESAMPLE_48K] + ([pad] if pad else []))
+
+
 def _build_replace_audio_cmd(source_video, audio, temp_output, video_duration):
     """ffmpeg args to put ``audio`` onto ``source_video`` keeping the full video.
 
@@ -520,14 +588,24 @@ def _build_replace_audio_cmd(source_video, audio, temp_output, video_duration):
     than being cut to the shorter audio.
 
     **No argv this builds can run for ever.** The pad is emitted only for a
-    length that is known (:func:`_pad_filter`); with none, the command carries
-    no ``-af`` at all and the mux ends with the shorter stream - the original
-    video's tail is lost, which is a visible but FINITE cost, where the bare
-    ``apad`` this used to emit hung the whole job for its ten-minute timeout.
+    length that is known (:func:`_pad_filter`); with none, the command's
+    ``-af`` carries no ``apad`` at all and the mux ends with the shorter
+    stream - the original video's tail is lost, which is a visible but FINITE
+    cost, where the bare ``apad`` this used to emit hung the whole job for its
+    ten-minute timeout.
 
     ``FFMPEG_PATH`` from ``utils.config``, never the bare name (trap 3): the
     older call sites that spawn "ffmpeg" work only because that module
     prepends the binary's directory to PATH at import.
+
+    The picture is COPIED, never re-encoded (a re-voice with no cut keeps the
+    source's frames untouched; a cut picture was already encoded by
+    ``cut_picture``). The narration goes through :func:`mux_audio_filter` -
+    stereo at unity, 48 kHz, padded - and is given AAC at
+    :data:`REVOICE_AUDIO_BITRATE`, the music pass's own bitrate. (It used to
+    stay at the TTS's 24 kHz mono, where AAC wrote about 100 kbit/s whatever
+    it was given.) The file gets :data:`FASTSTART`, because with no music and
+    no markers this mux is the file the user downloads.
     """
     from utils.config import FFMPEG_PATH
 
@@ -536,7 +614,6 @@ def _build_replace_audio_cmd(source_video, audio, temp_output, video_duration):
         # here so that no argv this function returns can ever name a binary
         # the host may not have.
         raise RuntimeError(FFMPEG_MISSING)
-    pad = _pad_filter(video_duration)
     cmd = [
         FFMPEG_PATH,
         "-i", str(source_video),       # original video
@@ -544,11 +621,11 @@ def _build_replace_audio_cmd(source_video, audio, temp_output, video_duration):
         "-c:v", "copy",                 # keep video codec (no re-encode)
         "-map", "0:v:0",               # video from first input
         "-map", "1:a:0",               # audio from second input
-    ]
-    if pad:
-        cmd += ["-af", pad]             # pad narration with trailing silence
-    cmd += [
+        # stereo at unity, 48 kHz, then the trailing silence when the length is known
+        "-af", mux_audio_filter(video_duration),
         "-c:a", "aac",                  # re-encode padded audio for MP4
+        "-b:a", REVOICE_AUDIO_BITRATE,  # the re-voice's one audio bitrate
+        *FASTSTART,                     # the index in front of the media
         "-shortest",                    # bound to the (now longer-or-equal) video
         "-y",                           # overwrite
         str(temp_output),
@@ -610,8 +687,11 @@ def replace_video_audio(
             music_db = 20 * (music_volume / 1.0) - 20  # rough dB from 0-1
             music = music + music_db
             mixed = tts.overlay(music)
-            mixed_path = master_audio.parent / "mixed_audio.mp3"
-            mixed.export(str(mixed_path), format="mp3")
+            # WAV, not pydub's default MP3 (32 kbit/s for 24 kHz mono): the
+            # mux is the one lossy encode. (No caller passes music today -
+            # the re-voice's music is ``mix_music`` - so this is the belt.)
+            mixed_path = master_audio.parent / "mixed_audio.wav"
+            mixed.export(str(mixed_path), format="wav")
             audio_to_use = mixed_path
         else:
             audio_to_use = master_audio
@@ -693,9 +773,34 @@ def cut_timeout(keep) -> float:
     ``trim`` is a filter and runs after the decode, so the work is everything
     ffmpeg has to decode to get there (the input seek in ``cut_picture`` moves
     the start of that stretch up to the first kept range; nothing moves its
-    end). Measured rate about 2.8 s per minute of 1080p30, with headroom. Any
+    end). Measured rate at x264 ``medium`` (Q1): about 6 s per minute of
+    1080p30 reach on the bundled 7.1 (32.1 s and 34.1 s for the corpus's
+    341 s; it was about 2.8 s per minute at ``ultrafast``), so three seconds
+    a second is headroom of some thirty times; a 4K30 cut at ``medium`` ran
+    at 0.50 s per second of reach on the same i9, six times inside it. Any
     future filtergraph cut inherits this rule."""
     return 60 + 3 * (float(keep[-1][1]) - float(keep[0][0]))
+
+
+# ffmpeg's header line for a video stream carries its base frame rate as
+# "<n> tbr" ("30 tbr", "29.97 tbr", "1k tbr"): ffmpeg's own guess of the rate
+# the stream's timestamps are laid on, which is the stream's nominal rate for
+# a variable-rate recording too (a VFR clip reads "22.69 fps, 30 tbr").
+_TBR = re.compile(r"Stream #\d+:\d+\S*: Video: .*?(\d+(?:\.\d+)?)(k?) tbr")
+# Beyond this a "frame rate" is a container's time base, not a picture's.
+MAX_FRAME_RATE = 240.0
+
+
+def source_frame_rate(path) -> Optional[str]:
+    """The first video stream's base frame rate as ffmpeg prints it ("30",
+    "29.97"), or None when it cannot be told or is not a picture's rate
+    (above :data:`MAX_FRAME_RATE`). Read from ffmpeg's own header
+    (:func:`_ffmpeg_header`), never a prober, like every length the engine
+    reads."""
+    found = _TBR.search(_ffmpeg_header(path))
+    if not found or found.group(2):  # "1k tbr" and up: a time base, not a picture
+        return None
+    return found.group(1) if 0 < float(found.group(1)) <= MAX_FRAME_RATE else None
 
 
 def _stop(proc) -> None:
@@ -742,12 +847,33 @@ def cut_picture(
     at ``dst``. True when it is there; False (and a log line) on any failure,
     never an exception - the same contract as ``replace_video_audio``.
 
-    One ffmpeg run, re-encoding everything at ``libx264 -preset ultrafast``
-    (the generate path's own settings; ``video_bitrate`` is the output
-    preset's, "" for the codec default, as ``write_videofile`` takes it). A
-    stream copy is not an option: a cut lands on P-frames with no reference
-    picture, and the source's keyframes are two seconds apart, so snapping to
-    one can miss by more than a sentence.
+    One ffmpeg run, re-encoding everything at libx264
+    :data:`REVOICE_X264_PRESET` (``medium``), H.264
+    :data:`REVOICE_H264_PROFILE` (High) and 4:2:0 (:func:`h264_params`) -
+    the final deck render's own encode, because this picture is the one the
+    re-voiced file carries (Q1; it was ``ultrafast``, which x264 flags
+    Constrained Baseline). ``video_bitrate`` is the output preset's, "" for
+    the codec default, as ``write_videofile`` takes it. A stream copy is not
+    an option: a cut lands on P-frames with no reference picture, and the
+    source's keyframes are two seconds apart, so snapping to one can miss by
+    more than a sentence. A re-voice with NO cut never comes here: its mux
+    copies the source's picture untouched (``_build_replace_audio_cmd``).
+
+    **The encoder is told the source's frame rate** (``-x264-params
+    fps=<rate>``, :func:`source_frame_rate`), and nothing else about timing.
+    On the bundled 7.1, ``setpts`` leaves the graph's frame rate unknown and
+    ``concat`` hands on a 1/1000000 time base, so x264 took the stream for a
+    million frames a second and declared H.264 Level 6.2 for a 1080p30
+    picture - a level a player that checks it (a TV, a phone) may refuse.
+    (8.0.1 hands on the input's time base and declared the right level
+    already; the parameter changes nothing there.) Told the rate, it
+    declares the level the picture needs (4.0 for 1080p30, measured on the
+    bundled 7.1) at the same size and quality. ``-r`` would do that too, but
+    it forces a constant rate - duplicating and dropping frames of a
+    variable-rate recording - where x264's own ``fps`` changes no timestamp:
+    the graph's cadence is kept exactly (measured: the same frame count and
+    the same timestamps, constant-rate and variable-rate source alike). With
+    no rate to tell, nothing is passed and the cut is what it always was.
 
     **The work is sized by how far into the source ffmpeg has to DECODE, not
     by how much comes out.** ``trim`` is a filter: it runs after the decode,
@@ -802,13 +928,18 @@ def cut_picture(
     timeout = cut_timeout(keep)
     part = dst.with_suffix(".part.mp4")
     log = part.with_suffix(".log")
+    rate = source_frame_rate(source)
     cmd = [
         FFMPEG_PATH, "-hide_banner", "-nostats",
         "-ss", f"{origin:.3f}", "-i", str(source),
         "-filter_complex", cut_filtergraph(keep, origin),
         "-map", "[v]", "-an",
-        "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:v", "libx264", "-preset", REVOICE_X264_PRESET, *h264_params(REVOICE_H264_PROFILE),
     ]
+    if rate:
+        cmd += ["-x264-params", f"fps={rate}"]
+    else:
+        logger.warning("No frame rate for %s: the cut's H.264 level is x264's own guess", source.name)
     if video_bitrate:
         cmd += ["-b:v", video_bitrate]
     cmd += ["-y", str(part)]
@@ -884,7 +1015,8 @@ def music_filtergraph(clips, inputs) -> str:
     file used by several clips is decoded from one input.
 
     Per clip, in order: the slice (``atrim``, re-timed from zero), the
-    up-mix to stereo (:data:`UPMIX_STEREO`), the level, a linear fade in and
+    up-mix to stereo (:data:`UPMIX_STEREO`), 48 kHz (:data:`RESAMPLE_48K`),
+    the level, a linear fade in and
     out (``afade``'s default ``tri`` curve - the same ramp the audition's
     ``GainNode`` plays, and a fade of 0 is left out), then the placement
     (``adelay`` in whole milliseconds, one delay per stereo channel). The
@@ -910,6 +1042,13 @@ def music_filtergraph(clips, inputs) -> str:
     also what the browser does (Web Audio up-mixes mono as L = R = M), so
     E4b's audition and the render agree exactly (decision 4).
 
+    **Every input is resampled to 48 kHz before it is mixed** (Q1): ``amix``
+    runs at one rate, and left to itself the graph settled on the voice's -
+    the TTS's 24 kHz - so the music was cut down to a 12 kHz band and the
+    AAC, at 24 kHz, could not carry the bitrate it was given. The voice
+    arrives at 48 kHz stereo from the mux already; it is resampled here too
+    so the graph never depends on what came before it.
+
     Raises ``ValueError`` for an empty clip list: there is no graph for no
     music, and one written anyway names a ``[m1]`` that does not exist.
     """
@@ -925,6 +1064,7 @@ def music_filtergraph(clips, inputs) -> str:
             f"[{index}:a]atrim=start={start:.3f}:end={end:.3f}",
             "asetpts=PTS-STARTPTS",
             UPMIX_STEREO,
+            RESAMPLE_48K,
             f"volume={float(clip['gain']):.3f}",
         ]
         if fade_in > 0:
@@ -940,7 +1080,7 @@ def music_filtergraph(clips, inputs) -> str:
         bed = "[bed]"
     else:
         bed = "[m1]"
-    chains.append(f"[0:a]{UPMIX_STEREO}[v]")
+    chains.append(f"[0:a]{UPMIX_STEREO},{RESAMPLE_48K}[v]")
     chains.append(f"[v]{bed}amix=inputs=2:duration=first:normalize=0[a]")
     return ";".join(chains)
 
@@ -966,8 +1106,10 @@ def mix_music(
 
     One ffmpeg run over the muxed output, ``FFMPEG_PATH`` (never the bare
     name, trap 3): the video stream COPIED (trap 29 - a re-encode here would
-    be the cut's 16 s again for nothing) and the audio re-encoded once as
-    192 kbit/s AAC, ``+faststart`` for the page's player. ``cancel_check``
+    be the cut's half-minute again for nothing) and the audio re-encoded once,
+    at 48 kHz stereo (the graph's own resample), given AAC at
+    :data:`REVOICE_AUDIO_BITRATE` (192 kbit/s, the mux's bitrate too),
+    ``+faststart`` for the page's player. ``cancel_check``
     is polled while ffmpeg runs and a cancel kills it, exactly as the
     picture cut's is; the deadline is ``music_timeout(output_seconds)``,
     or, when the caller does not know the output's length, the same rule
@@ -1006,7 +1148,7 @@ def mix_music(
     cmd += [
         "-filter_complex", music_filtergraph(clips, inputs),
         "-map", "0:v", "-map", "[a]",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", REVOICE_AUDIO_BITRATE, *FASTSTART,
         str(part),
     ]
 
@@ -1203,6 +1345,9 @@ class VideoCreator:
         self,
         resolution: Tuple[int, int] = (1920, 1080),
         video_bitrate: str = "",
+        x264_preset: str = "medium",
+        h264_profile: str = "high",
+        audio_bitrate: str = "",
         fps: int = STATIC_FPS,
         transition_pause: float = 1.0,
         transition_sound_path: Optional[Path] = None,
@@ -1225,6 +1370,14 @@ class VideoCreator:
     ):
         self.resolution = resolution
         self.video_bitrate = video_bitrate
+        # The rest of the output preset's encode (Q1), threaded here the way
+        # the video bitrate is: the x264 preset (the preview passes
+        # ``ultrafast``), the H.264 profile, and the AAC bitrate ("" = the
+        # encoder's default, about 128k - the route always passes the
+        # preset's). See ``encode_settings``.
+        self.x264_preset = x264_preset
+        self.h264_profile = h264_profile
+        self.audio_bitrate = audio_bitrate
         self.fps = fps
         self.transition_pause = transition_pause
         self.voice_start_delay = voice_start_delay
@@ -1654,6 +1807,29 @@ class VideoCreator:
         except Exception as e:
             logger.error("Error embedding chapters: %s", e)
 
+    def encode_settings(self) -> dict:
+        """The ``write_videofile`` arguments of this render's encode - the one
+        place ``create_video`` takes them from, so a test can encode with
+        exactly what the render does (``tests/test_encode_settings.py``).
+
+        libx264 at the output preset's x264 preset and H.264 profile, 4:2:0
+        (:func:`h264_params`), the index at the front (:data:`FASTSTART`),
+        the preset's video bitrate ("" = the codec's constant-quality
+        default) and AAC at its audio bitrate. The parameters are the same
+        whatever the x264 preset, so the preview (``ultrafast``) plays
+        everywhere the final render does.
+        """
+        return {
+            "fps": self.fps,
+            "codec": "libx264",
+            "audio_codec": "aac",
+            "preset": self.x264_preset,
+            "bitrate": self.video_bitrate or None,
+            "audio_bitrate": self.audio_bitrate or None,
+            "ffmpeg_params": [*h264_params(self.h264_profile), *FASTSTART],
+            "threads": 0,
+        }
+
     def create_video(
         self,
         slide_clips: List[SlideClipInfo],
@@ -1811,12 +1987,7 @@ class VideoCreator:
             t1 = time.time()
             final_video.write_videofile(
                 str(output_path),
-                fps=self.fps,
-                codec="libx264",
-                audio_codec="aac",
-                preset="ultrafast",
-                bitrate=self.video_bitrate or None,
-                threads=0,
+                **self.encode_settings(),
                 logger=enc_logger,
                 temp_audiofile_path=str(temp_dir) + "/",
             )

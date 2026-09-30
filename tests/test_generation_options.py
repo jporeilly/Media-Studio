@@ -803,6 +803,9 @@ def _fake_cut(monkeypatch, path="ffmpeg-test", **script):
     monkeypatch.setattr(subprocess, "Popen", _FakeFfmpeg)
     monkeypatch.setattr(config_module, "FFMPEG_PATH", path)
     monkeypatch.setattr(video_creator, "CUT_POLL_SECONDS", 0)
+    # The source's frame rate is read from ffmpeg's header before the cut
+    # runs; with Popen faked there is no header, so it is answered here.
+    monkeypatch.setattr(video_creator, "source_frame_rate", lambda source: "30")
     return _FakeFfmpeg.instances
 
 
@@ -837,7 +840,8 @@ def test_the_cut_uses_the_resolved_ffmpeg_and_the_proven_filtergraph(tmp_path, m
         "[v0][v1]concat=n=2:v=1:a=0[v]"
     )
     assert cmd[cmd.index("-map") + 1] == "[v]" and "-an" in cmd and "-nostats" in cmd
-    assert cmd[cmd.index("-c:v") + 1] == "libx264" and cmd[cmd.index("-preset") + 1] == "ultrafast"
+    # The final render's encode since Q1 (``test_encode_settings`` has the why).
+    assert cmd[cmd.index("-c:v") + 1] == "libx264" and cmd[cmd.index("-preset") + 1] == "medium"
     assert "copy" not in cmd and "-r" not in cmd and "-b:v" not in cmd
     part = dst.with_suffix(".part.mp4")
     assert cmd[-2:] == ["-y", str(part)], "written aside, then published"
@@ -1041,7 +1045,7 @@ def test_the_mux_measures_the_picture_and_pads_to_the_larger(tmp_path, monkeypat
     alone deleted the tail of a picture that outlived its sound. The larger of
     the two is padded to, since an over-long pad costs one ``-shortest`` trim
     and a short one silently drops picture. The caller's value is the fallback
-    when the probe cannot answer; with neither there is no ``-af`` at all.
+    when the probe cannot answer; with neither there is no pad at all.
     """
     calls = _fake_ffmpeg_measuring(monkeypatch, measured)
     cut = tmp_path / "finished_cut.mp4"
@@ -1057,10 +1061,7 @@ def test_the_mux_measures_the_picture_and_pads_to_the_larger(tmp_path, monkeypat
     probe, cmd = calls
     assert probe == ["ffmpeg-test", "-hide_banner", "-i", str(cut)], "the picture is measured, with ffmpeg"
     assert not any("ffprobe" in str(arg) for call in calls for arg in call)
-    if pad is None:
-        assert "-af" not in cmd
-    else:
-        assert cmd[cmd.index("-af") + 1] == pad
+    assert _pad_of(cmd) == pad
     assert cmd[cmd.index("-c:v") + 1] == "copy", "the picture was already re-encoded by the cut; the mux copies it"
     assert out.exists()
 
@@ -1074,6 +1075,17 @@ def _mux_fixtures(tmp_path):
     master = tmp_path / "master.mp3"
     master.write_bytes(b"mp3")
     return video, master
+
+
+def _pad_of(cmd):
+    """The ``apad`` step of the mux's one audio chain, or None when it has
+    none. The chain always opens with the unity up-mix and the 48 kHz
+    resample (Q1); the pad, when there is one, is its last step."""
+    steps = cmd[cmd.index("-af") + 1].split(",")
+    assert steps[:2] == [video_creator.UPMIX_STEREO, video_creator.RESAMPLE_48K], steps
+    pads = [step for step in steps if step.startswith("apad")]
+    assert len(pads) <= 1 and (not pads or steps[-1] == pads[0]), steps
+    return pads[0] if pads else None
 
 
 @pytest.mark.parametrize("video_duration, pad", [
@@ -1107,10 +1119,7 @@ def test_the_mux_command_can_never_run_for_ever(tmp_path, monkeypatch, video_dur
     assert cmd[0] == "ffmpeg-test", "the resolved path, never a bare binary name (trap 3)"
     assert Path(cmd[0]).name not in ("ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe")
     assert not any("ffprobe" in str(arg) for arg in cmd)
-    if pad is None:
-        assert "-af" not in cmd, "no length known: no pad at all, so the mux ends with the shorter stream"
-    else:
-        assert cmd[cmd.index("-af") + 1] == pad
+    assert _pad_of(cmd) == pad, "no length known: no pad at all, so the mux ends with the shorter stream"
     assert all("apad" not in str(arg) or "whole_dur=" in str(arg) for arg in cmd), (
         "an unbounded apad is the command that hangs"
     )
@@ -1166,13 +1175,13 @@ def test_without_a_length_the_mux_asks_ffmpeg_never_ffprobe(tmp_path, monkeypatc
     probe, mux = calls
     assert probe == ["ffmpeg-test", "-hide_banner", "-i", str(video)]
     assert not any("ffprobe" in str(arg) for call in calls for arg in call), "nothing asks for ffprobe"
-    assert mux[mux.index("-af") + 1] == "apad=whole_dur=12.500"
+    assert _pad_of(mux) == "apad=whole_dur=12.500"
 
     calls.clear()
     monkeypatch.setattr(video_creator, "_probe_duration", lambda path: None)
     assert video_creator.replace_video_audio(video, master, tmp_path / "out2.mp4") is True
     (mux,) = calls
-    assert "-af" not in mux, "nothing could say how long the picture is: no pad, so the mux still ends"
+    assert _pad_of(mux) is None, "nothing could say how long the picture is: no pad, so the mux still ends"
 
 
 # -- F1: the checks that need a REAL ffmpeg ------------------------------------

@@ -12,10 +12,12 @@ The engine runs for real here with everything below it stubbed as
 carry only a length, the TTS writes a byte per sentence, and the mux is a
 recorder. The job-level half - the record, the files and the closing line -
 is ``tests/test_revoice.py`` (the cut, the engine's cancel, the translation)
-and ``tests/test_music_render.py`` (the mix); the last test here runs a real
-job through the real engine end to end.
+and ``tests/test_music_render.py`` (the mix); the last two tests here run a
+real job through the real engine end to end - one cancelled, one whose
+narration track cannot be encoded.
 """
 
+import logging
 import sys
 import time
 import types
@@ -23,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydub.exceptions import CouldntEncodeError  # the real one, imported before the engine fixture fakes pydub
 
 from core.project_manager import ProjectManager
 from services import jobs, processing, revoice
@@ -231,3 +234,66 @@ def test_a_job_cancelled_mid_synthesis_leaves_the_record_and_the_previous_re_voi
     assert out.read_bytes() == b"PREVIOUS" and processing.narration_path_for(out).read_bytes() == b"PREVIOUS-NARRATION"
     assert not any(d.exists() for d in engine["scratches"]), "no scratch directory is left"
     assert jobs.active_for(pid) is None
+
+
+class _Records(logging.Handler):
+    """The engine's loggers do not propagate (``utils/logger.py``), so caplog
+    never sees them: collect their records directly."""
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def test_a_narration_track_that_will_not_encode_leaves_the_re_voice_done_without_a_track(
+    engine, client, monkeypatch,
+):
+    """The standalone narration track is an MP3 exported from the master AFTER
+    the mux (Q1: the mux reads a lossless WAV), and an encode can fail with
+    pydub's ``CouldntEncodeError`` - not an ``OSError``, which is all the old
+    file copy could raise. The video is made by then, so the whole chain -
+    the route, the job, the real ``revoice_project`` and ``_revoice_video`` -
+    must end ``done`` with the new video recorded, NO track claimed (neither on
+    the record nor on disk) and the reason logged. Caught as ``OSError`` only,
+    the error escaped into the engine's own handler and failed the job after
+    the video had been written."""
+
+    def export(self, path, format="mp3", **kwargs):
+        if format == "mp3":
+            raise CouldntEncodeError("planted: the MP3 encoder failed")
+        Path(path).write_bytes(b"MASTER")
+
+    monkeypatch.setattr(_Seg, "export", export)
+    records = _Records()
+    engine_log = logging.getLogger("mediastudio.PROC")
+    engine_log.addHandler(records)
+    try:
+        pid = store.import_upload("clip.mp4", b"video-bytes")["id"]
+        store.set_transcript(pid, [dict(s) for s in SENTENCES])
+
+        r = client.post(f"/api/projects/{pid}/revoice", json={"voice_id": "en-US-AriaNeural"})
+        assert r.status_code == 200, r.text
+        deadline = time.time() + 10
+        while (job := client.get(f"/api/jobs/{r.json()['job_id']}").json())["status"] not in ("done", "error"):
+            assert time.time() < deadline, "the job did not finish"
+            time.sleep(0.02)
+    finally:
+        engine_log.removeHandler(records)
+
+    assert job["status"] == "done", job
+    record = store.get_project(pid)
+    out = store.PROJECTS_DIR / pid / "clip_revoiced.mp4"
+    assert record["revoiced_video"] == out.name and out.read_bytes() == b"NEW-REVOICE"
+    assert len(engine["muxes"]) == 1 and str(engine["muxes"][0]["master_audio"]).endswith(".wav"), (
+        "the mux read the lossless master"
+    )
+    assert "narration_audio" not in record, "no track is claimed"
+    track = processing.narration_path_for(out)
+    assert not track.exists() and not track.with_name(track.name + ".part").exists()
+    assert any(
+        m.startswith("Could not keep the narration track") and "planted: the MP3 encoder failed" in m
+        for m in records.messages
+    ), records.messages

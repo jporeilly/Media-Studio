@@ -1793,15 +1793,17 @@ export function stepFrame(t: number, direction: 1 | -1, total: number, frame = F
  * The picture step's cost scales with the DECODE REACH — from the first kept
  * start to the last kept end — and never with the output's length: `trim` is
  * a filter and runs after the decode (E1's Reviewer proved it on real
- * footage; spec §7, second note). Measured 16.1 s for 341 s of reach on the
- * bundled ffmpeg, so `5 + reach × 0.05`. A keep that removes nothing skips
- * the picture step and estimates 0. Narration synthesis is not in the
- * number: the audition caches it, and the wording says so.
+ * footage; spec §7, second note). The cut is encoded like a final render,
+ * x264 `medium` (Q1): measured 32.1 s and 34.1 s for the corpus's 341 s of
+ * 1080p30 reach on the bundled ffmpeg 7.1 (it was 16.1 s at `ultrafast`), so
+ * `5 + reach × 0.1`. A keep that removes nothing skips the picture step and
+ * estimates 0. Narration synthesis is not in the number: the audition caches
+ * it, and the wording says so.
  */
 export function renderEstimate(keep: Keep, sourceDuration: number): number {
   if (keep.length === 0 || wholeSource(keep, sourceDuration)) return 0;
   const reach = keep[keep.length - 1][1] - keep[0][0];
-  return Math.ceil((5 + reach * 0.05) / 5) * 5;
+  return Math.ceil((5 + reach * 0.1) / 5) * 5;
 }
 
 /** Whether a track's list (null = whole) removes anything. */

@@ -38,13 +38,15 @@ The MP4 is written to the project's own directory, `data\projects\<id>\<source s
 
 Each slide is narrated from its notes in the chosen voice, or the slide's own **Voice override**, and the audio is cached by text, voice and speed, so a re-render with unchanged notes synthesises nothing again. A slide's pause is its own **Pause after slide (s)** when set, else the job's pause between slides. A static deck is encoded at 2 frames a second; any transition effect but None raises that to 24, so the encode takes longer. The rendered MP4 carries a chapter per slide, titled with the first line of the slide's notes (up to 60 characters) or "Slide N". Slide images are exported through PowerPoint (or the title-only fallback) if the previews are not there yet; PowerPoint exports one deck at a time.
 
+**The encode.** A full render is encoded with libx264's `medium` setting as H.264 High in 4:2:0 colour, with AAC audio at the preset's bitrate and the file's index at the front, so the video starts playing in a browser, or on a site it is uploaded to, before it has all arrived; [Output presets](../reference/output-presets.md) lists what each preset passes. `medium` makes a much smaller file than libx264's fast `ultrafast` setting at the same picture quality, and takes longer to encode, though most of a deck's render is spent building the frames rather than encoding them. Measured on an 8-core desktop at 1080p: ten slides with 14 minutes of narration and no transition render in about 209 s, against about 198 s at `ultrafast`, into a 24.0 MB file against 32.7 MB; three of those slides with a crossfade (24 frames a second) render in about 329 s against 327 s. **Preview 15 s** keeps `ultrafast`, because it is for checking the voice and the options, not for delivering, so it stays quick; it keeps the profile, the colour format, the audio bitrate and the index at the front, so it plays wherever the full render does.
+
 A generate job runs to its end; the app offers no Cancel for it. It is refused with a 409 while any job holds the project, and every slide write is refused while it runs.
 
 The job is recorded in the audit log as `project.generate` with the job id, the preset (or "preview" for **Preview 15 s**), and the provider and voice.
 
 ## See also
 
-- [Output presets](../reference/output-presets.md): the resolution and bitrate of each preset
+- [Output presets](../reference/output-presets.md): the resolution and the encode of each preset
 - [Studio settings](../admin/studio-settings.md): the defaults the card starts from
 - [Narration engines](../ai/narration-engines.md): Edge TTS and Kokoro
 - [Jobs](jobs.md)
