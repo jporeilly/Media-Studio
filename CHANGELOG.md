@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- [fix] **The slide rail in the project's Slides editor now runs the full height of the window and stays in view while a long slide's editor scrolls.** `.os-slide-rail` was a fixed 620 px scroll box, so on a tall window it stopped partway down beside a longer editor and looked as if the page had stopped rendering (owner report, 0.12.0). It is now `position: sticky; top: 64px; max-height: calc(100vh - 88px)`, the offsets the Docs page sidebars already use to clear the top bar; below 820 px, where the rail is a horizontal strip, it is not sticky. Checked in a browser on a 20-slide deck: at 1440×1200 the rail is 1112 px (was 620); at 1440×800 it stays pinned under the top bar while the editor scrolls and leaves with the editor's bottom edge; at 700 px it is the horizontal strip as before. The built UI is rebuilt. — #rail
+
 ## [0.12.0] - 2026-09-30
 
 Renders are now encoded to be delivered. A full render uses x264 `medium` and H.264 High at
