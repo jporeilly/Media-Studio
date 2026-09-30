@@ -11,6 +11,7 @@ from typing import List, Dict
 from pathlib import Path
 import logging
 import json
+from core.ollama_client import request_body
 
 logger = logging.getLogger("mediastudio.ASSISTANT")
 
@@ -732,7 +733,7 @@ def _ai_interpret(user_input: str, project_state: Dict,
     try:
         resp = requests.post(
             f"{ollama_url.rstrip('/')}/api/chat",
-            json={"model": ollama_model, "messages": messages, "stream": False},
+            json=request_body(ollama_model, messages=messages),
             timeout=60,
         )
         if resp.status_code == 200:

@@ -316,7 +316,7 @@ def _whisper_model(value) -> str:
 
 
 def _ollama_model(value) -> str:
-    return _text(value, "Enter an Ollama model name (for example gemma3:12b or llama3).")
+    return _text(value, "Enter an Ollama model name (for example gemma4:12b or llama3).")
 
 
 def _output_folder(value) -> str:

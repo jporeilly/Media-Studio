@@ -7,6 +7,7 @@ User uploads PPTX, clicks one button, gets a complete video with subtitles and Y
 from pathlib import Path
 from typing import Optional, Callable
 import logging
+from core.ollama_client import request_body
 
 logger = logging.getLogger("mediastudio.ONECLICK")
 
@@ -57,7 +58,7 @@ def auto_detect_settings(pptx_path: Path, ollama_url: str = "",
 
         resp = requests.post(
             f"{ollama_url.rstrip('/')}/api/generate",
-            json={"model": ollama_model, "prompt": prompt, "stream": False},
+            json=request_body(ollama_model, prompt=prompt),
             timeout=15,
         )
 
@@ -285,7 +286,7 @@ class OneClickPipeline:
                 )
                 resp = requests.post(
                     f"{self.ollama_url.rstrip('/')}/api/generate",
-                    json={"model": self.ollama_model, "prompt": prompt, "stream": False},
+                    json=request_body(self.ollama_model, prompt=prompt),
                     timeout=30,
                 )
                 if resp.status_code == 200:

@@ -13,6 +13,7 @@ pair the chosen language with a matching TTS voice via
 
 from typing import List, Optional, Callable
 import logging
+from core.ollama_client import request_body
 
 logger = logging.getLogger("mediastudio.TRANSLATE")
 
@@ -79,7 +80,7 @@ def translate_text(
     try:
         resp = requests.post(
             f"{ollama_url.rstrip('/')}/api/generate",
-            json={"model": ollama_model, "prompt": prompt, "stream": False},
+            json=request_body(ollama_model, prompt=prompt),
             timeout=60,
         )
         if resp.status_code == 200:

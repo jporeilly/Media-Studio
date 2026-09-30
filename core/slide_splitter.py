@@ -6,6 +6,7 @@ with redistributed notes and suggested titles.
 
 from typing import List, Dict, Optional
 import logging
+from core.ollama_client import request_body
 
 logger = logging.getLogger("mediastudio.SPLIT")
 
@@ -112,7 +113,7 @@ def _ai_split(notes: str, num_parts: int, ollama_url: str, ollama_model: str) ->
     try:
         resp = requests.post(
             f"{ollama_url.rstrip('/')}/api/generate",
-            json={"model": ollama_model, "prompt": prompt, "stream": False},
+            json=request_body(ollama_model, prompt=prompt),
             timeout=30,
         )
         if resp.status_code == 200:
@@ -143,7 +144,7 @@ def suggest_slide_titles(notes_parts: List[str],
             )
             resp = requests.post(
                 f"{ollama_url.rstrip('/')}/api/generate",
-                json={"model": ollama_model, "prompt": prompt, "stream": False},
+                json=request_body(ollama_model, prompt=prompt),
                 timeout=10,
             )
             if resp.status_code == 200:

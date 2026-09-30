@@ -7,6 +7,7 @@ with prepared answers, exportable as a companion document.
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import logging
+from core.ollama_client import request_body
 
 logger = logging.getLogger("mediastudio.QA_GEN")
 
@@ -62,7 +63,7 @@ def generate_qa(
     try:
         resp = requests.post(
             f"{ollama_url.rstrip('/')}/api/generate",
-            json={"model": ollama_model, "prompt": prompt, "stream": False},
+            json=request_body(ollama_model, prompt=prompt),
             timeout=60,
         )
 

@@ -42,7 +42,7 @@ Generate notes, Enhance all, QA review, Tone, Translate, Pace with the model and
 
 Timeouts: 3 seconds to probe the server, 120 seconds per slide, 180 seconds per review pass, 60 seconds for the Q&A document, 30 seconds for Analyze's suggestions. A review pass carries at most 20 slides and 12,000 characters of notes; its answer is mapped back onto the slides by the slide numbers it returns and refused whole when they do not match. The review is saved on the project only when every pass is in; a cancel or a failed pass keeps the previous review.
 
-Vision is offered when the model's family is one of gemma3, llava, moondream, llama3.2-vision, qwen2.5vl, qwen2-vl, minicpm-v, llava-llama3 or bakllava, and the project's previews were made by PowerPoint or from a PDF. The title-only fallback is never shown to a model: a white card with a title reads as an empty slide.
+Vision is offered when the model's family is one of gemma4, gemma3, llava, moondream, llama3.2-vision, qwen2.5vl, qwen2-vl, minicpm-v, llava-llama3 or bakllava, and the project's previews were made by PowerPoint or from a PDF. The title-only fallback is never shown to a model: a white card with a title reads as an empty slide.
 
 The model-paced version of Pacing keeps an answer only when it is at least 80 % of the note's length; otherwise the rules place the pauses. The Q&A document lands at `data\projects\<id>\exports\<name>-qa.txt`. Analyze and the per-slide AI Enhance are synchronous calls, not jobs; a per-slide proposal is not saved until you press Save.
 

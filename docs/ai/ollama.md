@@ -9,7 +9,7 @@ Two features need a local Ollama server: the translation of a re-voice, and the 
 
 ## The settings
 
-**Ollama model** is a field of the Studio card, `gemma3:12b` on a fresh install; its hint mentions the translation only, but it is the assistant's model too. The server must have the model pulled: the assistant's status line says "*model* is not pulled on the Ollama server (ollama pull *model*)" when it is not.
+**Ollama model** is a field of the Studio card, `gemma4:12b` on a fresh install; its hint mentions the translation only, but it is the assistant's model too. An install that has saved its settings keeps the `ollama_model` in `data\config.json` after an upgrade, so an older install stays on its model until it is changed here in Settings › Studio. The server must have the model pulled: the assistant's status line says "*model* is not pulled on the Ollama server (ollama pull *model*)" when it is not. Every request sends `"think": false`, so a model that thinks by default (gemma4, qwen3) answers without thinking first; one rewritten sentence on gemma4 took 16 s with thinking and 1.4 s without. Models that cannot think ignore the flag.
 
 The **URL** has no field: it is `ollama_url` in `data\config.json`, `http://localhost:11434` by default. Edit the file and restart the backend to change it.
 
@@ -27,7 +27,7 @@ Three environment variables override those two values when the server starts. Se
 
 ## Vision models
 
-The assistant shows the model a slide's image only when the model's family is one that sees images (gemma3, llava, moondream, llama3.2-vision, qwen2.5vl, qwen2-vl, minicpm-v, llava-llama3 or bakllava; a tag such as `gemma3:12b-it-qat` counts by its family) and the project's previews are real renders from PowerPoint or a PDF. The status line reads "*model* · vision" when both hold and "*model* · vision off: *reason*" otherwise.
+The assistant shows the model a slide's image only when the model's family is one that sees images (gemma4, gemma3, llava, moondream, llama3.2-vision, qwen2.5vl, qwen2-vl, minicpm-v, llava-llama3 or bakllava; a tag such as `gemma3:12b-it-qat` counts by its family) and the project's previews are real renders from PowerPoint or a PDF. The status line reads "*model* · vision" when both hold and "*model* · vision off: *reason*" otherwise.
 
 ## The status line
 

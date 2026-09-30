@@ -70,7 +70,7 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 | --- | --- | --- |
 | "Ollama unreachable at http://localhost:11434 — AI actions disabled" | Ollama is not running, or the URL in `data\config.json` is wrong | Start Ollama (`winget install -e --id Ollama.Ollama`); fix `ollama_url` |
 | "*model* is not pulled on the Ollama server (ollama pull *model*)" | The configured model is not on the server | `ollama pull <model>`, or choose another in the Studio card |
-| "*model* · vision off: *reason*" | Not a vision model, or the previews are not real renders | Choose a vision model (gemma3, llava, moondream, llama3.2-vision, qwen2.5vl, minicpm-v); render the previews |
+| "*model* · vision off: *reason*" | Not a vision model, or the previews are not real renders | Choose a vision model (gemma4, gemma3, llava, moondream, llama3.2-vision, qwen2.5vl, minicpm-v); render the previews |
 | An action stopped early: "Ollama is not reachable … Stopped after N of M slides; the notes written so far are saved." | The server went away mid-run | Start Ollama; run the action again; slides already done keep their notes |
 | "The model did not answer within 120 s." (180 s for a QA review pass) | A slow model on a slow machine | A smaller model, or a GPU |
 

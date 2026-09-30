@@ -13,7 +13,7 @@ Every field with its meaning, its default on a fresh install, and when a change 
 | **Default Edge voice** | "Used when a job names no voice." | `en-US-AriaNeural` | the voice preselected on a project page under Edge TTS; a job with no voice |
 | **Kokoro voice** | "Used when a Kokoro job names no voice." | `af_heart` | the same, under Kokoro |
 | **Kokoro language** | "The language Kokoro reads the notes in.": English (US), English (UK), French, Italian, Japanese, Chinese, Spanish, Hindi, Portuguese (BR) | English (US) | the next Kokoro narration or preview |
-| **Ollama model** | The local model that translates a re-voice **and** runs the whole AI assistant (the card's hint names only the translation) | `gemma3:12b` | the next translation or AI action |
+| **Ollama model** | The local model that translates a re-voice **and** runs the whole AI assistant (the card's hint names only the translation) | `gemma4:12b` | the next translation or AI action |
 | **Output folder** | "Not used by this edition yet — renders are saved with their project." An absolute path on the server, created if missing and checked to be writable | `<app>\assets\finished` | nothing in this edition |
 | **Transition pause** | "Seconds of silence between slides", 0 to 5 in steps of 0.1 | 0 | prefilled into a new Generate card's **Pause between slides (s)** |
 | **Music volume** | "Background music level", 0 (silent) to 1 (full) in steps of 0.05 | 0.25 | the level a new music clip starts at on the Timeline |
