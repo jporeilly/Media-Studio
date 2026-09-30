@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- [security] **Three Dependabot alerts on `brace-expansion` closed, and one on `glib` dismissed as not shipped.** `brace-expansion` 5.0.9, which ESLint pulls in through `minimatch` (a development dependency only, never in the built UI), is updated to 5.0.12 in `frontend/package-lock.json`, fixing two denial-of-service recursions and a quadratic-time expansion; `npm audit` reports no vulnerabilities. The built UI is rebuilt because its fingerprint covers the lockfile. The `glib` 0.18.5 alert is dismissed: it comes only with the Linux webview stack (gtk and webkit2gtk under Tauri 2.11), and `cargo tree --target x86_64-pc-windows-msvc -i glib` finds nothing, so it is never compiled into the Windows app. `.gitignore` now ignores `.claude/worktrees/`, where agent sessions make their git worktrees. — #deps-0930
+
 ## [0.11.0] - 2026-09-30
 
 Media Studio is ready to use day to day. The Docs page is now a manual: twenty-four guides

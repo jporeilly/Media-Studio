@@ -56,3 +56,6 @@ desktop/node_modules/
 desktop/src-tauri/vendor/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+
+# Agent worktrees made by Claude Code sessions: never part of the repo.
+.claude/worktrees/
