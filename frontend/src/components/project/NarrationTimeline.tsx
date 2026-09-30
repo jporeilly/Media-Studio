@@ -63,12 +63,12 @@ import {
   joins,
   laneLocks,
   maxZoom,
-  missingAcross,
-  missingAcrossRefusal,
+  missingCutByPicture,
   moveClip,
   moveMarker,
   musicAfterTrim,
   nextEditForTrim,
+  pictureCutRefusal,
   pieceAt,
   pieceEdgeAt,
   pieces,
@@ -1279,7 +1279,7 @@ export function NarrationTimeline({
         clearMarkerDrag();
         return;
       }
-      commitMarkers(next);
+      commitMarkers(next, true);
       if (markerLabelRef.current) markerLabelRef.current.style.display = "none";
       return;
     }
@@ -1303,15 +1303,15 @@ export function NarrationTimeline({
         return;
       }
       if (!outcome.next || !outcome.change) return;
-      // A shortening ACROSS a missing clip would change its slice, which the
-      // server refuses (E4c) in words about a trim of the clip, not this
-      // gesture: refused here first, as the cut and the split are, only
-      // where the ripple applies at all.
+      // A shortening of the PICTURE across a missing clip is refused before
+      // the PUT, as the cut is (E6, the owner's decision of 2026-09-30): its
+      // undo could not be stored while the file is gone. Only where the
+      // ripple applies at all (`missingCutByPicture`).
       const picture = outcome.picture;
-      if (picture?.kind === "cut" && !held.music && !held.video) {
-        const across = missingAcross(before.music, picture.a, picture.b);
+      if (picture?.kind === "cut") {
+        const across = missingCutByPicture(before.music, held, picture.a, picture.b);
         if (across.length > 0) {
-          setRefusal(missingAcrossRefusal("trim", across, picture.a, picture.b));
+          setRefusal(pictureCutRefusal("trim", across, picture.a, picture.b));
           return;
         }
       }
@@ -1674,11 +1674,12 @@ export function NarrationTimeline({
 
       {/* A missing file costs the render, not the lane (E4c): the server
           keeps a clip it already holds with its file gone, so the clip can
-          still be moved, levelled, faded and removed - only its slice is
-          fixed, because the file's length is unknown now. The banner names
-          the files, says the render will refuse until the clips go or the
-          files come back, and carries the button that removes them all in
-          one PUT. */}
+          still be moved, levelled, faded and removed - and since E6 trimmed
+          shorter or split too: GROWING its slice is refused, because the
+          file's length is unknown now, and so is a cut of the picture across
+          it (its undo could not be stored). The banner names the files, says
+          the render will refuse until the clips go or the files come back,
+          and carries the button that removes them all in one PUT. */}
       {missingMusic.length > 0 && (
         <div className="os-muted os-small">
           {missingMusic.length === 1 ? "A music clip names a file" : `${missingMusic.length} music clips name files`}
@@ -1686,8 +1687,10 @@ export function NarrationTimeline({
           ({[...new Set(missingMusic.map((held) => held.file))].join(", ")}), so the render will refuse until{" "}
           {missingMusic.length === 1 ? "it is removed or the file is" : "they are removed or the files are"} put back in
           the library under the same name. {missingMusic.length === 1 ? "It" : "They"} can still be moved, levelled
-          and faded here, but not trimmed, and a cut or split across {missingMusic.length === 1 ? "it" : "one"} is
-          refused until the lane is locked or the clip removed.{" "}
+          and faded here, and trimmed shorter or split, but never lengthened past the part of the file{" "}
+          {missingMusic.length === 1
+            ? "it has, and a cut of the picture across it is refused until the Music lane is locked or the clip removed"
+            : "each has, and a cut of the picture across one is refused until the Music lane is locked or the clips removed"}.{" "}
           <Button
             size="sm"
             variant="danger"
@@ -1699,7 +1702,7 @@ export function NarrationTimeline({
                 : `Remove ${missingMusic.length === 1 ? "it" : "them all"} in one save`}
             onClick={removeMissingClips}
           >
-            {missingMusic.length === 1 ? "Remove the stuck clip" : `Remove the ${missingMusic.length} stuck clips`}
+            {missingMusic.length === 1 ? "Remove the missing clip" : `Remove the ${missingMusic.length} missing clips`}
           </Button>
         </div>
       )}

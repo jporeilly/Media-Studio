@@ -37,13 +37,14 @@ export function ClipInspector({
       <span
         className="os-tl-status"
         title={inspected.missing
-          ? "This file is no longer in the library, so the clip cannot be trimmed: its slice is of a length "
-            + "nobody knows now. Move it, set its level and fades, remove it, or put the file back under the same name."
+          ? "This file is no longer in the library, so the clip can be trimmed shorter or split but never lengthened: "
+            + "the file's length is unknown now. Move it, trim it, set its level and fades, remove it, or put the file "
+            + "back under the same name."
           : undefined}
       >
         at {timecode(inspected.at)} · {timecode(inspected.in)}–{timecode(inspected.out)} of the file
         {" "}· {clipLength(inspected).toFixed(2)} s
-        {inspected.missing && " · the file is missing, so it cannot be trimmed"}
+        {inspected.missing && " · the file is missing, so its slice can only be shortened"}
       </span>
       <label className="os-tl-inspector-field">
         Level

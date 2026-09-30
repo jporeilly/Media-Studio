@@ -1232,11 +1232,14 @@ def test_a_file_that_left_the_library_is_flagged_on_read_never_refused():
 
 
 # E4c (the owner's ruling, 2026-09-24): "you may keep what you have, you may
-# not add what is not there." A stored clip whose file has gone, 4 s of it.
+# not add what is not there" - relaxed by E6 (2026-09-29) to "you may keep
+# what you have, and you may keep less of it". A stored clip whose file has
+# gone, 4 s of it.
 GONE = _clip(id="g", file="gone.mp3", at=3.0, out=4.0)
-SLICE_CANNOT_CHANGE = (
-    "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice cannot change; "
-    "it was 0.000–4.000 of the file. Move it, level it, fade it, remove it, or put the file back under the same name."
+SLICE_CANNOT_GROW = (
+    "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice can shrink but not grow; "
+    "it was 0.000–4.000 of the file. Trim it shorter, split it, move it, level it, fade it, remove it, "
+    "or put the file back under the same name."
 )
 
 
@@ -1266,25 +1269,67 @@ def test_a_stored_clip_whose_file_has_gone_may_be_kept_moved_levelled_and_faded(
     assert stored[0]["missing"] is True and "missing" not in GONE
 
 
+def test_a_stored_missing_clip_may_be_shrunk_from_either_end_or_split_under_a_new_id():
+    """E6, you may keep less of it: a slice INSIDE the stored one is accepted
+    - the stored id trimmed from either end or both (a trim on the strip),
+    and the pieces of a split or of a cut's ripple, the second under a new
+    id - because every piece is a stretch of the file the project already
+    holds. Checked as a live clip is otherwise: the fades against the new,
+    shorter slice."""
+    stored = _stored(GONE, CLIP_B)
+    for shrunk in (
+        {**GONE, "in": 0.5},                                   # the left edge in
+        {**GONE, "out": 3.5},                                  # the right edge in
+        {**GONE, "in": 1.0, "out": 3.0, "fade_in": 1.0, "fade_out": 1.0},  # both, the fades filling what is left
+        {**GONE, "in": 3.9, "out": 4.0, "fade_in": 0.0, "fade_out": 0.0},  # down to the shortest clip there is
+        {**GONE, "at": 9.0, "in": 0.5, "out": 3.5},            # shrunk and moved in one commit
+    ):
+        assert edit.validate_music([shrunk], LIBRARY, stored=stored) == [shrunk], shrunk
+    # A split at 1.5 s into the clip: the head keeps the id, the tail a new
+    # one; both inside the stored 0-4, which is all the rule asks.
+    head = {**GONE, "out": 1.5, "fade_out": 0.0}
+    tail = {**GONE, "id": "g2", "at": 4.5, "in": 1.5, "fade_in": 0.0}
+    assert edit.validate_music([head, tail, CLIP_B], LIBRARY, stored=stored) == [head, tail, CLIP_B]
+    # A cut across it: the head and a tail advanced into the file, rippled earlier.
+    assert edit.validate_music([{**GONE, "out": 1.0, "fade_out": 0.0}, {**tail, "at": 4.0, "in": 2.5, "fade_out": 1.5}], LIBRARY, stored=stored)
+    # The new id may even take the whole stored slice: it lies inside it - a
+    # copy, which adds nothing the project did not hold. And a stored id may
+    # be RE-POINTED at a missing file the project holds, inside that file's
+    # slice (here the live bed's id, 0-3 of the gone 0-4): the rule is "any
+    # id", and no gesture changes a clip's file. Recorded, not decided.
+    assert edit.validate_music([{**GONE, "id": "g2"}], LIBRARY, stored=stored) == [{**GONE, "id": "g2"}]
+    repointed = {**CLIP_B, "file": "gone.mp3", "out": 3.0}
+    assert edit.validate_music([repointed], LIBRARY, stored=stored) == [repointed]
+
+
 @pytest.mark.parametrize("clip, message", [
-    ({**GONE, "in": 0.5}, SLICE_CANNOT_CHANGE),
-    ({**GONE, "out": 4.5}, "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice cannot change; it was 0.000–4.000"),
-    ({**GONE, "out": 3.5}, "so its slice cannot change"),                # shorter too: the slice is the slice
-    ({**GONE, "in": 0.5, "out": 4.5}, "so its slice cannot change"),     # the same length, elsewhere in the file
+    ({**GONE, "out": 4.5}, SLICE_CANNOT_GROW),                           # grown at the right
+    ({**GONE, "in": 0.5, "out": 4.5}, SLICE_CANNOT_GROW),               # the same length, slid out past the end
+    ({**GONE, "out": 4.001}, SLICE_CANNOT_GROW),                        # one millisecond is growth
     ({**GONE, "out": 4.0004}, "=="),                                    # rounds onto the stored slice: accepted (below)
     ({**GONE, "in": 0.0004}, "=="),
-    ({**GONE, "id": "g2"}, "music clip 1 (g2): file 'gone.mp3' is not in the library."),        # a new id
-    ({**GONE, "file": "other.mp3"}, "music clip 1 (g): file 'other.mp3' is not in the library."),  # a stored id, another missing name
-    ({**CLIP_B, "file": "gone.mp3"}, "music clip 1 (b): file 'gone.mp3' is not in the library."),  # a stored LIVE id re-pointed
+    ({**GONE, "id": "g2", "out": 5.0},                                  # a new id growing past every stored slice
+     "music clip 1 (g2): file 'gone.mp3' is not in the library, so its slice can shrink but not grow; "
+     "the project holds 0.000–4.000 of the file."),
+    ({**GONE, "file": "other.mp3"}, "music clip 1 (g): file 'other.mp3' is not in the library."),  # a stored id, a file never held
+    ({**GONE, "id": "n1", "file": "other.mp3"}, "music clip 1 (n1): file 'other.mp3' is not in the library."),  # a new id, the same
+    ({**CLIP_B, "file": "gone.mp3"},                                    # a stored LIVE id re-pointed, its 0-10 past the 0-4 held
+     "music clip 1 (b): file 'gone.mp3' is not in the library, so its slice can shrink but not grow; "
+     "the project holds 0.000–4.000 of the file."),
     ({**GONE, "fade_in": 2.0, "fade_out": 2.5}, "music clip 1 (g): fade_in + fade_out (4.500 s) is longer than the clip (4.000 s)"),
+    ({**GONE, "out": 2.0, "fade_in": 1.0, "fade_out": 1.5}, "music clip 1 (g): fade_in + fade_out (2.500 s) is longer than the clip (2.000 s)"),
     ({**GONE, "at": -1.0}, "music clip 1 (g): at (-1.000) starts before 0"),
+    ({**GONE, "in": 3.95, "fade_in": 0.0, "fade_out": 0.0}, "music clip 1 (g): the clip (0.050 s from in to out) is shorter than 0.1 s"),
 ])
 def test_what_a_stored_missing_clip_may_not_become(clip, message):
-    """You may not add what is not there: a new id naming the missing file,
-    a stored id re-pointed at it, or the stored clip with its slice changed
-    - longer, shorter or merely elsewhere in the file - is refused; the
-    slice's refusal says what the slice was and names the ways out. The
-    fades are still bounded by that slice, and ``at`` by 0, as ever."""
+    """You may not add what is not there: a slice that GROWS past every
+    slice the project holds of the file - at either end, by as little as a
+    millisecond, under the stored id or a new one - and any clip naming a
+    missing file the project never held, are refused. The growth's refusal
+    says what the slice was (the clip's own, when its id held this file;
+    else every slice the project holds of it) and names the ways out. The
+    fades are still bounded by the slice, the slice by the shortest clip,
+    and ``at`` by 0, as ever."""
     stored = _stored(GONE, CLIP_B)
     if message == "==":
         # A hair off the stored slice rounds back onto it, as every number is
@@ -1294,6 +1339,30 @@ def test_what_a_stored_missing_clip_may_not_become(clip, message):
     with pytest.raises(ValueError) as exc:
         edit.validate_music([clip], LIBRARY, stored=stored)
     assert message in str(exc.value), str(exc.value)
+
+
+def test_a_grown_slice_is_refused_against_every_slice_the_project_holds_of_the_file():
+    """Two stored clips of one missing file: a slice inside EITHER is kept,
+    one spanning the gap between them is growth (each piece must lie inside
+    one stored slice - two slices are not one), and the sentence lists every
+    slice held, each once, in order."""
+    early = {**GONE, "id": "e", "at": 0.0, "in": 0.0, "out": 2.0, "fade_in": 0.0, "fade_out": 0.0}
+    late = {**GONE, "id": "l", "at": 8.0, "in": 5.0, "out": 9.0, "fade_in": 0.0, "fade_out": 0.0}
+    again = {**late, "id": "l2", "at": 20.0}   # the same stretch laid twice: listed once
+    stored = _stored(early, late, again)
+    assert edit.validate_music([{**early, "out": 1.0}, {**late, "in": 6.0}, again], LIBRARY, stored=stored)
+    assert edit.validate_music([{**late, "id": "n", "in": 5.5, "out": 8.5}], LIBRARY, stored=stored)
+    with pytest.raises(ValueError) as exc:
+        edit.validate_music([{**late, "id": "n", "in": 1.0, "out": 6.0}], LIBRARY, stored=stored)
+    assert str(exc.value) == (
+        "music clip 1 (n): file 'gone.mp3' is not in the library, so its slice can shrink but not grow; "
+        "the project holds 0.000–2.000 and 5.000–9.000 of the file. Trim it shorter, split it, move it, "
+        "level it, fade it, remove it, or put the file back under the same name."
+    )
+    # The clip's OWN stored slice is what it is told when its id held this file.
+    with pytest.raises(ValueError) as exc:
+        edit.validate_music([{**early, "out": 2.5}], LIBRARY, stored=stored)
+    assert "so its slice can shrink but not grow; it was 0.000–2.000 of the file." in str(exc.value)
 
 
 def test_validate_music_with_nothing_stored_refuses_a_missing_file_exactly_as_before():
@@ -1640,36 +1709,65 @@ def test_a_stored_missing_clip_is_kept_moved_levelled_and_faded_with_its_fades_s
     assert [row["detail"] for row in _edit_rows()][0] == "video: whole; narration: whole; music: 2 clips"
 
 
-def test_a_stored_missing_clips_slice_cannot_change(client, library, monkeypatch):
+def test_a_stored_missing_clips_slice_can_shrink_and_split_but_not_grow(client, library, monkeypatch):
+    """E6 through the API: the stored clip trimmed shorter from either end is
+    stored, and so is a split of it into two pieces under two ids; growing
+    it - past the slice as it is stored NOW, which the shrink made shorter -
+    is refused, the sentence naming the slice, and nothing is written."""
     pid = _video()
     assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
-    _lose_sting(monkeypatch)
-    before = _record_bytes(pid)
-    said = ("music clip 1 (a): file 'sting.wav' is not in the library, so its slice cannot change; "
-            "it was 0.000–4.500 of the file. Move it, level it, fade it, remove it, or put the file back under the same name.")
+    gone = _lose_sting(monkeypatch)
 
-    r = client.put(f"/api/projects/{pid}/edit", json={"music": [{**CLIP_A, "in": 1.0}, CLIP_B]})
-    assert r.status_code == 400 and r.json()["detail"] == said, r.text
-    r = client.put(f"/api/projects/{pid}/edit", json={"music": [{**CLIP_A, "out": 4.0}, CLIP_B]})
-    assert r.status_code == 400 and r.json()["detail"] == said, r.text
+    # Trimmed at the left: stored, still missing.
+    trimmed = {**CLIP_A, "at": 1.0, "in": 0.5}
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [trimmed, CLIP_B]})
+    assert r.status_code == 200, r.text
+    assert r.json()["music"] == [{**gone, "at": 1.0, "in": 0.5}, _read_back(CLIP_B)]
+    # Growing it back to 0 is growth now: 0.5-4.5 is what the project holds.
+    before = _record_bytes(pid)
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]})
+    assert r.status_code == 400 and r.json()["detail"] == (
+        "music clip 1 (a): file 'sting.wav' is not in the library, so its slice can shrink but not grow; "
+        "it was 0.500–4.500 of the file. Trim it shorter, split it, move it, level it, fade it, remove it, "
+        "or put the file back under the same name."
+    ), r.text
     # The position in the message is the SENT list's, as ever.
-    r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B, {**CLIP_A, "out": 9.0}]})
-    assert r.status_code == 400 and r.json()["detail"].startswith("music clip 2 (a): file 'sting.wav' is not in the library, so its slice")
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_B, {**trimmed, "out": 9.0}]})
+    assert r.status_code == 400 and r.json()["detail"].startswith(
+        "music clip 2 (a): file 'sting.wav' is not in the library, so its slice can shrink but not grow"
+    )
     assert _record_bytes(pid) == before, "nothing written"
+    # Split at 2.5 s into the file: the head keeps the id, the tail a new one.
+    head = {**trimmed, "out": 2.5, "fade_out": 0.0}
+    tail = {**trimmed, "id": "a2", "at": 3.0, "in": 2.5, "fade_in": 0.0}
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [head, tail, CLIP_B]})
+    assert r.status_code == 200, r.text
+    assert [(c["id"], c["in"], c["out"], c["missing"]) for c in r.json()["music"]] == [
+        ("a", 0.5, 2.5, True), ("a2", 2.5, 4.5, True), ("b", 0.0, 20.0, False),
+    ]
+    assert store.get_project(pid)["edit"]["music"] == [head, tail, CLIP_B]
+    # Undoing the split is sending the one clip back whole: growth past
+    # either piece, refused - two slices held are not one slice.
+    r = client.put(f"/api/projects/{pid}/edit", json={"music": [trimmed, CLIP_B]})
+    assert r.status_code == 400 and "it was 0.500–2.500 of the file" in r.json()["detail"], r.text
 
 
 def test_a_missing_file_can_still_not_be_added(client, library, monkeypatch):
-    """You may not add what is not there: a new clip of the missing file, a
-    stored id re-pointed at it, and the stored clip re-pointed at another
-    missing name are all the existing refusal."""
+    """You may not add what is not there: a clip of a missing file the
+    project never held - under a new id or a stored one - and any piece
+    of the missing file that reaches past what the project holds, are
+    refused; nothing is written."""
     pid = _video()
     assert client.put(f"/api/projects/{pid}/edit", json={"music": [CLIP_A, CLIP_B]}).status_code == 200
     _lose_sting(monkeypatch)
     before = _record_bytes(pid)
+    grows = ("is not in the library, so its slice can shrink but not grow; the project holds 0.000–4.500 of the file. "
+             "Trim it shorter, split it, move it, level it, fade it, remove it, or put the file back under the same name.")
     for body, detail in (
-        ([CLIP_A, CLIP_B, {**CLIP_A, "id": "a2", "at": 6.0}], "music clip 3 (a2): file 'sting.wav' is not in the library."),
-        ([CLIP_A, {**CLIP_B, "file": "sting.wav", "out": 4.5}], "music clip 2 (b): file 'sting.wav' is not in the library."),
+        ([CLIP_A, CLIP_B, {**CLIP_A, "id": "a2", "at": 6.0, "out": 5.0}], f"music clip 3 (a2): file 'sting.wav' {grows}"),
+        ([CLIP_A, {**CLIP_B, "file": "sting.wav"}], f"music clip 2 (b): file 'sting.wav' {grows}"),
         ([{**CLIP_A, "file": "never.mp3"}, CLIP_B], "music clip 1 (a): file 'never.mp3' is not in the library."),
+        ([CLIP_A, CLIP_B, {**CLIP_A, "id": "n1", "file": "never.mp3"}], "music clip 3 (n1): file 'never.mp3' is not in the library."),
     ):
         r = client.put(f"/api/projects/{pid}/edit", json={"music": body})
         assert r.status_code == 400 and r.json()["detail"] == detail, r.text
@@ -2088,27 +2186,63 @@ def test_an_unreadable_marker_list_is_a_400_on_the_get_and_refuses_a_cut_before_
 
 def test_chapters_for_runs_each_marker_to_the_next_and_the_last_to_the_outputs_end():
     """Decision 3, trap 42: computed from the record as it stands, through
-    the picture's list as stored, in whole milliseconds."""
+    the picture's list as stored, in whole milliseconds - and (E6) opened by
+    an untitled chapter from 0 whenever the first one starts later."""
     cut = {"edit": {"version": 2, "video": {"keep": KEEP}, "markers": MARKS}}
-    assert edit.chapters_for(cut, 12.0) == [(1000, 7500, "Intro"), (7500, 10500, "Wrap-up")], (
+    assert edit.chapters_for(cut, 12.0) == [(0, 1000, ""), (1000, 7500, "Intro"), (7500, 10500, "Wrap-up")], (
         "the hidden marker is no chapter; the last runs to the cut picture's end"
     )
     # A whole picture: the last runs to the source's end.
-    assert edit.chapters_for({"edit": {"version": 2, "markers": [MARK_C, MARK_A]}}, 12.0) == [(1000, 9000, "Intro"), (9000, 12000, "Wrap-up")]
-    # Nothing to write: no edit, no markers, only hidden markers.
+    assert edit.chapters_for({"edit": {"version": 2, "markers": [MARK_C, MARK_A]}}, 12.0) == [
+        (0, 1000, ""), (1000, 9000, "Intro"), (9000, 12000, "Wrap-up"),
+    ]
+    # Nothing to write: no edit, no markers, only hidden markers - and so no leading chapter either.
     assert edit.chapters_for({}, 12.0) == []
     assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}}}, 12.0) == []
     assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}, "markers": [MARK_B]}}, 12.0) == []
     # Whole milliseconds, rounded: 1.0004 → 1000, 2.9996 → 3000.
     close = [_marker(id="p", at=1.0004, name="P"), _marker(id="q", at=2.9996, name="Q")]
-    assert edit.chapters_for({"edit": {"version": 2, "markers": close}}, 12.0) == [(1000, 3000, "P"), (3000, 12000, "Q")]
+    assert edit.chapters_for({"edit": {"version": 2, "markers": close}}, 12.0) == [(0, 1000, ""), (1000, 3000, "P"), (3000, 12000, "Q")]
     # No chapter of no length: a marker at the output's very end, or two on
-    # the same instant (either side of a cut both land on the join).
+    # the same instant (either side of a cut both land on the join). The
+    # leading chapter runs to the first chapter WRITTEN, not to a marker left out.
     edges = [_marker(id="e1", at=6.0, name="Left"), _marker(id="e2", at=7.5, name="Right"), _marker(id="e3", at=12.0, name="End")]
-    assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}, "markers": edges}}, 12.0) == [(6000, 10500, "Right")]
+    assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}, "markers": edges}}, 12.0) == [(0, 6000, ""), (6000, 10500, "Right")]
     # Computed NOW from the record given, never cached: the same markers, another list, another answer.
     later = {"edit": {"version": 2, "video": {"keep": [[0.0, 7.0], [7.5, 12.0]]}, "markers": MARKS}}
-    assert edit.chapters_for(later, 12.0) == [(1000, 6500, "Intro"), (6500, 8500, "In the hole"), (8500, 11500, "Wrap-up")]
+    assert edit.chapters_for(later, 12.0) == [(0, 1000, ""), (1000, 6500, "Intro"), (6500, 8500, "In the hole"), (8500, 11500, "Wrap-up")]
     # An unreadable edit is the same refusal the render already gives.
     with pytest.raises(ValueError):
         edit.chapters_for({"edit": {"version": 2, "markers": "nope"}}, 12.0)
+
+
+def test_chapters_for_opens_with_an_untitled_chapter_only_when_the_first_one_starts_after_0():
+    """E6 (the owner's decision of 2026-09-29): a first marker after 0 gets
+    an untitled chapter from 0 to it - the empty title, which the writer
+    writes as ``title=`` - so the atom and ffmpeg's reader agree on where
+    the first NAMED chapter starts; a first marker at 0 gets none, and
+    neither does an edit with no drawn marker."""
+    def at(*moments) -> dict:
+        return {"edit": {"version": 2, "markers": [
+            _marker(id=f"m{i}", at=moment, name=f"N{i}") for i, moment in enumerate(moments)
+        ]}}
+
+    assert edit.chapters_for(at(12.0), 30.0) == [(0, 12000, ""), (12000, 30000, "N0")], "the supervisor's walk: two chapters"
+    assert edit.chapters_for(at(0.0, 12.0), 30.0) == [(0, 12000, "N0"), (12000, 30000, "N1")], "at 0: no leading chapter"
+    # At 0 to the millisecond is at 0; one millisecond later is not.
+    assert edit.chapters_for(at(0.0004), 30.0) == [(0, 30000, "N0")]
+    assert edit.chapters_for(at(0.001), 30.0) == [(0, 1, ""), (1, 30000, "N0")]
+    # Through a cut: the marker's OUTPUT moment decides, not its source one. A
+    # marker at source 7.5 lands on the join at output 6.0 of KEEP.
+    joined = {"edit": {"version": 2, "video": {"keep": KEEP}, "markers": [_marker(id="j", at=7.5, name="J")]}}
+    assert edit.chapters_for(joined, 12.0) == [(0, 6000, ""), (6000, 10500, "J")]
+    # A picture cut so the first marker's source moment is the output's 0.
+    head_cut = {"edit": {"version": 2, "video": {"keep": [[2.0, 12.0]]}, "markers": [_marker(id="h", at=2.0, name="H")]}}
+    assert edit.chapters_for(head_cut, 12.0) == [(0, 10000, "H")]
+    # No markers, or only hidden ones: nothing at all.
+    assert edit.chapters_for({"edit": {"version": 2, "markers": []}}, 30.0) == []
+    assert edit.chapters_for({"edit": {"version": 2, "video": {"keep": KEEP}, "markers": [MARK_B]}}, 12.0) == []
+    # The leading chapter's title is the empty string, never None: a block
+    # with no title line breaks ffmpeg's reader (tests/test_chapters.py).
+    (lead, _) = edit.chapters_for(at(12.0), 30.0)
+    assert lead[2] == "" and isinstance(lead[2], str)

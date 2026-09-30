@@ -16,7 +16,7 @@ import { ApiError, api } from "../../../api/client";
 import { UNDO_DEPTH, editBody, type Keep, type Marker, type MusicClip } from "../../../lib/edit";
 import { narrationPlanKey } from "../../../lib/timeline";
 import { mountHook } from "./testing/mountHook";
-import { commitRequest, nextHistory, useEditCommits, type AfterCommit, type EditCommitsDeps, type History } from "./useEditCommits";
+import { afterRefusal, commitRequest, nextHistory, refusalKind, useEditCommits, type AfterCommit, type EditCommitsDeps, type History } from "./useEditCommits";
 import type { Commit, EditState, Entry, Op } from "./types";
 // The hook's own source, as text: the one whole-file negative that stood over
 // the root (lib/music.test.ts, the pin "commits every edit with a PUT … and
@@ -149,6 +149,49 @@ function mount(over: Partial<EditCommitsDeps> = {}, qc?: QueryClient) {
   return { ...m, state, committedRef, committedOffsetsRef, sourceDurationRef, editLockedRef, setSelection, setRefusal, onOffsetsSaved, after };
 }
 
+describe("afterRefusal - the stack after a refused commit (E6)", () => {
+  const e1 = entry(1);
+  const e2 = entry(2);
+  const e3 = entry(3);
+  const h: History = { past: [e1, e2], future: [e3] };
+  const refused = new ApiError(400, "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice can shrink but not grow");
+
+  it("takes a refused undo's entry off the PAST and a refused redo's off the FUTURE, the other side the same array", () => {
+    const afterUndo = afterRefusal(h, { kind: "undo", op: e2.undo, entry: e2 }, refused);
+    expect(afterUndo.past).toEqual([e1]);
+    expect(afterUndo.future).toBe(h.future);
+    const afterRedo = afterRefusal(h, { kind: "redo", op: e3.redo, entry: e3 }, refused);
+    expect(afterRedo.future).toEqual([]);
+    expect(afterRedo.past).toBe(h.past);
+  });
+
+  it("keeps the stack - the same object - for a 409, a 5xx, a network error, a refused do, or an entry no longer on top", () => {
+    const undoTop = { kind: "undo" as const, op: e2.undo, entry: e2 };
+    expect(afterRefusal(h, undoTop, new ApiError(409, "A job holds the project."))).toBe(h);
+    expect(afterRefusal(h, undoTop, new ApiError(500, "Internal Server Error"))).toBe(h);
+    expect(afterRefusal(h, undoTop, new TypeError("Failed to fetch"))).toBe(h);
+    expect(afterRefusal(h, { kind: "do", op: edit(), before: edit() }, refused)).toBe(h);
+    expect(afterRefusal(h, { kind: "undo", op: e1.undo, entry: e1 }, refused)).toBe(h);
+    expect(afterRefusal(h, { kind: "redo", op: e2.redo, entry: e2 }, refused)).toBe(h);
+    // An entry EQUAL to the top but not the top itself is not the one that was sent.
+    expect(afterRefusal(h, { kind: "undo", op: e2.undo, entry: { ...e2 } }, refused)).toBe(h);
+  });
+
+  it("gives the refusal the undo's or the redo's lead when an EDIT step was taken off, the timing's with its list for a timing step, else the edit's or the timing's", () => {
+    const offsets: Entry = { undo: { kind: "offsets", values: { 3: null } }, redo: { kind: "offsets", values: { 3: 1 } } };
+    expect(refusalKind({ kind: "undo", op: e2.undo, entry: e2 }, refused)).toBe("undo");
+    expect(refusalKind({ kind: "redo", op: e3.redo, entry: e3 }, refused)).toBe("redo");
+    // A timing step taken off keeps the timing's lead, never the cut's and the clips' (the re-review's r1).
+    expect(refusalKind({ kind: "undo", op: offsets.undo, entry: offsets }, refused)).toBe("timing-undo");
+    expect(refusalKind({ kind: "redo", op: offsets.redo, entry: offsets }, refused)).toBe("timing-redo");
+    expect(refusalKind({ kind: "undo", op: e2.undo, entry: e2 }, new ApiError(409, "busy"))).toBe("edit");
+    expect(refusalKind({ kind: "do", op: edit(), before: edit() }, refused)).toBe("edit");
+    expect(refusalKind({ kind: "do", op: offsets.redo, before: offsets.undo }, refused)).toBe("timing");
+    expect(refusalKind({ kind: "undo", op: offsets.undo, entry: offsets }, new ApiError(409, "busy"))).toBe("timing");
+    expect(refusalKind(undefined, refused)).toBe("edit");
+  });
+});
+
 describe("useEditCommits - the stack mounted", () => {
   let mounted: ReturnType<typeof mount> | null = null;
   afterEach(() => { mounted?.unmount(); mounted = null; });
@@ -198,6 +241,191 @@ describe("useEditCommits - the stack mounted", () => {
     expect(m.current().editLocked).toBe(true);
     expect(m.editLockedRef.current).toBe(true);
     expect(m.after.clearMoved).not.toHaveBeenCalled();
+  });
+
+  it("keeps the range selection only for a do flagged keepSelection - a marker dropped, named or moved - and clears it for a markers-only do without it, for that commit's undo and redo, and for every other edit (E6)", async () => {
+    // The owner decided about DROPPING a marker (E5b's parked call). The
+    // gesture says so on its commit; the stack does not guess from what the
+    // commit changed, since a marker's removal changes the markers alone too
+    // and must clear the range - else a second Delete cuts it.
+    vi.mocked(api.put).mockResolvedValue({});
+    const m = (mounted = mount());
+    const land = (n: number) => { m.state.stamp = { data: n, error: 0 }; m.rerender(); };
+    m.current().commitEdit({ ...committed(), markers: [intro, wrap] }, true);
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(1);
+    // The flag is the gesture's, not the request's: the body is what it always was.
+    expect(vi.mocked(api.put).mock.calls[0][1]).toEqual({ video: CUT, narration: null, markers: [intro, wrap] });
+    expect(m.setSelection).not.toHaveBeenCalled();
+    // Its undo and its redo clear the range, as every undo and redo did before E6.
+    land(2);
+    m.current().undo();
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(2);
+    expect(m.setSelection).toHaveBeenCalledTimes(1);
+    expect(m.setSelection).toHaveBeenLastCalledWith(null);
+    land(3);
+    m.current().redo();
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(3);
+    expect(m.setSelection).toHaveBeenCalledTimes(2);
+    // A markers-only do WITHOUT the flag - a marker's removal - clears it.
+    land(4);
+    m.current().commitEdit({ ...m.committedRef.current, markers: [intro] });
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(4);
+    expect(m.setSelection).toHaveBeenCalledTimes(3);
+    // The clips alone: cleared.
+    land(5);
+    m.current().commitEdit({ ...m.committedRef.current, music: [{ ...bed, at: 9 }] });
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(5);
+    expect(m.setSelection).toHaveBeenCalledTimes(4);
+    // A cut: cleared, whatever it carries.
+    land(6);
+    m.current().commitEdit({ ...m.committedRef.current, video: [[0, 3], [5, 12]], markers: [] });
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(6);
+    expect(m.setSelection).toHaveBeenCalledTimes(5);
+    expect(m.setSelection).toHaveBeenLastCalledWith(null);
+    // An offsets commit never touched the selection, before E6 or since.
+    land(7);
+    vi.mocked(api.patch).mockResolvedValue({ sentences: [] });
+    m.current().commitOffsets([{ index: 3, offset: 1 }]);
+    await m.settle();
+    expect(m.setSelection).toHaveBeenCalledTimes(5);
+  });
+
+  it("takes an undo the server refused on its body (400) off the undo list, says so first, and the next Ctrl+Z sends nothing (E6)", async () => {
+    // A missing clip trimmed shorter: the server keeps it (E6), but not its
+    // undo, which would lengthen it again. Before E6's fix round the refused
+    // entry stayed on top and every later Undo resent it.
+    const gone: MusicClip = { ...bed, id: "g", file: "gone.mp3", in: 0, out: 4, missing: true, file_duration: null };
+    vi.mocked(api.put).mockResolvedValue({});
+    const m = (mounted = mount());
+    m.committedRef.current = { ...committed(), music: [gone] };
+    m.current().commitEdit({ ...m.committedRef.current, music: [{ ...gone, in: 1 }] });
+    await m.settle();
+    expect(m.current().history.past).toHaveLength(1);
+    m.state.stamp = { data: 2, error: 0 };
+    m.rerender();
+    const said = "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice can shrink but not grow; it was 1.000–4.000 of the file.";
+    vi.mocked(api.put).mockRejectedValueOnce(new ApiError(400, said));
+    vi.mocked(m.after.clearMoved).mockClear();
+    m.current().undo();
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(2);
+    expect(m.current().history).toEqual({ past: [], future: [] });
+    expect(m.current().editError).toBe(
+      "That undo was refused and has been taken off the undo list — the strip still shows the cut and the clips the server"
+      + ` holds. To undo past it, put the file back in the library first. The server said: ${said}`,
+    );
+    expect(m.after.clearMoved).toHaveBeenCalledTimes(1);
+    expect(m.committedRef.current.music).toEqual([{ ...gone, in: 1 }]);
+    m.current().undo();
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(2);
+  });
+
+  it("with two steps, a refused undo takes the top one off and the next Ctrl+Z sends the one beneath (E6)", async () => {
+    vi.mocked(api.put).mockResolvedValue({});
+    const m = (mounted = mount());
+    m.current().commitEdit({ ...committed(), markers: [intro, wrap] });
+    await m.settle();
+    m.state.stamp = { data: 2, error: 0 };
+    m.rerender();
+    m.current().commitEdit({ ...m.committedRef.current, music: [{ ...bed, at: 9 }] });
+    await m.settle();
+    m.state.stamp = { data: 3, error: 0 };
+    m.rerender();
+    const [beneath, top] = m.current().history.past;
+    vi.mocked(api.put).mockRejectedValueOnce(new ApiError(400, "refused on its body"));
+    m.current().undo();
+    await m.settle();
+    expect(vi.mocked(api.put).mock.calls[2][1]).toEqual(editBody(top.undo as EditOp, m.committedRef.current, SOURCE));
+    expect(m.current().history.past).toEqual([beneath]);
+    expect(m.current().history.past[0]).toBe(beneath);
+    m.current().undo();
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(4);
+    // The step beneath is the whole edit before the first commit - against what the server still holds,
+    // which kept the refused step's clip change, so the clips ride along too.
+    expect(vi.mocked(api.put).mock.calls[3][1]).toEqual({ video: CUT, narration: null, music: [bed], markers: [intro] });
+    expect(m.current().history.past).toEqual([]);
+  });
+
+  it("keeps an undo refused with a 409 - a job, not a verdict on the body - and the next Ctrl+Z resends it byte for byte (E6)", async () => {
+    vi.mocked(api.put).mockResolvedValue({});
+    const m = (mounted = mount());
+    m.current().commitEdit({ ...committed(), markers: [intro, wrap] });
+    await m.settle();
+    m.state.stamp = { data: 2, error: 0 };
+    m.rerender();
+    vi.mocked(api.put).mockRejectedValueOnce(new ApiError(409, "A job holds the project."));
+    m.current().undo();
+    await m.settle();
+    expect(m.current().history.past).toHaveLength(1);
+    expect(m.current().editError).toMatch(/^That edit was not saved/);
+    m.current().undo();
+    await m.settle();
+    expect(api.put).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(api.put).mock.calls[2][1]).toEqual(vi.mocked(api.put).mock.calls[1][1]);
+    expect(m.current().history.past).toEqual([]);
+  });
+
+  it("takes a redo the server refused on its body off the redo list, the undo list untouched, and says so first (E6)", async () => {
+    vi.mocked(api.put).mockResolvedValue({});
+    const m = (mounted = mount());
+    m.current().commitEdit({ ...committed(), markers: [intro, wrap] });
+    await m.settle();
+    m.state.stamp = { data: 2, error: 0 };
+    m.rerender();
+    m.current().commitEdit({ ...m.committedRef.current, music: [{ ...bed, at: 9 }] });
+    await m.settle();
+    m.state.stamp = { data: 3, error: 0 };
+    m.rerender();
+    m.current().undo();
+    await m.settle();
+    m.state.stamp = { data: 4, error: 0 };
+    m.rerender();
+    const past = m.current().history.past;
+    expect(past).toHaveLength(1);
+    expect(m.current().history.future).toHaveLength(1);
+    vi.mocked(api.put).mockRejectedValueOnce(new ApiError(400, "refused on its body"));
+    m.current().redo();
+    await m.settle();
+    expect(m.current().history.future).toEqual([]);
+    expect(m.current().history.past).toBe(past);
+    // The server's sentence names no file, so the lead advises none (the re-review's r1).
+    expect(m.current().editError).toBe(
+      "That redo was refused and has been taken off the redo list — the strip still shows the cut and the clips the server"
+      + " holds. The server said: refused on its body",
+    );
+  });
+
+  it("takes a TIMING undo refused on its body off the undo list under the timing's own lead, advising no file (E6, r1)", async () => {
+    // An offsets undo can meet a 400: an index a transcript save has since
+    // removed (api/routers/narration.py). The step can never apply, so it is
+    // dropped - but it is a timing, not the cut and the clips, and no library
+    // file has anything to do with it.
+    vi.mocked(api.patch).mockResolvedValue({ sentences: [] });
+    const m = (mounted = mount());
+    m.current().commitOffsets([{ index: 3, offset: 1 }]);
+    await m.settle();
+    expect(m.current().history.past).toHaveLength(1);
+    m.state.stamp = { data: 2, error: 0 };
+    m.rerender();
+    const said = "offset 1: sentence index 3 is outside the transcript.";
+    vi.mocked(api.patch).mockRejectedValueOnce(new ApiError(400, said));
+    m.current().undo();
+    await m.settle();
+    expect(api.patch).toHaveBeenCalledTimes(2);
+    expect(m.current().history).toEqual({ past: [], future: [] });
+    expect(m.current().editError).toBe(
+      "That timing was not saved — the blocks are back where the last saved plan puts them. It has been taken off the undo"
+      + ` list. The server said: ${said}`,
+    );
+    expect(m.current().editError).not.toContain("put the file back");
   });
 
   it("stays locked until the plan's own stamp moves - not on a re-render, not on the job - then clears the moved paint once", async () => {

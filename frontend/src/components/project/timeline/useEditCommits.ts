@@ -14,8 +14,8 @@
  */
 import { useCallback, useLayoutEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { api, errorMessage } from "../../../api/client";
-import { UNDO_DEPTH, editBody, editRefusal, sameEdit, sameMarkers, sameMusic, trackBody } from "../../../lib/edit";
+import { ApiError, api, errorMessage } from "../../../api/client";
+import { UNDO_DEPTH, editBody, editRefusal, sameEdit, sameMarkers, sameMusic, trackBody, type RefusalLead } from "../../../lib/edit";
 import { narrationPlanKey, type EditPayload, type NarrationPlan } from "../../../lib/timeline";
 import type { Answer, Commit, EditState, Entry, Op, SavedSentence, Selection } from "./types";
 
@@ -99,6 +99,48 @@ export function nextHistory(h: History, variables: Commit): History {
   return { past: [...h.past, variables.entry].slice(-UNDO_DEPTH), future: h.future.slice(0, -1) };
 }
 
+/** An undo or a redo the server refused ON ITS BODY: a 400, its verdict on what was sent - never a 409, a 5xx or the network. */
+function refusedOnItsBody(variables: Commit, error: unknown): variables is Extract<Commit, { kind: "undo" | "redo" }> {
+  return variables.kind !== "do" && error instanceof ApiError && error.status === 400;
+}
+
+/**
+ * The stack after a commit was REFUSED (E6). An undo or a redo the server
+ * refused on its body - a 400 - takes its entry off the side it came from,
+ * so the next Ctrl+Z (or Ctrl+Y) reaches the entry beneath instead of
+ * resending the same refused body for good; it goes only while it is still
+ * the top of that side (`=== variables.entry`). Everything else keeps the
+ * stack exactly as it is, the same object: a 409 (a job holds the project, the
+ * extracted audio is missing), a 5xx or a network error is transient and the
+ * same step may succeed later, and a refused `do` pushed nothing.
+ *
+ * Dropped, not set aside: every edit entry holds the whole edit before and
+ * after, so a step set aside could never be applied later without undoing
+ * everything after it. What this costs is said in the refusal's lead: had the
+ * file been put back first, the undo would have been taken.
+ */
+export function afterRefusal(h: History, variables: Commit, error: unknown): History {
+  if (!refusedOnItsBody(variables, error)) return h;
+  if (variables.kind === "undo") {
+    return h.past[h.past.length - 1] === variables.entry ? { past: h.past.slice(0, -1), future: h.future } : h;
+  }
+  return h.future[h.future.length - 1] === variables.entry ? { past: h.past, future: h.future.slice(0, -1) } : h;
+}
+
+/**
+ * Which lead a refused commit's message takes (`editRefusal`): the undo's or
+ * the redo's when `afterRefusal` dropped an EDIT step, the timing's with the
+ * step's list named when it dropped an offsets step - never the edit's words
+ * about the cut and the clips for a timing step - else the timing's or the
+ * edit's.
+ */
+export function refusalKind(variables: Commit | undefined, error: unknown): RefusalLead {
+  if (variables && refusedOnItsBody(variables, error)) {
+    return variables.op.kind === "edit" ? variables.kind : variables.kind === "undo" ? "timing-undo" : "timing-redo";
+  }
+  return variables?.op.kind === "offsets" ? "timing" : "edit";
+}
+
 export function useEditCommits({
   projectId, jobActive, plan, committedRef, committedOffsetsRef, sourceDurationRef, setSelection, onOffsetsSaved, afterCommitRef,
   refusal, setRefusal, editLockedRef,
@@ -160,7 +202,12 @@ export function useEditCommits({
       // What the server held until this instant is what undo goes back to.
       if (op.kind === "edit") {
         committedRef.current = { video: op.video, narration: op.narration, music: op.music, markers: op.markers };
-        setSelection(null);
+        // A marker dropped, named or moved leaves the range selection as it
+        // was (E6, the owner's decision of 2026-09-29) - the gesture says so
+        // on its commit (`keepSelection`). Every other edit clears it: a
+        // marker's removal, and every undo and redo, whose entry does not
+        // remember the gesture that made it.
+        if (!(variables.kind === "do" && variables.keepSelection)) setSelection(null);
       } else {
         committedOffsetsRef.current = { ...committedOffsetsRef.current, ...op.values };
         // The List view reads the new numbers from the page's copy, folded in
@@ -176,8 +223,13 @@ export function useEditCommits({
       }
     },
     // A refused commit puts every painted thing back - and drops the marker
-    // `M` dropped, which the server never took.
-    onError: () => { afterCommitRef.current.clearMoved(); afterCommitRef.current.dropPending(); },
+    // `M` dropped, which the server never took - and (E6) an undo or a redo
+    // refused on its body is taken off the stack (`afterRefusal`).
+    onError: (error, variables) => {
+      afterCommitRef.current.clearMoved();
+      afterCommitRef.current.dropPending();
+      setHistory((h) => afterRefusal(h, variables, error));
+    },
   });
   const editLocked = jobActive || commit.isPending || applying;
   editLockedRef.current = editLocked;
@@ -186,10 +238,11 @@ export function useEditCommits({
    * it (`editRefusal`): the server names a clip by its position and its id,
    * which is a handle nobody here chose, and the first thing to say is that
    * nothing was saved. The detail is never swallowed - a refusal this client
-   * does not recognise still reaches the user whole.
+   * does not recognise still reaches the user whole. An undo or a redo that
+   * `afterRefusal` took off the stack says so first (E6).
    */
   const editError = refusal ?? (commit.isError
-    ? editRefusal(errorMessage(commit.error), commit.variables?.op.kind === "offsets" ? "timing" : "edit")
+    ? editRefusal(errorMessage(commit.error), refusalKind(commit.variables, commit.error))
     : null);
 
   /**
@@ -197,8 +250,10 @@ export function useEditCommits({
    * Compared and stored in the PUT body's own terms - a whole track is null -
    * so a split on the very start of an untouched track, which makes a list
    * that is still the whole source, commits nothing and leaves no undo entry.
+   * `keepSelection` is the gesture's intent that the range selection outlive
+   * it (E6: a marker dropped, named or moved); every other commit clears it.
    */
-  const commitEdit = useCallback((next: EditState) => {
+  const commitEdit = useCallback((next: EditState, keepSelection = false) => {
     const before = committedRef.current;
     const source = sourceDurationRef.current;
     if (sameEdit(next, before, source) && sameMusic(next.music, before.music) && sameMarkers(next.markers, before.markers)) return;
@@ -208,7 +263,10 @@ export function useEditCommits({
       music: next.music,
       markers: next.markers,
     };
-    commit.mutate({ kind: "do", op: { kind: "edit", ...after }, before: { kind: "edit", ...before } });
+    commit.mutate({
+      kind: "do", op: { kind: "edit", ...after }, before: { kind: "edit", ...before },
+      ...(keepSelection ? { keepSelection: true as const } : {}),
+    });
   }, [commit, committedRef, sourceDurationRef]);
 
   /** ONE request for however many blocks: their offsets before (from the stored copy) and after. False when nothing changed. */

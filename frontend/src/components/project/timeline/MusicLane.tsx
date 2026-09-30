@@ -54,9 +54,9 @@ export function MusicLane({
               + `, fades ${held.fade_in.toFixed(1)} s in / ${held.fade_out.toFixed(1)} s out`
               + (held.missing
                 ? "\n\nMISSING: this file is no longer in the library, so it is silent here and the"
-                  + " render will refuse. Drag to move it, set its level and fades, or Delete to remove"
-                  + " it — it cannot be trimmed while the file is gone. Or upload the file again under"
-                  + " the same name."
+                  + " render will refuse. Drag to move it, drag an end to shorten it, set its level and"
+                  + " fades, or Delete to remove it — it cannot be lengthened past the part of the file"
+                  + " it has while the file is gone. Or upload the file again under the same name."
                 : "\n\nDrag to move it (Alt or Ctrl: no snapping); drag an end to trim it; Delete removes it.")}
             style={{ left: held.at * pps, width }}
             onPointerDown={(event) => onClipPointerDown(event, held)}
@@ -81,16 +81,11 @@ export function MusicLane({
             <span className="os-tl-clip-name">{held.missing ? `${held.file} — missing` : held.file}</span>
             {/* The trim zones: the cursor only - the pointer-down
                 bubbles to the clip, which asks `clipAt` which end
-                it has. A missing clip has a body and no edges
-                (E4c: its slice cannot change), so it gets no
-                zones and no ew-resize cursor - `clipAt` answers
-                "body" for it wherever it is pressed. */}
-            {!held.missing && (
-              <>
-                <span className="os-tl-clip-edge in" aria-hidden="true" />
-                <span className="os-tl-clip-edge out" aria-hidden="true" />
-              </>
-            )}
+                it has. A missing clip has them too (E6): it may be
+                trimmed shorter, never longer, and `trimClip` holds
+                its edges inside the slice it has. */}
+            <span className="os-tl-clip-edge in" aria-hidden="true" />
+            <span className="os-tl-clip-edge out" aria-hidden="true" />
           </button>
         );
       })}

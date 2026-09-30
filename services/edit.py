@@ -374,24 +374,35 @@ def _check_music(clips, library: dict, *, flag_missing: bool, stored=()) -> list
     ``library`` is ``{name: duration}``. A file not in it is merely unbounded
     when reading back (``flag_missing`` True: the clip is kept and
     :func:`stored_music` marks it missing) and, when storing (False), a
-    refusal - unless the clip is already STORED (E4c, the owner's ruling of
-    2026-09-24: "you may keep what you have, you may not add what is not
-    there"). ``stored`` is the record's own clips as :func:`stored_music`
-    reads them; a clip whose file has gone is accepted iff a stored clip
-    with the same ``id`` names the same ``file`` and the same slice (``in``
-    and ``out``). Everything else about it may change - ``at`` (a move, or
-    a cut's ripple), ``gain``, the fades - and is checked exactly as a live
-    clip's is, the fades against the slice's own length, which is known. The
-    slice cannot change because the file it slices cannot be measured: a
-    longer slice of an absent file is as much "adding what is not there" as
-    a new clip of it. With nothing stored every missing file is a refusal,
-    exactly as before E4c."""
+    refusal - unless the clip lies inside what is already STORED (E4c, the
+    owner's ruling of 2026-09-24, "you may keep what you have, you may not
+    add what is not there", relaxed by E6 on 2026-09-29 to "you may keep
+    what you have, and you may keep less of it"). ``stored`` is the record's
+    own clips as :func:`stored_music` reads them; a clip whose file has gone
+    is accepted iff a stored clip names the same ``file`` with a slice that
+    CONTAINS the new one (``in`` no earlier, ``out`` no later, both rounded
+    as every number is). The ``id`` may be the stored clip's own (a trim) or
+    a new one (the second piece of a split, or of a cut's ripple). Everything
+    else about it may change - ``at`` (a move, or a cut's ripple), ``gain``,
+    the fades - and is checked exactly as a live clip's is, the fades against
+    the slice's own length, which is known. The slice cannot GROW because
+    the file it slices cannot be measured: a longer slice of an absent file
+    is as much "adding what is not there" as a new clip of it, and so is any
+    clip naming a missing file the record never held. With nothing stored
+    every missing file is a refusal, exactly as before E4c."""
     if isinstance(clips, (str, bytes, dict)) or not isinstance(clips, (list, tuple)):
         raise ValueError("The music must be a list of clips.")
     if len(clips) > MAX_CLIPS:
         raise ValueError(f"The music is limited to {MAX_CLIPS} clips; this edit has {len(clips)}.")
 
     kept = {clip["id"]: clip for clip in stored}
+    # E6: every slice the record holds of each file, rounded as the new
+    # clips' numbers are, so containment is decided on the stored precision.
+    held_slices: dict[str, list[tuple[float, float]]] = {}
+    for clip in stored:
+        held_slices.setdefault(clip["file"], []).append(
+            (round(float(clip["in"]), PRECISION) + 0.0, round(float(clip["out"]), PRECISION) + 0.0)
+        )
     checked: list[dict] = []
     seen: dict[str, int] = {}
     for position, clip in enumerate(clips, start=1):
@@ -420,24 +431,34 @@ def _check_music(clips, library: dict, *, flag_missing: bool, stored=()) -> list
         if not isinstance(name, str) or not name:
             raise ValueError(f"{label}: file must be the name of a library file.")
         duration = library.get(name)
-        # E4c: a file the library has lost is kept only under a stored id
-        # that names it - a new id, or a stored id re-pointed at it, is
-        # adding what is not there.
-        held = kept.get(ident) if duration is None and not flag_missing else None
-        if duration is None and not flag_missing and (held is None or held.get("file") != name):
+        # E4c/E6: a file the library has lost is kept only inside a slice the
+        # record already holds of it - a file the record never held, under a
+        # new id or a stored one, is adding what is not there.
+        held = held_slices.get(name) if duration is None and not flag_missing else None
+        if duration is None and not flag_missing and not held:
             raise ValueError(f"{label}: file '{name}' is not in the library.")
 
         numbers = {key: _clip_number(clip, key, label) for key in _CLIP_NUMBERS}
         at, start, end, gain, fade_in, fade_out = (numbers[key] for key in _CLIP_NUMBERS)
         length = round(end - start, PRECISION)
-        if held is not None:
-            was_in, was_out = (round(float(held[key]), PRECISION) for key in ("in", "out"))
-            if start != was_in or end != was_out:
-                raise ValueError(
-                    f"{label}: file '{name}' is not in the library, so its slice cannot change; "
-                    f"it was {was_in:.3f}–{was_out:.3f} of the file. Move it, level it, fade it, "
-                    "remove it, or put the file back under the same name."
-                )
+        if held and not any(was_in <= start and end <= was_out for was_in, was_out in held):
+            # Grown past every stored slice of the file. Said against the
+            # clip's own stored slice when its id holds this file, else
+            # against every slice the record holds of it.
+            own = kept.get(ident)
+            if own is not None and own.get("file") == name:
+                was_in, was_out = (round(float(own[key]), PRECISION) for key in ("in", "out"))
+                was = f"it was {was_in:.3f}–{was_out:.3f} of the file"
+            else:
+                spans = [f"{a:.3f}–{b:.3f}" for a, b in sorted(set(held))]
+                was = "the project holds " + (
+                    spans[0] if len(spans) == 1 else ", ".join(spans[:-1]) + " and " + spans[-1]
+                ) + " of the file"
+            raise ValueError(
+                f"{label}: file '{name}' is not in the library, so its slice can shrink but not grow; "
+                f"{was}. Trim it shorter, split it, move it, level it, fade it, remove it, "
+                "or put the file back under the same name."
+            )
         if at < 0:
             raise ValueError(f"{label}: at ({at:.3f}) starts before 0.")
         if start < 0:
@@ -472,8 +493,9 @@ def validate_music(clips, library: dict, *, stored=()) -> list[dict]:
     :data:`CLIP_KEYS`; ``id`` matching ``^[a-z0-9_-]{1,32}$`` and unique;
     ``file`` in ``library`` (``{name: duration}``) - or, with ``stored``
     given (the record's clips as :func:`stored_music` reads them), a file
-    the library has lost under a stored id that names it with the same
-    ``in`` and ``out`` (E4c: you may keep what you have, you may not add
+    the library has lost with a slice inside one the record already holds
+    of that file, under the stored id or a new one (E4c, relaxed by E6: you
+    may keep what you have, and you may keep less of it; you may not add
     what is not there); the numbers finite, not bool, rounded to
     :data:`PRECISION`; ``at >= 0``; ``0 <= in < out <=`` the file's length
     with ``out - in >= MIN_CLIP_SECONDS``; ``0 <= gain <= 1``; the fades
@@ -664,6 +686,23 @@ def chapters_for(record: dict, source_duration) -> list[tuple[int, int, str]]:
     length and is left out. Titles are the names, unescaped: the writer
     escapes them (``core.video_creator._ffmeta_escape``).
 
+    **A leading untitled chapter** (E6, the owner's decision of
+    2026-09-29): when the first chapter starts after 0, a chapter from 0 to
+    it with an EMPTY title comes first. An MP4 carries its chapters twice,
+    and the two readers disagreed on exactly that stretch: the ``chpl``
+    atom kept the first chapter's true start, while ffmpeg's reader (the
+    chapter track) reported the first chapter from 0.0 whatever its start.
+    With the file covered from 0, both agree on where the first NAMED
+    chapter begins. The title is ``""`` - a ``title=`` line with nothing
+    after it - and not a block with no ``title`` line: measured on the
+    machine's 8.0.1 and the bundled 7.1 (2026-09-29), a block with no title
+    leaves the atom right, but ffmpeg's reader (which takes the chapter
+    track) then put the first named chapter back at 0.0 and listed the last
+    one twice; with ``title=`` every reader lists the untitled chapter,
+    then the named ones at their starts (``tests/test_chapters.py`` holds
+    it on both binaries). No leading chapter when the first one is at 0 (to
+    the millisecond) or there is none.
+
     THE one place the list is computed, and computed from the record as it
     stands when this is called (trap 42): nothing caches it, and the render
     calls it with the record it is rendering. ``[]`` when there is nothing
@@ -687,6 +726,8 @@ def chapters_for(record: dict, source_duration) -> list[tuple[int, int, str]]:
         if end_ms <= start_ms:
             continue
         chapters.append((start_ms, end_ms, marker["name"]))
+    if chapters and chapters[0][0] > 0:
+        chapters.insert(0, (0, chapters[0][0], ""))
     return chapters
 
 
@@ -940,11 +981,12 @@ def set_edit(pid: str, video=UNCHANGED, narration=UNCHANGED, music=UNCHANGED, ma
 
     **A music list is checked against the record's STORED clips** (E4c):
     a clip whose file the library has lost is accepted iff the record
-    already holds it - same id, same file, same slice - so a lost file no
-    longer freezes the lane; see :func:`validate_music`. "Stored" is what
-    the record holds at write time, so the list is checked against the
-    record read before the lock (a refused list writes nothing) and AGAIN
-    against the record re-read inside it, which is the one being written
+    already holds a clip of that file whose slice contains the new one
+    (E6: the same clip trimmed shorter, or a piece of it under a new id) -
+    so a lost file no longer freezes the lane; see :func:`validate_music`.
+    "Stored" is what the record holds at write time, so the list is checked
+    against the record read before the lock (a refused list writes nothing)
+    and AGAIN against the record re-read inside it, which is the one being written
     - a commit that landed in between may have changed what is stored. A
     stored music list this version cannot read is :func:`stored_music`'s
     error on either read; clearing the music (``[]`` or ``None``) reads

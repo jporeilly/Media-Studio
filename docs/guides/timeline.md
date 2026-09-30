@@ -94,7 +94,9 @@ like Camtasia's Ctrl+Delete rather than leaving a hole.
 The cut is refused, rather than half-done, when it would leave the picture or
 the narration with nothing at all: keep at least one range. The Music lane has
 no such floor — a cut across every clip removes them all, and Undo brings them
-back.
+back — unless one of them names a file that has left the library: a cut of the
+picture across such a clip is refused before anything is saved (see *When a
+file leaves the library*, below).
 
 A sentence that is spoken after the end of the cut picture is **dropped** —
 the re-voice leaves it out entirely. The strip says so above the ruler and on
@@ -107,6 +109,15 @@ or drag the sentence earlier.
 anything done to the Music lane, or a marker dropped, moved, renamed or
 removed — and **Ctrl+Y** (or **Ctrl+Shift+Z**) redoes
 it. The toolbar has both buttons.
+
+Undo is refused when it would lengthen a music clip whose file has left the
+library: the undo of a trim or a split of such a clip, and the undo of its
+removal. The refused step is taken off the list and the message says so; the
+steps before it are often refused for the same reason. To undo them, put the
+file back in the library under the same name first. Redo likewise: a redo the
+server refuses is taken off the redo list. (A cut of the picture across such a
+clip is refused before it is made, so every cut made while a file is missing
+can be undone.)
 
 Undo is for **this visit**. The app stores the current cut and the current
 timing, not their history, so the stack is emptied when the project is left or
@@ -216,16 +227,18 @@ into removed picture, because the ruler only shows kept frames.
 **Markers become chapters.** When you render, every marker the ruler shows
 becomes a chapter in the MP4, running from its moment to the next marker's
 (or to the end) and titled with its name; a marker in removed picture is no
-chapter. With no markers the render is exactly what it was, and the file
-keeps whatever chapters the source video had. Two things about readers, said
-plainly: the stretch before the first marker belongs to no chapter, and a
-player built on ffmpeg's reader (mpv, ffprobe) shows the first chapter as
-starting at 0:00 whatever its true start — the file's own chapter list, which
-VLC reads, holds the moment you set.
+chapter. When the first marker is not at 0:00, an untitled chapter runs from
+the start of the video to it, so the whole file is covered and the two kinds
+of reader agree: the file's own chapter list, which VLC reads, and a player
+built on ffmpeg's reader (mpv, ffprobe) both show the first named chapter
+starting at the moment you set. With no markers the render is exactly what
+it was, and the file keeps whatever chapters the source video had.
 
 Selecting a marker gives up a selected music clip, and selecting a clip gives
 up the marker. Delete removes the selected marker first, then a selected clip,
-then the range; Escape gives them up in that order. Every marker change is one
+then the range; Escape gives them up in that order. Dropping, naming or moving
+a marker leaves a range selection on the strip exactly as it was; removing one,
+Undo and Redo clear it, as every other edit does. Every marker change is one
 save, and Undo takes it back like any other edit.
 
 ## Re-timing a sentence
@@ -345,30 +358,45 @@ the eye says.
 
 ### When a file leaves the library
 
-If a file is deleted from the library while a project still names it, that
-project's clips are marked **missing**: they are hatched on the lane, they are
-silent in the audition, and the render refuses on them rather than quietly
-producing a video without them.
+If a file a project names leaves the library — removed outside the app, or the
+project restored or copied without it; the app itself refuses to delete a file
+a project uses — that project's clips are marked **missing**: they are hatched
+on the lane, they are silent in the audition, and the render refuses on them
+rather than quietly producing a video without them.
 
 The lane itself stays yours. A missing clip can be **moved**, its **level** and
 **fades** set, and it can be **deleted** on its own, exactly like any other:
-the app keeps a clip it already holds, it just will not take a *new* one on a
-file it does not have. The one thing a missing clip cannot do is be
-**trimmed**. Nobody knows how long the file is any more, so its slice stays
-what it was — the clip has no trim zones, and the inspector says so. A cut of
-the picture still ripples it along with the rest; a cut or a split that falls
-*across* it would change its slice, so the strip refuses it before anything is
-sent, in a sentence that names the gesture and the file — lock the Music lane
-and cut the picture alone, or remove the clip first.
+the app keeps a clip it already holds, it just will not take a clip on a file
+the project never held. It can also be **trimmed shorter** from either end and
+**split** with **S**, because every piece is a stretch of the file the project
+already holds. The one thing a missing clip cannot do is **grow**. Nobody knows
+how long the file is any more, so neither of its ends can be dragged back past
+the part of the file it has now, and the inspector says so.
+
+A cut of the picture that would shorten, split or remove a missing clip — a
+range cut with the Music lane unlocked, or a piece's edge dragged in across it
+— is refused before anything is saved, because it could not be undone while
+the file is gone. The strip names the gesture and the file and the two ways
+out: lock the Music lane to cut the picture alone, or remove the missing clip
+first. A cut that only moves a missing clip along goes through as ever.
+
+Undo is refused when it would lengthen a music clip whose file has left the
+library: the undo of a trim or a split of such a clip, and the undo of its
+removal. The refused step is taken off the list and the message says so; the
+steps before it are often refused for the same reason. To undo them, put the
+file back in the library under the same name first. Redo likewise: a redo the
+server refuses is taken off the redo list.
 
 The render is what refuses, and it refuses until the clips are gone or the
 file is back. The banner above the strip names the files and carries both ways
 out:
 
-- **Remove the stuck clips** — one button, which takes out every clip whose
+- **Remove the missing clip** (**Remove the N missing clips** when there are
+  several) — one button, which takes out every clip whose
   file is missing in a single save (Delete on one of them takes just that one);
-- put the file back in the library **under the same name**, which restores the
-  clips exactly as they were.
+- put the file back in the library **under the same name**, and the clips play
+  again as they now stand: a trim or a split made meanwhile stays, and their
+  ends can then be dragged out again.
 
 ## The keys
 

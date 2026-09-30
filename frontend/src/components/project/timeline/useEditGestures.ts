@@ -13,11 +13,11 @@ import {
   canCut,
   cutMusic,
   dragOffsets,
-  missingAcross,
-  missingAcrossRefusal,
+  missingCutByPicture,
   musicAfterCut,
   nextEditForCut,
   nextEditForSplit,
+  pictureCutRefusal,
   type LaneLocks,
 } from "../../../lib/edit";
 import type { PlanSentence } from "../../../lib/timeline";
@@ -84,17 +84,15 @@ export function useEditGestures({
       setRefusal(`Keep at least one range — that selection would remove the whole ${track}.`);
       return;
     }
-    // A cut ACROSS a missing clip would change its slice, which the server
-    // refuses (E4c) in words that describe a trim, not this gesture (the
-    // Reviewer's M1): refused here first, before anything is sent, naming
-    // the gesture, the file and both ways out. Only where the ripple applies
-    // at all - the same two locks `musicAfterCut` reads.
-    if (!held.music && !held.video) {
-      const across = missingAcross(before.music, sel.start, sel.end);
-      if (across.length > 0) {
-        setRefusal(missingAcrossRefusal("cut", across, sel.start, sel.end));
-        return;
-      }
+    // A cut of the PICTURE that would shorten, split or remove a missing clip
+    // is refused before anything is sent (E6, the owner's decision of
+    // 2026-09-30): the server would store it, but not its undo, so the cut
+    // could not be taken back. Only where the ripple applies at all - the
+    // same two locks `musicAfterCut` reads (`missingCutByPicture`).
+    const across = missingCutByPicture(before.music, held, sel.start, sel.end);
+    if (across.length > 0) {
+      setRefusal(pictureCutRefusal("cut", across, sel.start, sel.end));
+      return;
     }
     // THE MUSIC RIDES THE PICTURE (the owner's ruling, 2026-09-21): the rule
     // and its reasons are `musicAfterCut` in lib/edit.ts, where a table over
@@ -127,18 +125,9 @@ export function useEditGestures({
     // clips under the playhead become two, and nothing moves (`cutMusic`).
     // Unaffected by the picture rule the cut follows: a split changes no
     // clip's `at`, so it cannot put the music out of step with the frames.
-    // A split THROUGH a missing clip would change its slice, which the
-    // server refuses (E4c) in words that describe a trim, not this gesture
-    // (the Reviewer's M1): refused here first, before anything is sent,
-    // wherever the music would be split at all - the lane unlocked, or
-    // Ctrl+Shift+S, which splits regardless of the locks.
-    if (all || !locksRef.current.music) {
-      const across = missingAcross(before.music, at, at);
-      if (across.length > 0) {
-        setRefusal(missingAcrossRefusal("split", across, at));
-        return;
-      }
-    }
+    // A split THROUGH a missing clip is allowed since E6: both halves lie
+    // inside its stored slice, which the server keeps. (Its undo is refused
+    // and taken off the list - `useEditCommits.ts::afterRefusal`.)
     const music = !all && locksRef.current.music ? before.music : cutMusic(before.music, at, at);
     if (music.length > MAX_CLIPS) {
       setRefusal(`That split would make ${music.length} music clips, past the limit of ${MAX_CLIPS} — `

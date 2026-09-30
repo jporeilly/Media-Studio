@@ -443,11 +443,16 @@ describe("the clip's two pointer handlers", () => {
     // The right edge: a trim grabbing the END, so the audio stays under the pointer.
     press(() => m.current().onClipPointerDown(pointer(68), bed));
     expect(m.beginDrag).toHaveBeenLastCalledWith(expect.anything(), "trim", 1, clipEnd(bed), { clip: bed, zone: "out", snapTo });
-    // A MISSING clip has a body and no edges (E4c): a press on its end is a move, never a trim.
+    // A MISSING clip has both edges too (E6; E4c gave it none): a press on its end is a trim, which
+    // `trimClip` holds inside the slice it has, and a press on its body a move.
     const missingSnap = clipSnapTargets({ playhead: 2, duration: SOURCE, joins: m.joinsRef.current.map((join) => join.at), clips: [bed, gone], exclude: "m2" });
     press(() => m.current().onClipPointerDown(pointer(81), gone));
+    expect(m.beginDrag).toHaveBeenLastCalledWith(expect.anything(), "trim", 8, 8, { clip: gone, zone: "in", snapTo: missingSnap });
+    press(() => m.current().onClipPointerDown(pointer(108), gone));
+    expect(m.beginDrag).toHaveBeenLastCalledWith(expect.anything(), "trim", 8, clipEnd(gone), { clip: gone, zone: "out", snapTo: missingSnap });
+    press(() => m.current().onClipPointerDown(pointer(95), gone));
     expect(m.beginDrag).toHaveBeenLastCalledWith(expect.anything(), "clip", 8, 8, { clip: gone, zone: "body", snapTo: missingSnap });
-    expect(m.beginDrag).toHaveBeenCalledTimes(4);
+    expect(m.beginDrag).toHaveBeenCalledTimes(6);
   });
 
   it("a press under the commit lock or on a locked lane is swallowed and begins nothing - the click after it still selects; Ctrl or another button leaves the press alone", () => {
@@ -656,7 +661,7 @@ describe("the inspector's markup and its boxes (ClipInspector)", () => {
     expect(view.props.removeClip).toHaveBeenCalledTimes(1);
   });
 
-  it("disables every box and the button under the commit lock or a locked lane, and says a missing clip cannot be trimmed", () => {
+  it("disables every box and the button under the commit lock or a locked lane, and says a missing clip's slice can only be shortened", () => {
     const view = renderInspector({ editLocked: true });
     expect(view.level().disabled).toBe(true);
     expect(view.numbers().map((n) => n.disabled)).toEqual([true, true]);
@@ -666,7 +671,10 @@ describe("the inspector's markup and its boxes (ClipInspector)", () => {
     expect(view.remove().disabled).toBe(true);
     view.render({ editLocked: false, locks: { music: false }, inspected: gone });
     expect(view.level().disabled).toBe(false);
-    expect(view.host.querySelector(".os-tl-status")!.textContent).toContain("the file is missing, so it cannot be trimmed");
+    // E6: a missing clip may be trimmed shorter or split, never lengthened - said on the row and in its title.
+    expect(view.host.querySelector(".os-tl-status")!.textContent).toContain("the file is missing, so its slice can only be shortened");
+    expect(view.host.querySelector(".os-tl-status")!.getAttribute("title")).toContain("can be trimmed shorter or split but never lengthened");
+    expect(view.host.querySelector(".os-tl-status")!.textContent).not.toContain("cannot be trimmed");
     expect(view.host.querySelector(".os-tl-clip-file")!.textContent).toBe("gone.mp3");
   });
 });
@@ -688,8 +696,8 @@ describe("the hook's own text: what a count over the file says best", () => {
     for (const source of [laneSource, laneMarkupSource, inspectorSource]) {
       expect(source).not.toMatch(/frozen|unfreeze|cannot be changed until/);
     }
-    // The trim zones a MISSING clip does not get are the render harness's rule ("draws trim zones on a live clip
-    // and none on a missing one"): a render of the real markup, which sees either edge go - a regex over this
+    // The trim zones a MISSING clip gets since E6 are the render harness's rule ("draws trim zones on a live clip
+    // and on a missing one"): a render of the real markup, which sees either edge go - a regex over this
     // text would see only the one it names.
   });
 });

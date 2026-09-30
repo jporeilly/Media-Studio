@@ -176,32 +176,34 @@ describe("the selection band paints the unlocked lanes and only those", () => {
   });
 });
 
-describe("the stuck-clip banner", () => {
+describe("the missing-clip banner", () => {
   it("is not on the page at all while every file is there", () => {
     const html = markup({ music: [LIVE] });
     expect(html).not.toContain("no longer in the library");
-    expect(html).not.toContain("stuck clip");
+    expect(html).not.toContain("missing clip");
     // ... and neither is the button that removes them, so nothing can be
     // pressed once the user has put the file back and the plan has refetched.
-    expect(html).not.toContain("Remove the stuck clip");
+    expect(html).not.toContain("Remove the missing clip");
   });
 
   it("is not on the page when the lane is empty either", () => {
     expect(markup({ music: [] })).not.toContain("no longer in the library");
   });
 
-  it("names one stuck clip in the singular, and says what it costs and what it can still do", () => {
+  it("names one missing clip in the singular, and says what it costs and what it can still do", () => {
     // E4c: the render refuses, the lane does not freeze. The clip can be
-    // moved, levelled and faded, not trimmed; the way out is to remove it or
-    // put the file back under the same name.
+    // moved, levelled and faded, and (E6) trimmed shorter or split, never
+    // lengthened; the way out is to remove it or put the file back under the
+    // same name.
     const html = markup({ music: [LIVE, GONE] });
     expect(html).toContain("A music clip names a file");
     expect(html).toContain("no longer in the library");
     expect(html).toContain("(gone.mp3)");
     expect(html).toContain("so the render will refuse until it is removed or the file is put back in the library under the same name");
-    expect(html).toContain("It can still be moved, levelled and faded here, but not trimmed, and a cut or split across it is"
-      + " refused until the lane is locked or the clip removed.");
-    expect(html).toContain("Remove the stuck clip");
+    expect(html).toContain("It can still be moved, levelled and faded here, and trimmed shorter or split, but never lengthened"
+      + " past the part of the file it has, and a cut of the picture across it is refused until the Music lane is locked or"
+      + " the clip removed.");
+    expect(html).toContain("Remove the missing clip");
     // Nothing of the frozen lane survives.
     expect(html).not.toMatch(/nothing on the Music lane|cannot be changed until|frozen|unfreeze/);
   });
@@ -210,20 +212,23 @@ describe("the stuck-clip banner", () => {
     const html = markup({ music: [LIVE, GONE, GONE2] });
     expect(html).toContain("2 music clips name files");
     expect(html).toContain("until they are removed or the files are put back in the library under the same name");
-    expect(html).toContain("They can still be moved, levelled and faded here, but not trimmed, and a cut or split across one is"
-      + " refused until the lane is locked or the clip removed.");
-    expect(html).toContain("Remove the 2 stuck clips");
+    expect(html).toContain("They can still be moved, levelled and faded here, and trimmed shorter or split, but never lengthened"
+      + " past the part of the file each has, and a cut of the picture across one is refused until the Music lane is locked"
+      + " or the clips removed.");
+    expect(html).toContain("Remove the 2 missing clips");
     expect(html).toContain("(gone.mp3)");
     expect(html).not.toContain("(gone.mp3, gone.mp3)");
     // The live clip is not counted among them.
     expect(html).not.toContain("3 music clips name files");
   });
 
-  it("draws trim zones on a live clip and none on a missing one", () => {
-    // The edge overlays carry the ew-resize cursor, and a missing clip has a
-    // body and no edges (E4c: its slice cannot change while the file is
-    // gone). What the markup holds is the proof; `clipAt` answering "body"
-    // is the other half, in lib/music.test.ts.
+  it("draws trim zones on a live clip and on a missing one", () => {
+    // The edge overlays carry the ew-resize cursor. E4c gave a missing clip
+    // a body and no edges, since its slice could not change; since E6 it may
+    // be trimmed SHORTER (never longer), so it has both zones, as a live
+    // clip has. What the markup holds is the proof; `clipAt` answering "in"
+    // and "out" at a missing clip's ends is the other half, and `trimClip`
+    // holding them inside its slice the third, in lib/music.test.ts.
     const html = markup({ music: [LIVE, GONE] });
     const clipMarkup = (file: string) => {
       const at = html.indexOf(`aria-label="Music clip ${file} at `);
@@ -232,22 +237,25 @@ describe("the stuck-clip banner", () => {
     };
     expect(clipMarkup("bed.mp3")).toContain('class="os-tl-clip-edge in"');
     expect(clipMarkup("bed.mp3")).toContain('class="os-tl-clip-edge out"');
-    expect(clipMarkup("gone.mp3")).not.toContain("os-tl-clip-edge");
+    expect(clipMarkup("gone.mp3")).toContain('class="os-tl-clip-edge in"');
+    expect(clipMarkup("gone.mp3")).toContain('class="os-tl-clip-edge out"');
     expect(clipMarkup("gone.mp3")).toContain("missing");
     // The missing clip's own tooltip says what it can and cannot do.
-    expect(clipMarkup("gone.mp3")).toContain("it cannot be trimmed while the file is gone");
+    expect(clipMarkup("gone.mp3")).toContain("drag an end to shorten it");
+    expect(clipMarkup("gone.mp3")).toContain("it cannot be lengthened past the part of the file it has while the file is gone");
+    expect(clipMarkup("gone.mp3")).not.toContain("cannot be trimmed");
     expect(clipMarkup("gone.mp3")).not.toContain("nothing on the lane can be changed");
   });
 
   it("disables its button while the Music lane is locked, and says why", () => {
     const html = markup({ music: [LIVE, GONE], locks: { video: false, narration: false, music: true } });
-    const remove = button(html, "Remove the stuck clip");
+    const remove = button(html, "Remove the missing clip");
     expect(remove).toContain("disabled");
     expect(remove).toContain("The Music lane is locked");
   });
 
   it("leaves it enabled while the lane is unlocked", () => {
-    expect(button(markup({ music: [LIVE, GONE] }), "Remove the stuck clip")).not.toContain("disabled");
+    expect(button(markup({ music: [LIVE, GONE] }), "Remove the missing clip")).not.toContain("disabled");
   });
 });
 

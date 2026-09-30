@@ -55,13 +55,13 @@ import {
   fitFades,
   laneLocks,
   mintClipId,
-  missingAcross,
-  missingAcrossRefusal,
+  missingCutByPicture,
   moveClip,
   musicAfterInsert,
   musicAfterTrim,
   musicBody,
   newMusicClip,
+  pictureCutRefusal,
   renderSummary,
   round3,
   sameMusic,
@@ -70,6 +70,7 @@ import {
   unmovedRelease,
   withoutMissing,
   type Keep,
+  type LaneLocks,
   type MusicClip,
 } from "./edit";
 
@@ -255,8 +256,47 @@ describe("moving and trimming a clip", () => {
     expect(trimClip(clip({ at: 5, in: 1, out: 4 }), "out", 9, FILE_SECONDS)).toMatchObject({ out: 5 });
     expect(trimClip(clip({ at: 5, in: 1, out: 4 }), "out", 99, FILE_SECONDS).out).toBe(FILE_SECONDS);
     expect(clipLength(trimClip(clip({ at: 5, in: 1, out: 4 }), "out", 0, FILE_SECONDS))).toBe(MIN_CLIP_SECONDS);
-    // A missing file has no recorded length: the right edge is pinned where it is.
+    // A missing file has no recorded length: the right edge cannot move past where it is.
     expect(trimClip(clip({ at: 5, in: 1, out: 4, missing: true }), "out", 99, null).out).toBe(4);
+  });
+
+  it("bounds a MISSING clip's edges by the slice it holds: shorter from either end, never longer (E6)", () => {
+    // The server keeps a missing clip's slice shrunk but never grown, and
+    // the file's length is unknown: so `in` may rise and `out` may fall,
+    // and neither goes back past the values the clip holds. Before E6 the
+    // left edge, with no length to stop it, grew down to `in = 0`.
+    const gone = clip({ at: 5, in: 1, out: 4, fade_in: 0, fade_out: 0, missing: true, file_duration: null });
+    expect(trimClip(gone, "in", 0, null)).toMatchObject({ at: 5, in: 1, out: 4 });   // dragged far left: held at its `in`
+    expect(trimClip(gone, "in", 4.5, null)).toMatchObject({ at: 5, in: 1, out: 4 }); // a little left: held too
+    expect(trimClip(gone, "in", 6, null)).toMatchObject({ at: 6, in: 2, out: 4 });   // right: shorter, the audio under the pointer
+    expect(trimClip(gone, "out", 99, null)).toMatchObject({ at: 5, in: 1, out: 4 }); // dragged far right: held at its `out`
+    expect(trimClip(gone, "out", 7, null)).toMatchObject({ at: 5, in: 1, out: 3 });  // left: shorter
+    // ... and never below the shortest clip, from either end.
+    expect(clipLength(trimClip(gone, "in", 99, null))).toBe(MIN_CLIP_SECONDS);
+    expect(clipLength(trimClip(gone, "out", 0, null))).toBe(MIN_CLIP_SECONDS);
+    // The same drags on a LIVE clip with a length reach past both ends of its slice.
+    expect(trimClip({ ...gone, missing: false }, "in", 0, FILE_SECONDS)).toMatchObject({ at: 4, in: 0 });
+    expect(trimClip({ ...gone, missing: false }, "out", 99, FILE_SECONDS).out).toBe(FILE_SECONDS);
+  });
+
+  it("never grows a missing clip's slice, over random drags of either edge (E6)", () => {
+    const random = mulberry32(2026_09_29);
+    for (let round = 0; round < 2000; round++) {
+      const start = round3(random() * 5);
+      const held = clip({
+        at: round3(random() * 10), in: start, out: round3(start + 0.1 + random() * 6),
+        fade_in: 0, fade_out: 0, missing: true, file_duration: null,
+      });
+      const edge = random() < 0.5 ? "in" : "out";
+      const to = round3(random() * 30 - 5);
+      const next = trimClip(held, edge, to, null);
+      const said = `${JSON.stringify(held)} ${edge} to ${to}`;
+      expect(next.in, said).toBeGreaterThanOrEqual(held.in);
+      expect(next.out, said).toBeLessThanOrEqual(held.out);
+      expect(clipLength(next), said).toBeGreaterThanOrEqual(MIN_CLIP_SECONDS - EPSILON);
+      // The left edge moves the clip with the audio: the file stays where it was on the output.
+      expect(round3(next.at - next.in), said).toBe(round3(held.at - held.in));
+    }
   });
 
   it("re-fits the fades to the length a trim leaves", () => {
@@ -302,22 +342,24 @@ describe("the hit test and its edges", () => {
     expect(clipAt(tiny, 1.1, 5)?.zone).toBe("body");
   });
 
-  it("gives a MISSING clip a body and no edges: a press on either end is a move, never a trim", () => {
-    // E4c: the server keeps a stored clip whose file has gone but not with
-    // a changed slice, so the strip must never start a trim on one. The
-    // same moments that are edges on a live clip are its body here.
+  it("gives a MISSING clip both edges, as a live one has: either end is a trim (E6)", () => {
+    // E4c gave it a body and no edges, since the server then refused any
+    // changed slice; since E6 the server keeps it shrunk, so its ends trim
+    // it (`trimClip` holds them inside the slice it has). The same moments
+    // answer the same zones as on a live clip.
     const gone = [clip({ id: "g", at: 0, in: 0, out: 4, missing: true, file_duration: null })];
-    expect(clipAt(gone, 0, edge)).toEqual({ clip: gone[0], zone: "body" });
-    expect(clipAt(gone, 0.19, edge)?.zone).toBe("body");
+    expect(clipAt(gone, 0, edge)).toEqual({ clip: gone[0], zone: "in" });
+    expect(clipAt(gone, 0.19, edge)?.zone).toBe("in");
+    expect(clipAt(gone, 0.21, edge)?.zone).toBe("body");
     expect(clipAt(gone, 2, edge)?.zone).toBe("body");
-    expect(clipAt(gone, 3.81, edge)?.zone).toBe("body");
-    expect(clipAt(gone, 4, edge)?.zone).toBe("body");
+    expect(clipAt(gone, 3.81, edge)?.zone).toBe("out");
+    expect(clipAt(gone, 4, edge)?.zone).toBe("out");
     // ... and it is still found where it is, and not beyond it.
     expect(clipAt(gone, 4.1, edge)).toBeNull();
-    // A live clip beside it keeps its edges.
+    // A live clip beside it keeps its edges too.
     const mixed = [...gone, clip({ id: "live", at: 6, in: 0, out: 2 })];
     expect(clipAt(mixed, 6, edge)?.zone).toBe("in");
-    expect(clipAt(mixed, 0, edge)?.zone).toBe("body");
+    expect(clipAt(mixed, 0, edge)?.zone).toBe("in");
   });
 
   it("gives the topmost clip where two overlap - the last one drawn", () => {
@@ -790,8 +832,13 @@ describe("the timeline's own source, where the unit suite cannot reach", () => {
     expect(up).toMatch(/commitEdit\(\{ \.\.\.outcome\.next, music, markers: before\.markers \}\);/);
     expect(up.indexOf("nextEditForTrim(")).toBeLessThan(up.indexOf("musicAfterTrim("));
     expect(up.indexOf("musicAfterTrim(")).toBeLessThan(up.indexOf("commitEdit({ ...outcome.next, music, markers: before.markers })"));
-    // A shortening across a MISSING clip is refused before the PUT, as the cut's is.
-    expect(up).toMatch(/if \(picture\?\.kind === "cut" && !held\.music && !held\.video\) \{\s*const across = missingAcross\(before\.music, picture\.a, picture\.b\);\s*if \(across\.length > 0\) \{\s*setRefusal\(missingAcrossRefusal\("trim", across, picture\.a, picture\.b\)\);\s*return;/);
+    // A shortening of the PICTURE across a MISSING clip is refused before the
+    // PUT, as the cut is (E6, the owner's decision of 2026-09-30), over the
+    // picture's own change and under the locks the helper reads, before the
+    // clips are rippled; E4c's `missingAcross` is gone.
+    expect(up).toMatch(/const picture = outcome\.picture;\s*if \(picture\?\.kind === "cut"\) \{\s*const across = missingCutByPicture\(before\.music, held, picture\.a, picture\.b\);\s*if \(across\.length > 0\) \{\s*setRefusal\(pictureCutRefusal\("trim", across, picture\.a, picture\.b\)\);\s*return;/);
+    expect(up.indexOf("missingCutByPicture(")).toBeLessThan(up.indexOf("musicAfterTrim("));
+    expect(timeline).not.toMatch(/missingAcross/);
     // The gesture begins only from an edge `pieceEdgeAt` answers, on an unlocked lane, outside the commit lock.
     const down = handler("onPiecesPointerDown");
     expect(down).toMatch(/if \(editLocked \|\| locksRef\.current\[lane\]\) return;/);
@@ -1107,62 +1154,41 @@ describe("what a trim leaves on the lane (musicAfterTrim)", () => {
   });
 });
 
-describe("the missing clips a cut would slice (missingAcross)", () => {
-  // A missing clip on the output at [5, 9): the server keeps it only with
-  // the slice it has (E4c), so a cut or a split that changes that slice is
-  // refused on the strip before anything is sent (the Reviewer's M1).
-  const gone = clip({ id: "g", at: 5, in: 0, out: 4, file: "gone.mp3", missing: true, file_duration: null });
-  const live = clip({ id: "l", at: 5, in: 0, out: 4 });
+describe("every piece of a cut or a split lies inside its clip's slice (E6)", () => {
+  // The server keeps a clip whose file has gone when its slice lies inside
+  // one the project holds of that file - "you may keep what you have, and
+  // you may keep less of it" (services/edit.py::_check_music). A cut or a
+  // split across a missing clip used to be refused on the strip before the
+  // PUT (E4c's `missingAcross`, the Reviewer's M1), because the server then
+  // refused ANY changed slice. Every piece `cutMusic` makes is a stretch of
+  // the clip it came from, so under E6 the guard could only ever refuse the
+  // one case the server still refuses, a slice that GROWS, which no cut or
+  // split produces: it is gone, and these tests hold the reason.
+  const gone = clip({ id: "g", at: 5, in: 1, out: 5, file: "gone.mp3", missing: true, file_duration: null });
 
-  it("names a missing clip the cut begins inside, ends inside, or spans", () => {
-    expect(missingAcross([gone], 7, 12)).toEqual([gone]);   // straddles the start of the cut
-    expect(missingAcross([gone], 2, 7)).toEqual([gone]);    // straddles its end
-    expect(missingAcross([gone], 6, 8)).toEqual([gone]);    // straddles both: two pieces, one of them a new id
-    expect(missingAcross([gone], 8, 6)).toEqual([gone]);    // whichever way round the bounds are given
+  /** The server's containment, the client side of it: each piece inside the slice of the clip it came from, same file. */
+  function inside(piece: MusicClip, from: MusicClip): boolean {
+    return piece.file === from.file && piece.in >= from.in && piece.out <= from.out;
+  }
+
+  it("splits a missing clip in two, both halves inside its slice and still missing, the second under a new id", () => {
+    const [head, tail] = cutMusic([gone], 7, 7, counterMint());
+    expect(head).toMatchObject({ id: "g", at: 5, in: 1, out: 3, missing: true });
+    expect(tail).toMatchObject({ id: "new1", at: 7, in: 3, out: 5, missing: true });
+    expect(inside(head, gone) && inside(tail, gone)).toBe(true);
   });
 
-  it("names nothing that only ripples, goes whole, or is merely touched", () => {
-    expect(missingAcross([gone], 10, 12)).toEqual([]);      // wholly before the cut: only ripples
-    expect(missingAcross([gone], 0, 3)).toEqual([]);        // wholly after it: unchanged
-    expect(missingAcross([gone], 4, 10)).toEqual([]);       // wholly inside it: goes whole, which the server allows
-    expect(missingAcross([gone], 9, 12)).toEqual([]);       // ends exactly where the cut starts
-    expect(missingAcross([gone], 2, 5)).toEqual([]);        // starts exactly where the cut ends
-    expect(missingAcross([], 6, 8)).toEqual([]);
+  it("cuts across a missing clip at its start, its end or inside it: the pieces inside its slice, the rest rippled", () => {
+    for (const [a, b] of [[7, 12], [2, 7], [6, 8], [8, 6]] as const) {
+      const pieces = cutMusic([gone], a, b, counterMint());
+      expect(pieces.length, `cut ${a}-${b}`).toBeGreaterThan(0);
+      for (const piece of pieces) expect(inside(piece, gone), `cut ${a}-${b}: ${JSON.stringify(piece)}`).toBe(true);
+    }
+    // Wholly inside the cut: gone whole, which the server takes too.
+    expect(cutMusic([gone], 4, 10)).toEqual([]);
   });
 
-  it("never names a LIVE clip, however the cut falls on it", () => {
-    expect(missingAcross([live], 6, 8)).toEqual([]);
-    expect(missingAcross([live, gone], 6, 8)).toEqual([gone]);
-    expect(missingAcross([live, gone], 7, 7)).toEqual([gone]);
-  });
-
-  it("treats a split (a === b) as a cut of nothing: named over the clip, not beside it", () => {
-    expect(missingAcross([gone], 7, 7)).toEqual([gone]);
-    expect(missingAcross([gone], 10, 10)).toEqual([]);
-    expect(missingAcross([gone], 5, 5)).toEqual([]);        // exactly on its start: the whole clip is the tail, unchanged
-    expect(missingAcross([gone], 9, 9)).toEqual([]);        // exactly on its end: the whole clip is the head, unchanged
-  });
-
-  it("agrees with cutMusic about a remnant too short to keep: dropped whole, so not named", () => {
-    // cutMusic drops a piece shorter than MIN_CLIP_SECONDS; a cut that leaves
-    // only such a remnant of the missing clip removes the clip, which the
-    // server accepts, so naming it would refuse what the server would take.
-    expect(missingAcross([gone], 5.05, 12)).toEqual([]);
-    expect(cutMusic([gone], 5.05, 12)).toEqual([]);
-    // ... but a split there keeps the tail with `in` advanced: sliced, named.
-    expect(missingAcross([gone], 5.05, 5.05)).toEqual([gone]);
-    expect(cutMusic([gone], 5.05, 5.05, counterMint()).map((held) => held.in)).toEqual([0.05]);
-  });
-
-  it("keeps the clips' own order and names each straddled missing clip", () => {
-    const g2 = { ...gone, id: "g2", at: 20 };
-    expect(missingAcross([g2, live, gone], 6, 22)).toEqual([g2, gone]);
-  });
-
-  it("is exactly `cutMusic` changing a missing clip's slice or minting it a second id, over random cuts", () => {
-    // The helper is a prediction of the slicer; the slicer is the truth. For
-    // each missing clip, sliced means a piece with a different `in`/`out`
-    // than the clip's own, or more than one piece.
+  it("holds over random cuts and splits of random lists: no piece of any clip reaches outside the slice it came from", () => {
     const random = mulberry32(2026_09_24);
     for (let round = 0; round < 3000; round++) {
       const clips: MusicClip[] = [];
@@ -1177,57 +1203,13 @@ describe("the missing clips a cut would slice (missingAcross)", () => {
       }
       const a = round3(random() * 16);
       const b = random() < 0.25 ? a : round3(random() * 16);
-      const predicted = missingAcross(clips, a, b).map((held) => held.id);
-      const sliced = clips.filter((held) => {
-        if (!held.missing) return false;
-        const pieces = cutMusic([held], a, b, counterMint());
-        return pieces.length > 1 || pieces.some((piece) => piece.in !== held.in || piece.out !== held.out);
-      }).map((held) => held.id);
-      expect(predicted, `clips ${JSON.stringify(clips)} cut ${a}-${b}`).toEqual(sliced);
+      for (const held of clips) {
+        for (const piece of cutMusic([held], a, b, counterMint())) {
+          expect(inside(piece, held), `clip ${JSON.stringify(held)} cut ${a}-${b}: ${JSON.stringify(piece)}`).toBe(true);
+          expect(piece.missing).toBe(held.missing);
+        }
+      }
     }
-  });
-});
-
-describe("what the strip says before such a cut (missingAcrossRefusal)", () => {
-  const gone = clip({ id: "g", at: 5, in: 0, out: 4, file: "sting.wav", missing: true, file_duration: null });
-
-  it("names the split, where, the file, why, and both ways out - the one that keeps the clip first", () => {
-    expect(missingAcrossRefusal("split", [gone], 2)).toBe(
-      "That split at 0:02.000 would cut into sting.wav, but its file is no longer in the library, so its slice cannot"
-      + " change — lock the Music lane and split the picture alone, or remove the clip first.",
-    );
-  });
-
-  it("names the cut's range in order, whichever way round it was dragged", () => {
-    const said = "That cut (0:02.000 – 0:03.500) would cut into sting.wav, but its file is no longer in the library,"
-      + " so its slice cannot change — lock the Music lane and cut the picture alone, or remove the clip first.";
-    expect(missingAcrossRefusal("cut", [gone], 2, 3.5)).toBe(said);
-    expect(missingAcrossRefusal("cut", [gone], 3.5, 2)).toBe(said);
-  });
-
-  it("names a TRIM as a trim (E5a): the same slicing, the same ways out, in the gesture's own word", () => {
-    expect(missingAcrossRefusal("trim", [gone], 2, 3.5)).toBe(
-      "That trim (0:02.000 – 0:03.500) would cut into sting.wav, but its file is no longer in the library,"
-      + " so its slice cannot change — lock the Music lane and trim the picture alone, or remove the clip first.",
-    );
-  });
-
-  it("names each file once, in the plural, and counts the clips", () => {
-    const bed = { ...gone, id: "b", file: "bed.mp3" };
-    expect(missingAcrossRefusal("cut", [gone, bed], 2, 3)).toContain(
-      "would cut into sting.wav and bed.mp3, but their files are no longer in the library, so their slices cannot change",
-    );
-    expect(missingAcrossRefusal("cut", [gone, bed], 2, 3)).toContain("or remove the clips first.");
-    // The same bed laid twice: one file, two clips.
-    const again = { ...gone, id: "g2", at: 20 };
-    expect(missingAcrossRefusal("split", [gone, again], 7)).toContain("would cut into sting.wav, but its file is");
-    // One file, but two slices: the count of clips drives "their slices" as it
-    // drives "the clips" (the re-review's nit - one file was giving two clips one slice).
-    expect(missingAcrossRefusal("split", [gone, again], 7)).toContain("so their slices cannot change");
-    expect(missingAcrossRefusal("split", [gone, again], 7)).toContain("or remove the clips first.");
-    // Three files, listed as a sentence would list them.
-    const third = { ...gone, id: "t", file: "third.mp3" };
-    expect(missingAcrossRefusal("cut", [gone, bed, third], 2, 3)).toContain("sting.wav, bed.mp3 and third.mp3");
   });
 });
 
@@ -1347,6 +1329,132 @@ describe("what a refused commit says", () => {
       "That edit was not saved — the strip still shows the cut and the clips the server holds.",
     );
   });
+
+  it("says an undo or a redo refused on its body was taken off its list, and the way to take it after all (E6)", () => {
+    const grows = "music clip 1 (g): file 'gone.mp3' is not in the library, so its slice can shrink but not grow; it was"
+      + " 1.000–4.000 of the file.";
+    expect(editRefusal(grows, "undo")).toBe(
+      "That undo was refused and has been taken off the undo list — the strip still shows the cut and the clips the server"
+      + ` holds. To undo past it, put the file back in the library first. The server said: ${grows}`,
+    );
+    expect(editRefusal(grows, "redo")).toBe(
+      "That redo was refused and has been taken off the redo list — the strip still shows the cut and the clips the server"
+      + ` holds. To redo past it, put the file back in the library first. The server said: ${grows}`,
+    );
+    // Neither is the edit's lead, which says nothing of a list.
+    expect(editRefusal(grows, "edit")).not.toContain("taken off");
+  });
+
+  it("advises putting the file back only when the server says a file is not in the library, and gives a timing step the timing's lead (the re-review's r1)", () => {
+    // The two sentences it keys on: `_check_music`'s refusals of a missing file.
+    const readded = "music clip 2 (g): file 'gone.mp3' is not in the library.";
+    expect(editRefusal(readded, "undo")).toContain("taken off the undo list — the strip still shows the cut and the clips the"
+      + " server holds. To undo past it, put the file back in the library first. The server said:");
+    // An edit step refused for a reason that is not a file: dropped, and no file named.
+    const past = "video: range 2 (6.000–12.500) runs past the end of the source (12.000 s).";
+    expect(editRefusal(past, "undo")).toBe(
+      "That undo was refused and has been taken off the undo list — the strip still shows the cut and the clips the server"
+      + ` holds. The server said: ${past}`,
+    );
+    expect(editRefusal(past, "redo")).not.toContain("put the file back");
+    // A timing step: the timing's own lead, the list named, no file.
+    const index = "offset 1: sentence index 7 is outside the transcript.";
+    expect(editRefusal(index, "timing-undo")).toBe(
+      "That timing was not saved — the blocks are back where the last saved plan puts them. It has been taken off the undo"
+      + ` list. The server said: ${index}`,
+    );
+    expect(editRefusal(index, "timing-redo")).toBe(
+      "That timing was not saved — the blocks are back where the last saved plan puts them. It has been taken off the redo"
+      + ` list. The server said: ${index}`,
+    );
+    expect(editRefusal(index, "timing")).not.toContain("taken off");
+  });
+});
+
+describe("a cut of the PICTURE across a missing clip is refused first (missingCutByPicture, E6)", () => {
+  // The owner's decision of 2026-09-30: such a cut would be stored (a missing
+  // clip may shrink or split) but its undo would not (it grows the clip back),
+  // so the picture's own cut could not be undone. A missing clip on the output
+  // at 5 - 9, 0 - 4 of its file.
+  const gone = clip({ id: "g", at: 5, in: 0, out: 4, file: "gone.mp3", missing: true, file_duration: null });
+  const live = clip({ id: "l", at: 5, in: 0, out: 4 });
+  const open: LaneLocks = { video: false, narration: false, music: false };
+
+  it("names the missing clip a picture cut would shorten, split or remove, with Video and Music unlocked", () => {
+    expect(missingCutByPicture([gone], open, 7, 12)).toEqual([gone]);   // shortens its end
+    expect(missingCutByPicture([gone], open, 2, 7)).toEqual([gone]);    // takes its start
+    expect(missingCutByPicture([gone], open, 6, 8)).toEqual([gone]);    // splits it
+    expect(missingCutByPicture([gone], open, 8, 6)).toEqual([gone]);    // whichever way round
+    expect(missingCutByPicture([gone], open, 4, 10)).toEqual([gone]);   // removes it whole: its undo adds the file back
+    expect(missingCutByPicture([gone], open, 5.05, 12)).toEqual([gone]); // leaves a remnant too short to keep: removed
+    // Narration's lock has no say: the picture is cut and the clips ride it.
+    expect(missingCutByPicture([gone, live], { ...open, narration: true }, 6, 8)).toEqual([gone]);
+  });
+
+  it("names nothing the cut only ripples or does not reach, and no LIVE clip", () => {
+    expect(missingCutByPicture([gone], open, 10, 12)).toEqual([]);      // wholly before the cut
+    expect(missingCutByPicture([gone], open, 0, 3)).toEqual([]);        // wholly after it: moved, its slice the same
+    expect(missingCutByPicture([gone], open, 9, 12)).toEqual([]);       // ends exactly where the cut starts
+    expect(missingCutByPicture([gone], open, 2, 5)).toEqual([]);        // starts exactly where the cut ends
+    expect(missingCutByPicture([live], open, 6, 8)).toEqual([]);
+    expect(missingCutByPicture([live, gone], open, 6, 8)).toEqual([gone]);
+    expect(missingCutByPicture([], open, 6, 8)).toEqual([]);
+  });
+
+  it("names nothing with the Music lane locked, and nothing when the picture is not cut (Video locked: the clips stay)", () => {
+    expect(missingCutByPicture([gone], { ...open, music: true }, 6, 8)).toEqual([]);
+    expect(missingCutByPicture([gone], { ...open, video: true }, 6, 8)).toEqual([]);            // Narration and Music: no clip moves
+    expect(missingCutByPicture([gone], { video: true, narration: true, music: false }, 6, 8)).toEqual([]); // Music alone
+    // Exactly the locks `musicAfterCut` reads: where the ripple would change the clip, and only there.
+    for (const video of [false, true]) for (const narration of [false, true]) for (const music of [false, true]) {
+      const locks = { video, narration, music };
+      const clips = [gone];
+      const rippled = musicAfterCut(clips, locks, 6, 8);
+      expect(missingCutByPicture(clips, locks, 6, 8).length > 0, JSON.stringify(locks)).toBe(rippled !== clips);
+    }
+  });
+
+  it("names the clip a PIECE TRIM's picture change would shorten, over that change (the trim's own case)", () => {
+    // A trim that shortens the picture is a cut of the picture's interval
+    // (`TrimOutcome.picture`), the music riding it through `musicAfterTrim`.
+    const change = { kind: "cut" as const, a: 6, b: 7.5 };
+    expect(missingCutByPicture([gone], open, change.a, change.b)).toEqual([gone]);
+    expect(musicAfterTrim([gone], open, change)).not.toEqual([gone]);
+  });
+
+  it("is exactly cutMusic changing a missing clip's slice or its count, over random cuts", () => {
+    const random = mulberry32(2026_09_30);
+    for (let round = 0; round < 2000; round++) {
+      const start = round3(random() * 3);
+      const held = clip({
+        id: "g", at: round3(random() * 12), in: start, out: round3(start + 0.1 + random() * 6),
+        missing: true, file_duration: null,
+      });
+      const a = round3(random() * 16);
+      const b = round3(random() * 16);
+      const pieces = cutMusic([held], a, b, counterMint());
+      const changed = !(pieces.length === 1 && pieces[0].in === held.in && pieces[0].out === held.out);
+      expect(missingCutByPicture([held], open, a, b).length === 1, `${JSON.stringify(held)} cut ${a}-${b}`).toBe(changed);
+    }
+  });
+
+  it("says, in the strip's own words, the gesture and where, the file, why, and both ways out - the one that keeps the clip first", () => {
+    expect(pictureCutRefusal("cut", [gone], 3.5, 2)).toBe(
+      "That cut (0:02.000 – 0:03.500) would cut across gone.mp3, but its file is no longer in the library, so the cut"
+      + " could not be undone while it is gone. Lock the Music lane to cut the picture alone, or remove the missing clip first.",
+    );
+    expect(pictureCutRefusal("trim", [gone], 6, 7.5)).toBe(
+      "That trim (0:06.000 – 0:07.500) would cut across gone.mp3, but its file is no longer in the library, so the trim"
+      + " could not be undone while it is gone. Lock the Music lane to trim the picture alone, or remove the missing clip first.",
+    );
+    const again = { ...gone, id: "g2", at: 20 };
+    const other = { ...gone, id: "o", file: "other.mp3" };
+    expect(pictureCutRefusal("cut", [gone, again], 2, 3)).toContain("would cut across gone.mp3, but its file is");
+    expect(pictureCutRefusal("cut", [gone, again], 2, 3)).toContain("or remove the missing clips first.");
+    expect(pictureCutRefusal("cut", [gone, other], 2, 3)).toContain(
+      "would cut across gone.mp3 and other.mp3, but their files are no longer in the library, so the cut could not be undone while they are gone.",
+    );
+  });
 });
 
 describe("the Render line, with music under it", () => {
@@ -1434,13 +1542,15 @@ describe("the markers on the strip (E5b), pinned in the component's own source",
     );
     // The drag: the magnet and Alt as every drag, clamped to the picture, ⌖
     // after the clamp, and on release `at = toSource(landed, keep)` through
-    // `moveMarker`, nothing sent for a no-op.
+    // `moveMarker`, nothing sent for a no-op - and (E6) the move keeps the
+    // range selection: `commitMarkers(next, true)`, the drop's and the
+    // rename's flag, never the removal's.
     const move = handler("onBodyPointerMove");
     expect(move).toMatch(/if \(drag\.kind === "marker"\) \{[\s\S]*?const free = !snappingRef\.current \|\| event\.altKey;[\s\S]*?const at = clampTime\(landed\.t, durationRef\.current\);\s*drag\.markerNow = at;/);
     expect(move).toMatch(/paintMarker\(drag, at, caughtAfterClamp\(at, landed\.snapped\)\)/);
     const up = handler("onBodyPointerUp");
     expect(up).toMatch(
-      /const next = moveMarker\(markersRef\.current, base\.id, at, keepRef\.current, sourceDurationRef\.current\);\s*if \(sameMarkers\(next, markersRef\.current\)\) \{\s*clearMarkerDrag\(\);\s*return;\s*\}\s*commitMarkers\(next\);/,
+      /const next = moveMarker\(markersRef\.current, base\.id, at, keepRef\.current, sourceDurationRef\.current\);\s*if \(sameMarkers\(next, markersRef\.current\)\) \{\s*clearMarkerDrag\(\);\s*return;\s*\}\s*commitMarkers\(next, true\);/,
     );
   });
 

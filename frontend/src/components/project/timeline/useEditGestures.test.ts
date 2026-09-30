@@ -3,13 +3,14 @@
  * The cut, the split, the nudge and the reset, as BEHAVIOUR (R1a): the
  * gesture hook mounted for real with the stack faked, so the rules the
  * component's source used to pin by regex - the ripple exactly when the
- * PICTURE's list changes, the missing-clip refusal before anything is sent,
- * the cap, the markers riding along unchanged - are asserted on what
- * `commitEdit` and `setRefusal` receive. Each test was watched failing with
- * its defect planted; the round's report lists the plants.
+ * PICTURE's list changes, a picture cut across a missing clip refused
+ * before anything is sent and a split of one allowed (E6), the cap, the
+ * markers riding along unchanged - are asserted on what `commitEdit` and
+ * `setRefusal` receive. Each test was watched failing with its defect
+ * planted; the round's report lists the plants.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MAX_CLIPS, missingAcrossRefusal, type LaneLocks, type MusicClip } from "../../../lib/edit";
+import { MAX_CLIPS, pictureCutRefusal, type LaneLocks, type MusicClip } from "../../../lib/edit";
 import type { PlanSentence } from "../../../lib/timeline";
 import { mountHook } from "./testing/mountHook";
 import { drawn, useEditGestures, type EditGesturesDeps } from "./useEditGestures";
@@ -85,20 +86,44 @@ describe("the cut", () => {
     expect(m.setRefusal).not.toHaveBeenCalled();
   });
 
-  it("refuses a cut across a MISSING clip before anything is sent, in the gesture's own words, only where the ripple applies", () => {
+  it("refuses a cut of the PICTURE across a MISSING clip before anything is sent, with the way out; with the Music lane locked, or the picture locked, it goes through (E6)", () => {
+    // The owner's decision of 2026-09-30: the server would store the cut (a
+    // missing clip may shrink or split) but not its undo, so the picture's
+    // cut could not be taken back. Refused first, naming the gesture, the
+    // file and both ways out (`missingCutByPicture`, `pictureCutRefusal`).
     const m = (mounted = mount());
     m.committedRef.current = { ...m.committedRef.current, music: [m1, gone] };
     m.selectionRef.current = { start: 5, end: 7 };
     m.current().cutSelection();
     expect(m.commitEdit).not.toHaveBeenCalled();
     expect(m.setRefusal).toHaveBeenCalledTimes(1);
-    expect(m.setRefusal).toHaveBeenCalledWith(missingAcrossRefusal("cut", [gone], 5, 7));
-    // With the picture locked the clips do not move, so nothing is sliced: the cut goes through, the clips as they were.
+    expect(m.setRefusal).toHaveBeenCalledWith(pictureCutRefusal("cut", [gone], 5, 7));
+    expect(m.setRefusal.mock.calls[0][0]).toContain("Lock the Music lane to cut the picture alone, or remove the missing clip first.");
+    // Narration locked too: still the picture, still refused.
     m.setRefusal.mockClear();
+    m.locksRef.current = locks(false, true, false);
+    m.current().cutSelection();
+    expect(m.commitEdit).not.toHaveBeenCalled();
+    expect(m.setRefusal).toHaveBeenCalledWith(pictureCutRefusal("cut", [gone], 5, 7));
+    // The Music lane locked: the picture is cut alone, the clips as they were.
+    m.setRefusal.mockClear();
+    m.locksRef.current = locks(false, false, true);
+    m.current().cutSelection();
+    expect(m.setRefusal).not.toHaveBeenCalled();
+    expect(sent(m).music).toBe(m.committedRef.current.music);
+    // The picture locked: the clips do not move, so nothing is refused either.
+    m.commitEdit.mockClear();
     m.locksRef.current = locks(true, false, false);
     m.current().cutSelection();
     expect(m.setRefusal).not.toHaveBeenCalled();
     expect(sent(m).music).toBe(m.committedRef.current.music);
+    // A cut that only RIPPLES the missing clip - wholly before it - goes through, the clip moved.
+    m.commitEdit.mockClear();
+    m.locksRef.current = locks(false, false, false);
+    m.selectionRef.current = { start: 2, end: 3 };
+    m.current().cutSelection();
+    expect(m.setRefusal).not.toHaveBeenCalled();
+    expect(sent(m).music.find((held) => held.id === "g")).toMatchObject({ at: 3, in: 0, out: 4, missing: true });
   });
 
   it("refuses a cut that would split the music past the cap, naming the count", () => {
@@ -162,23 +187,28 @@ describe("the split", () => {
     expect(next.music).toHaveLength(3);
   });
 
-  it("refuses a split through a MISSING clip wherever the music would be split, and not when the lane is locked", () => {
+  it("splits through a MISSING clip like any other (E6), both halves inside its slice; not when the lane is locked; Ctrl+Shift+S regardless", () => {
     const m = (mounted = mount());
     m.committedRef.current = { ...m.committedRef.current, music: [m1, gone] };
     m.positionRef.current = 6;
     m.current().splitAtPlayhead(false);
-    expect(m.commitEdit).not.toHaveBeenCalled();
-    expect(m.setRefusal).toHaveBeenCalledWith(missingAcrossRefusal("split", [gone], 6));
-    m.setRefusal.mockClear();
+    expect(m.setRefusal).not.toHaveBeenCalled();
+    const halves = (music: MusicClip[]) => music.filter((held) => held.file === "gone.mp3");
+    // 4 – 8 split at 6: 0 – 2 of the file under its own id, then 2 – 4 under a new one, nothing moved.
+    const [head, tail] = halves(sent(m).music);
+    expect(head).toMatchObject({ id: "g", at: 4, in: 0, out: 2, missing: true });
+    expect(tail).toMatchObject({ at: 6, in: 2, out: 4, missing: true });
+    expect(tail.id).not.toBe("g");
+    m.commitEdit.mockClear();
     m.locksRef.current = locks(false, false, true);
     m.current().splitAtPlayhead(false);
     expect(m.setRefusal).not.toHaveBeenCalled();
     expect(sent(m).music).toBe(m.committedRef.current.music);
-    // Ctrl+Shift+S splits the locked lane too, so the refusal applies again.
+    // Ctrl+Shift+S splits the locked lane too.
     m.commitEdit.mockClear();
     m.current().splitAtPlayhead(true);
-    expect(m.commitEdit).not.toHaveBeenCalled();
-    expect(m.setRefusal).toHaveBeenCalledWith(missingAcrossRefusal("split", [gone], 6));
+    expect(m.setRefusal).not.toHaveBeenCalled();
+    expect(halves(sent(m).music).map((held) => [held.in, held.out])).toEqual([[0, 2], [2, 4]]);
   });
 
   it("refuses a split past the cap, and does nothing under the lock", () => {

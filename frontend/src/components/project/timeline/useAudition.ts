@@ -834,9 +834,23 @@ export function useAudition({
   // video nobody can see. Paused where it was, not rewound: the List tab is
   // where an offset is typed, and coming back to find the playhead back at zero
   // would make "change it, hear it again" worse rather than better.
+  //
+  // Coming BACK (E6): the strip returned nothing while the tab was away, so
+  // the clock, the playhead and the `<video>` are new nodes, drawn at 0 until
+  // something paints them - the position was held all along, and Play resumed
+  // from it, but nothing showed it. So on `active` turning true again the
+  // strip is painted once and the new picture seeked to the held position;
+  // on the first mount, when nothing was held, neither.
+  const wasActiveRef = useRef(active);
   useEffect(() => {
-    if (!active) { halt(position()); setWaitingToPlay(false); }
-  }, [active, halt, position]);
+    const rejoined = active && !wasActiveRef.current;
+    wasActiveRef.current = active;
+    if (!active) { halt(position()); setWaitingToPlay(false); return; }
+    if (rejoined) {
+      paint();
+      syncVideo(positionRef.current);
+    }
+  }, [active, halt, paint, position, positionRef, syncVideo]);
   useEffect(() => () => cancelAnimationFrame(frame.current), []);
   // The committed selection: mirrored into the ref the painter and the
   // transport read, then painted once. Mid-play the bound follows it - gone

@@ -862,14 +862,21 @@ export type ClipZone = "in" | "body" | "out";
  * file's length, never `in < 0` or `at < 0`, never shorter than
  * `MIN_CLIP_SECONDS`; the fades are re-fitted to the new length.
  * `fileDuration` is the library's recorded length — `null` for a file that
- * has gone, which pins the right edge where it is.
+ * has gone, which bounds BOTH edges by the slice the clip has: its `in` may
+ * rise and its `out` may fall, never past the values it holds (E6: the server
+ * keeps a missing clip's slice shrunk, never grown). The clip handed in is
+ * the stored one — a drag starts from the plan's clip — so those values are
+ * the stored slice.
  */
 export function trimClip(clip: MusicClip, edge: "in" | "out", toTimeline: number, fileDuration: number | null): MusicClip {
   const length = clipLength(clip);
   const limit = fileDuration === null ? clip.out : round3(fileDuration);
   if (edge === "in") {
     const wanted = round3(toTimeline) - clip.at;
-    const delta = round3(Math.min(Math.max(wanted, Math.max(-clip.in, -clip.at)), round3(length - MIN_CLIP_SECONDS)));
+    // How far the left edge may move LEFT: to the top of the file (and 0 on
+    // the output) for a file with a length, not at all for a missing one.
+    const floor = fileDuration === null ? 0 : Math.max(-clip.in, -clip.at);
+    const delta = round3(Math.min(Math.max(wanted, floor), round3(length - MIN_CLIP_SECONDS)));
     const next = { ...clip, at: Math.max(0, round3(clip.at + delta)), in: Math.max(0, round3(clip.in + delta)) };
     const [fade_in, fade_out] = fitFades(clipLength(next), next.fade_in, next.fade_out);
     return { ...next, fade_in, fade_out };
@@ -913,6 +920,19 @@ function clipSlice(clip: MusicClip, at: number, inSeconds: number, outSeconds: n
  * new length, ids unique, and nothing left overlapping the cut. A ZERO-LENGTH
  * interval is the split gesture (`S` on the Music lane): the clips under the
  * playhead become two, and nothing moves.
+ *
+ * **Every piece lies inside the slice of the clip it came from**, of the same
+ * file: a head keeps `in` and ends earlier, a tail starts later in the file
+ * and keeps `out`. That is exactly the server's rule for a clip whose file
+ * the library has lost (E6, the owner's decision of 2026-09-29: "you may keep
+ * what you have, and you may keep less of it" — `services/edit.py::
+ * _check_music`), so the server stores a cut or a split ACROSS a missing
+ * clip. E4c's `missingAcross`, which refused one before the PUT because the
+ * server then would not, went with that rule; a property test in
+ * `lib/music.test.ts` holds every piece of every random cut and split inside
+ * its clip's slice. A cut of the PICTURE across a missing clip is still
+ * refused on the strip, for a different reason — its undo could not be
+ * stored while the file is gone (`missingCutByPicture`).
  *
  * **The interval is rounded ONCE, at its bounds**, and every number after that
  * is computed from those two and rounded only when it becomes a clip's own
@@ -1014,35 +1034,37 @@ export function musicAfterTrim(clips: MusicClip[], locks: LaneLocks, change: Tri
 }
 
 /**
- * The MISSING clips a cut of `[a, b]` — or a split, `a === b` — would SLICE,
- * by `cutMusic`'s own arithmetic: the two bounds rounded once, at the top,
- * and a piece counted only when `cutMusic` would keep it
- * (`MIN_CLIP_SECONDS`). A clip is sliced when a surviving head is shortened
- * (the cut begins inside it) or a surviving tail is advanced (the cut ends
- * inside it) — either is a changed slice, and both together is a second id.
- * Not named: a clip wholly before or after the interval (it only ripples),
- * one wholly inside (it goes whole), one whose every remnant `cutMusic`
- * would drop (it goes whole too), one ending exactly at the cut's start or
- * starting exactly at its end (not sliced), and any LIVE clip.
+ * The MISSING clips a cut of the PICTURE over `[a, b]` would shorten, split or
+ * remove — so the strip refuses that cut before anything is sent (E6, the
+ * owner's decision of 2026-09-30: "refuse the cut first").
  *
- * Why (the Reviewer's M1, 2026-09-24): the server keeps a stored clip whose
- * file has gone but refuses a changed slice of it (E4c), and a slice is
- * exactly what a cut or a split across it makes. Left to the server, the
- * refusal spoke of a slice the user never touched and named none of the
- * ways out that keep the clip. The strip therefore refuses BEFORE the PUT,
- * in the gesture's own words (`missingAcrossRefusal`); the server's
- * sentence stays behind it as the backstop.
+ * Why. Since E6 the server keeps a missing clip shrunk or split, so such a cut
+ * would be stored — but its UNDO would put the clip's longer slice back, and
+ * the server refuses a missing clip that grows, the picture's part of that
+ * step with it: an ordinary picture cut that could not be undone, with nothing
+ * said before it was made. Refused first, every cut made while a file is
+ * missing stays undoable (a few are refused whose undo the server would have
+ * taken: another clip of the same file still holds the whole stretch). A clip
+ * the cut removes whole is named too: its undo would add a file the project no
+ * longer holds. The trims and splits of the missing clip
+ * itself — its own edges, `S` — stay allowed; their undo is refused and taken
+ * off the list with a message that says so (`useEditCommits.ts::afterRefusal`).
+ *
+ * Exactly when `musicAfterCut` would ripple the clips — Video and Music both
+ * unlocked; with either locked the clips are untouched and nothing is named —
+ * and by `cutMusic`'s own arithmetic: a missing clip is named unless the cut
+ * leaves it as ONE piece with the same slice (wholly before the cut, or wholly
+ * after it and only moved). A piece trim that shortens the picture is the same
+ * cut, over the picture's change (`TrimOutcome.picture`). LIVE clips are never
+ * named. E4c's `missingAcross` refused a changed slice for another reason (the
+ * server kept none) and let a clip swallowed whole through.
  */
-export function missingAcross(clips: MusicClip[], a: number, b: number): MusicClip[] {
-  const lo = round3(Math.max(0, Math.min(a, b)));
-  const hi = round3(Math.max(0, Math.max(a, b)));
+export function missingCutByPicture(clips: MusicClip[], locks: LaneLocks, a: number, b: number): MusicClip[] {
+  if (locks.music || locks.video) return [];
   return clips.filter((clip) => {
     if (!clip.missing) return false;
-    const start = clip.at;
-    const end = clipEnd(clip);
-    const head = Math.min(end, lo) - start >= MIN_CLIP_SECONDS - EPSILON;
-    const tail = end - Math.max(start, hi) >= MIN_CLIP_SECONDS - EPSILON;
-    return (head && lo < end) || (tail && hi > start);
+    const pieces = cutMusic([clip], a, b, () => "piece");
+    return !(pieces.length === 1 && pieces[0].in === clip.in && pieces[0].out === clip.out);
   });
 }
 
@@ -1053,20 +1075,18 @@ function listed(names: string[]): string {
 }
 
 /**
- * What the strip says when a cut or a split would slice a missing clip
- * (`missingAcross`): the gesture and where, in the strip's own timecode, the
- * file or files, why, and BOTH ways out — the one that keeps the clip first.
- * `b` is the cut's other bound; a split has only `a`.
+ * What the strip says when it refuses a picture cut or a piece trim across a
+ * missing clip (`missingCutByPicture`): the gesture and where, in the strip's
+ * own timecode, the file or files, why, and the two ways out — the one that
+ * keeps the clip first.
  */
-export function missingAcrossRefusal(gesture: "cut" | "split" | "trim", across: MusicClip[], a: number, b = a): string {
+export function pictureCutRefusal(gesture: "cut" | "trim", across: MusicClip[], a: number, b: number): string {
   const files = [...new Set(across.map((clip) => clip.file))];
   const oneFile = files.length === 1;
-  const where = gesture === "split"
-    ? `That split at ${timecode(a)}`
-    : `That ${gesture} (${timecode(Math.min(a, b))} – ${timecode(Math.max(a, b))})`;
-  return `${where} would cut into ${listed(files)}, but ${oneFile ? "its file is" : "their files are"} no longer in`
-    + ` the library, so ${across.length === 1 ? "its slice" : "their slices"} cannot change — lock the Music lane and ${gesture}`
-    + ` the picture alone, or remove the ${across.length === 1 ? "clip" : "clips"} first.`;
+  return `That ${gesture} (${timecode(Math.min(a, b))} – ${timecode(Math.max(a, b))}) would cut across ${listed(files)},`
+    + ` but ${oneFile ? "its file is" : "their files are"} no longer in the library, so the ${gesture} could not be undone`
+    + ` while ${oneFile ? "it is" : "they are"} gone. Lock the Music lane to ${gesture} the picture alone, or remove the`
+    + ` missing ${across.length === 1 ? "clip" : "clips"} first.`;
 }
 
 /**
@@ -1330,18 +1350,17 @@ export function snapClip(
  * small. The CSS edge overlays follow the same rule (`min(8px, 33%)`), so the
  * `ew-resize` cursor never promises a trim where this answers "body".
  *
- * **A missing clip has a body and no edges.** Its file cannot be measured, so
- * the server keeps it only with the slice it has (E4c: `in` and `out` cannot
- * change while the file is gone); a press anywhere on it is a move, never a
- * trim, and the strip draws no edge overlays on it, so no `ew-resize` cursor
- * promises what the server would refuse.
+ * **A missing clip has both edges, like any other** (E6). E4c gave it a body
+ * and no edges, because the server then kept it only with the slice it had;
+ * since E6 the server keeps it shrunk as well (never grown), so its edges
+ * trim it — `trimClip` bounds them by the slice it holds, the file's length
+ * being unknown.
  */
 export function clipAt(clips: MusicClip[], t: number, edgeSeconds: number): { clip: MusicClip; zone: ClipZone } | null {
   for (let i = clips.length - 1; i >= 0; i--) {
     const clip = clips[i];
     const end = clipEnd(clip);
     if (t < clip.at || t > end) continue;
-    if (clip.missing) return { clip, zone: "body" };
     const grab = Math.min(Math.max(0, edgeSeconds), clipLength(clip) / 3);
     const zone: ClipZone = t <= clip.at + grab ? "in" : t >= end - grab ? "out" : "body";
     return { clip, zone };
@@ -1502,13 +1521,32 @@ export function editBody(op: EditOp, committed: { music: MusicClip[]; markers: M
  * was frozen and pointing at the banner's button. Since E4c the lane is not
  * frozen — the server keeps a stored clip whose file has gone — and its own
  * sentences say what may not be done and what to do instead (a missing file
- * cannot be added; a missing clip's slice cannot change: move it, level it,
- * fade it, remove it, or put the file back), so nothing is added to them.
+ * cannot be added; since E6 a missing clip's slice can shrink but not grow:
+ * trim it shorter, split it, move it, level it, fade it, remove it, or put
+ * the file back), so nothing is added to them.
+ *
+ * An undo or a redo the server refused on its body is taken off the stack
+ * (E6, `useEditCommits.ts::afterRefusal`), and its lead says so: an edit
+ * step's the undo's or the redo's own, a timing step's the timing lead with
+ * the list named. Only when the server's sentence says a file "is not in the
+ * library" — both of `_check_music`'s refusals of a missing file, "file 'x'
+ * is not in the library." and "file 'x' is not in the library, so its slice
+ * can shrink but not grow; …" — does the lead add the way to take the step
+ * after all, putting the file back; any other refusal (a range past a source
+ * re-extracted shorter, an offset for a sentence a transcript save removed)
+ * names no file it has nothing to do with.
  */
-export function editRefusal(detail: string, what: "edit" | "timing"): string {
-  const lead = what === "timing"
+export type RefusalLead = "edit" | "timing" | "undo" | "redo" | "timing-undo" | "timing-redo";
+
+export function editRefusal(detail: string, what: RefusalLead): string {
+  const fileGone = detail.includes("is not in the library");
+  const lead = what === "timing" || what === "timing-undo" || what === "timing-redo"
     ? "That timing was not saved — the blocks are back where the last saved plan puts them."
-    : "That edit was not saved — the strip still shows the cut and the clips the server holds.";
+      + (what === "timing" ? "" : ` It has been taken off the ${what === "timing-undo" ? "undo" : "redo"} list.`)
+    : what === "undo" || what === "redo"
+      ? `That ${what} was refused and has been taken off the ${what} list — the strip still shows the cut and the clips`
+        + " the server holds." + (fileGone ? ` To ${what} past it, put the file back in the library first.` : "")
+      : "That edit was not saved — the strip still shows the cut and the clips the server holds.";
   const said = detail.trim() ? ` The server said: ${detail.trim()}` : "";
   return `${lead}${said}`;
 }

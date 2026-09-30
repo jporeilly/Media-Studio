@@ -123,6 +123,40 @@ def test_embed_chapters_writes_the_metadata_file_remuxes_in_place_and_cleans_up(
     assert not temp.exists() and not (tmp_path / "clip_revoiced.chapters.txt").exists()
 
 
+def _meta_for(record: dict, tmp_path, monkeypatch) -> list[str]:
+    """The ffmetadata text the markers of ``record`` become: ``chapters_for``
+    then ``embed_chapters`` with ffmpeg faked - [] when nothing was spawned."""
+    calls = _fake_ffmpeg(monkeypatch)
+    video = tmp_path / "clip_revoiced.mp4"
+    video.write_bytes(b"MUXED")
+    video_creator.embed_chapters(video, edit.chapters_for(record, 12.0))
+    return [call["meta"] for call in calls]
+
+
+def _block(start: int, end: int, title: str) -> str:
+    """One chapter's block in the metadata file, its title already escaped."""
+    return f"\n[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={title}\n"
+
+
+def test_the_metadata_opens_with_an_untitled_chapter_when_the_first_marker_is_after_0(tmp_path, monkeypatch):
+    """E6, the three cases as the ffmetadata file carries them: a first
+    marker after 0 - an untitled chapter from 0 to it comes first, as a
+    ``title=`` line with nothing after it (a block with NO title line
+    breaks ffmpeg's reader; the real-binary test below holds that); a first
+    marker at 0 - no leading chapter; no markers - no file, no ffmpeg."""
+    after_0 = {"edit": {"version": 2, "markers": [MARK_C, MARK_A]}}
+    wrap = "Wrap\\\\up \\= done\\; \\#3"  # MARK_C's name as the format escapes it
+    assert _meta_for(after_0, tmp_path, monkeypatch) == [
+        ";FFMETADATA1\n" + _block(0, 1000, "") + _block(1000, 9000, "Intro") + _block(9000, 12000, wrap)
+    ]
+    at_0 = {"edit": {"version": 2, "markers": [{**MARK_A, "at": 0.0}, MARK_C]}}
+    assert _meta_for(at_0, tmp_path, monkeypatch) == [
+        ";FFMETADATA1\n" + _block(0, 9000, "Intro") + _block(9000, 12000, wrap)
+    ]
+    assert _meta_for({"edit": {"version": 2, "markers": []}}, tmp_path, monkeypatch) == []
+    assert _meta_for({}, tmp_path, monkeypatch) == []
+
+
 def test_embed_chapters_with_nothing_to_write_answers_false_and_spawns_nothing(tmp_path, monkeypatch):
     calls = _fake_ffmpeg(monkeypatch)
     video = tmp_path / "clip_revoiced.mp4"
@@ -282,11 +316,12 @@ def test_the_chapters_are_written_last_on_the_final_file_from_the_markers_projec
     chapters = log[1]
     assert chapters["video"] == out, "the file the record names, never the cut intermediate"
     assert chapters["input_bytes"] == b"FAKEREVOICE", "after the mux"
-    assert chapters["chapters"] == [(1000, 7500, "Intro"), (7500, 10500, MARK_C["name"])], (
-        "the hidden marker is no chapter; unescaped names - the writer escapes"
+    assert chapters["chapters"] == [(0, 1000, ""), (1000, 7500, "Intro"), (7500, 10500, MARK_C["name"])], (
+        "the hidden marker is no chapter; unescaped names - the writer escapes; the first marker is not at 0, so an "
+        "untitled chapter opens the file (E6)"
     )
     assert chapters["chapters"] == edit.chapters_for(store.get_project(pid), 12.0), "the one place the list is computed"
-    assert progress.index((0.9, "revoicing")) < progress.index((0.98, "Writing 2 chapters…"))
+    assert progress.index((0.9, "revoicing")) < progress.index((0.98, "Writing 3 chapters…")), "the chapters WRITTEN, the untitled one included"
     assert [f for f, _ in progress] == sorted(f for f, _ in progress), "the job never steps backwards"
 
     during = chapters["record"]
@@ -310,7 +345,7 @@ def test_with_music_the_chapters_go_on_after_the_mix_onto_the_mixed_file(client,
     out = store.PROJECTS_DIR / pid / "clip_revoiced.mp4"
     assert log[1]["video"] == out == log[0]["video_out"]
     assert log[1]["input_bytes"] == b"FAKEREVOICE+MUSIC", "the mixed file is what gets the chapters"
-    assert log[1]["chapters"] == [(1000, 12000, "Intro")], "a whole picture: the last chapter runs to the source's end"
+    assert log[1]["chapters"] == [(0, 1000, ""), (1000, 12000, "Intro")], "a whole picture: the last chapter runs to the source's end"
     saved = store.get_project(pid)
     assert out.read_bytes() == b"FAKEREVOICE+MUSIC+CHAPTERS"
     assert saved["music_rendered"] == 1 and saved["edit_rendered_at"] == saved["revoiced_at"]
@@ -340,7 +375,7 @@ def test_a_marker_only_edit_renders_the_untouched_source_and_stamps_it_edited_on
     assert _revoice(client, pid)["status"] == "done"
     assert [entry["step"] for entry in log] == ["chapters"], "no cut, no mix"
     assert _FakeVideoProcessor.source == store.PROJECTS_DIR / pid / "clip.mp4", "the untouched source"
-    assert log[0]["chapters"] == [(1000, 9000, "Intro"), (9000, 12000, MARK_C["name"])]
+    assert log[0]["chapters"] == [(0, 1000, ""), (1000, 9000, "Intro"), (9000, 12000, MARK_C["name"])]
     assert "edit_rendered_at" not in log[0]["record"], "nothing cut or projected: unstamped until the chapters land"
     saved = store.get_project(pid)
     assert saved["edit_rendered_at"] == saved["revoiced_at"], "the output differs from an unedited render"
@@ -449,31 +484,38 @@ def _chpl_atom(video: Path) -> list[tuple[float, str]]:
 def test_a_real_remux_lists_the_titles_and_times_and_leaves_a_hidden_marker_out(tmp_path, monkeypatch, ffmpeg):
     """End to end on the binary itself: a 10.5 s picture standing in for the
     cut output, the three markers projected through KEEP, one remux - and
-    the file's own chapter list holds exactly two chapters at their starts
-    with the titles as typed, the backslash included; the prober beside
-    that ffmpeg (and ffmpeg's own header, as F1 reads it) lists the same
-    two with their titles and ends, the first chapter's start read as 0 the
-    way ffmpeg's reader has always read an MP4 chapter track (the deck's
-    chapters after an intro card read so too). The metadata file and the
-    partial output are gone, and the picture still decodes."""
+    the file's own chapter list holds exactly three chapters at their
+    starts, the untitled one from 0 (E6) and the two named ones with the
+    titles as typed, the backslash included; the prober beside that ffmpeg
+    (and ffmpeg's own header, as F1 reads it) lists the same three with the
+    same starts, titles and ends. Before E6 the file had no chapter before
+    the first marker, and ffmpeg's reader put that first named chapter at
+    0 whatever its start (the deck's chapters after an intro card still read
+    so) - the disagreement the leading chapter ends. The metadata file and
+    the partial output are gone, and the picture still decodes."""
     monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
     video, _ = _real_media(ffmpeg, tmp_path, seconds=10.5, audio_seconds=1.0)
     record = {"edit": {"version": 2, "video": {"keep": KEEP}, "markers": [MARK_C, MARK_A, MARK_B]}}
     chapters = edit.chapters_for(record, 12.0)
-    assert chapters == [(1000, 7500, "Intro"), (7500, 10500, MARK_C["name"])]
+    assert chapters == [(0, 1000, ""), (1000, 7500, "Intro"), (7500, 10500, MARK_C["name"])]
 
     assert video_creator.embed_chapters(video, chapters) is True
     assert sorted(p.name for p in tmp_path.iterdir()) == ["clip.mp4", "narration.mp3"], "nothing left behind"
 
     # The file's own chapter list: the starts and the titles exactly as typed.
-    assert _chpl_atom(video) == [(1.0, "Intro"), (7.5, MARK_C["name"])]
-    # ffmpeg's reader: the titles and the ends exactly; the first start as it reads them.
-    expected = [(0.0, 7.5, "Intro"), (7.5, 10.5, MARK_C["name"])]
+    assert _chpl_atom(video) == [(0.0, ""), (1.0, "Intro"), (7.5, MARK_C["name"])]
+    # ffmpeg's reader AGREES with the atom now: the first named chapter at
+    # its true start, the untitled one before it, nothing listed twice. (A
+    # block written with no title line at all read back, on 8.0.1 and 7.1
+    # alike, as "Intro" from 0 and the last chapter twice - measured
+    # 2026-09-29, which is why the leading title is an empty `title=`.)
+    expected = [(0.0, 1.0, ""), (1.0, 7.5, "Intro"), (7.5, 10.5, MARK_C["name"])]
     ffprobe = _ffprobe_beside(ffmpeg)
     if ffprobe is not None:
         assert _probed_chapters(ffprobe, video) == expected
     header = [(c["start"], c["end"], c["title"]) for c in video_importer.get_video_chapters(video)]
-    assert header == expected, "ffmpeg's own header agrees with its prober"
+    # F1's header parser numbers an untitled chapter, as the ffprobe version did.
+    assert header == [(0.0, 1.0, "Chapter 1"), *expected[1:]], "ffmpeg's own header agrees with its prober"
     assert not any("In the hole" in title for _, _, title in header)
     # The picture is still there and decodes.
     frame = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(video), "-frames:v", "1",

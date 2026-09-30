@@ -87,7 +87,7 @@ function mount(state0: Partial<State> = {}, over: Partial<MarkersDeps> = {}) {
   const music = [bed];
   const markersRef = ref(state.storedMarkers);
   const editLockedRef = ref(state.editLocked);
-  const commitEdit = vi.fn<(next: EditState) => void>();
+  const commitEdit = vi.fn<(next: EditState, keepSelection?: boolean) => void>();
   const committedRef = ref<EditState>({ video: CUT, narration: null, music, markers: state.storedMarkers });
   const setRefusal = vi.fn((value: Setter<string | null>) => { state.refusal = apply(state.refusal, value); });
   const positionRef = ref(state.position);
@@ -125,9 +125,14 @@ function mount(state0: Partial<State> = {}, over: Partial<MarkersDeps> = {}) {
     expect(commitEdit).toHaveBeenCalledTimes(1);
     return commitEdit.mock.calls[0][0];
   };
+  /** The one `commitEdit` call's second argument: the gesture's say on the range selection (E6). */
+  const keeps = () => {
+    expect(commitEdit).toHaveBeenCalledTimes(1);
+    return commitEdit.mock.calls[0][1];
+  };
   return {
     ...m, state, music, markersRef, committedRef, commitEdit, setRefusal, positionRef, seek, beginDrag, snapTargetsNow,
-    suppressClick, setSelectedMarker, setSelectedClip, setSelectedBlocks, label, sent,
+    suppressClick, setSelectedMarker, setSelectedClip, setSelectedBlocks, label, sent, keeps,
   };
 }
 type M = ReturnType<typeof mount>;
@@ -196,17 +201,22 @@ describe("commitMarkers - the one PUT every marker gesture makes", () => {
   it("hands commitEdit the whole edit as the server holds it, the markers replaced and the tracks and the clips the SAME objects (trap 39); nothing under the commit lock", () => {
     const m = mount();
     const list = [INTRO];
-    press(() => m.current().commitMarkers(list));
+    press(() => m.current().commitMarkers(list, false));
     const op = m.sent();
+    // The gesture's say on the range selection (E6) passes straight through, either way.
+    expect(m.keeps()).toBe(false);
     expect(op).toEqual({ video: CUT, narration: null, music: [bed], markers: [INTRO] });
     expect(op.markers).toBe(list);
     expect(op.video).toBe(CUT);
     expect(op.music).toBe(m.music);
+    m.commitEdit.mockClear();
+    press(() => m.current().commitMarkers(list, true));
+    expect(m.keeps()).toBe(true);
     // Under the commit lock (a job holds the project, a commit is in flight): nothing, and nothing said.
     m.commitEdit.mockClear();
     m.state.editLocked = true;
     m.rerender();
-    press(() => m.current().commitMarkers(list));
+    press(() => m.current().commitMarkers(list, true));
     expect(m.commitEdit).not.toHaveBeenCalled();
     expect(m.setRefusal).not.toHaveBeenCalled();
   });
@@ -266,8 +276,40 @@ describe("finishNameBox - the name box closes", () => {
     expect(op.markers[0]).toEqual({ ...held, name: "Opening" });
     expect(op.markers.slice(1)).toEqual([INTRO, HIDDEN, LATER]);
     expect(op.video).toBe(CUT);
+    // A drop keeps the range selection (E6, the owner's decision).
+    expect(m.keeps()).toBe(true);
     expect(m.current().nameBox).toBeNull();
-    expect(m.current().pending).toBe(held);
+    // Still pending until the plan has it - under the name being saved (E6).
+    expect(m.current().pending).toEqual({ ...held, name: "Opening" });
+  });
+
+  it("draws the pending flag with the typed name while its save is in flight, and the default after Escape (E6)", () => {
+    // The R1d walk: after Enter the flag kept "Marker N" for some 600 ms,
+    // until the plan returned the named marker, because the pending marker
+    // - which the flag is drawn from until then - held the default.
+    const m = mount({ position: 8 });
+    const held = drop(m);
+    const ruler = renderRuler({ flags: m.current().flags, pending: m.current().pending });
+    const flagText = () => ruler.flags().map((flag) => flag.textContent);
+    expect(flagText()).toEqual(["Intro", "Later", "Marker 4"]);
+    type(m, "Opening");
+    press(() => m.current().finishNameBox(true));
+    m.sent();
+    // The save is in flight: the plan has not got it yet, and the flag reads the typed name.
+    expect(m.state.storedMarkers).toEqual([INTRO, HIDDEN, LATER]);
+    expect(m.current().flags).toEqual([INTRO, LATER, { ...held, name: "Opening" }]);
+    ruler.render({ flags: m.current().flags, pending: m.current().pending });
+    expect(flagText()).toEqual(["Intro", "Later", "Opening"]);
+    expect(ruler.flags()[2].getAttribute("aria-label")).toBe(`Marker Opening at ${timecode(8)}`);
+    expect(ruler.flags()[2].className).toContain("pending");
+    // Escape: the default goes into the save, and the flag keeps showing it.
+    const other = mount({ position: 8 });
+    const second = drop(other);
+    type(other, "Typed");
+    press(() => other.current().finishNameBox(false));
+    expect(other.sent().markers).toContainEqual({ ...second, name: "Marker 4" });
+    expect(other.current().pending).toBe(second);
+    expect(other.current().flags.map((flag) => flag.name)).toEqual(["Intro", "Later", "Marker 4"]);
   });
 
   it("lands it with the default name on Escape, and when the box was emptied", () => {
@@ -276,11 +318,13 @@ describe("finishNameBox - the name box closes", () => {
     type(m, "Typed");
     press(() => m.current().finishNameBox(false));
     expect(m.sent().markers).toEqual(sortMarkers([INTRO, HIDDEN, LATER, { ...held, name: "Marker 4" }]));
+    expect(m.keeps()).toBe(true);
     const emptied = mount({ position: 8 });
     const second = drop(emptied);
     type(emptied, "  \t ");
     press(() => emptied.current().finishNameBox(true));
     expect(emptied.sent().markers).toContainEqual({ ...second, name: "Marker 4" });
+    expect(emptied.keeps()).toBe(true);
   });
 
   it("drops the pending marker under the commit lock, sends nothing, and says it was not added", () => {
@@ -322,6 +366,8 @@ describe("finishNameBox - the name box closes", () => {
     expect(op.markers[0]).toEqual({ ...INTRO, name: "Welcome" });
     expect(op.markers[1]).toBe(HIDDEN);
     expect(op.markers[2]).toBe(LATER);
+    // A rename keeps the range selection (E6).
+    expect(m.keeps()).toBe(true);
     // Under the lock: nothing sent, and the strip says the name was not saved.
     m.commitEdit.mockClear();
     open();
@@ -354,6 +400,9 @@ describe("removeMarker and jumpToMarker", () => {
     expect(op.markers[0]).toBe(INTRO);
     expect(op.markers[1]).toBe(LATER);
     expect(op.music).toBe(m.music);
+    // A removal clears the range selection, as every edit but a drop, a rename and a move does (E6) -
+    // else the next Delete, the marker gone, would cut the range.
+    expect(m.keeps()).toBe(false);
     m.commitEdit.mockClear();
     m.state.selectedMarker = null;
     m.rerender();
@@ -542,18 +591,25 @@ describe("the reconcile effect, the flags and dropPending", () => {
     const held = drop(m);
     expect(m.current().flags).toEqual([INTRO, LATER, held]);
     expect(m.current().nameBoxAt).toBe(8);
-    // Named in its box, so the marker the plan lands with differs from the pending one, which keeps the default.
+    // Named in its box: the pending marker carries the typed name while the save is in flight (E6).
     type(m, "Opening");
     press(() => m.current().finishNameBox(true));
-    expect(m.current().pending).toBe(held);
+    const inFlight = m.current().pending;
+    expect(inFlight).toEqual({ ...held, name: "Opening" });
     expect(held.name).toBe("Marker 4");
-    // The plan has it now: drawn once, from the plan - in the render the plan lands in too, where the
-    // marker is still pending (the effect that gives it up runs after that render), and in the one after.
-    m.state.storedMarkers = [INTRO, HIDDEN, LATER, { ...held, name: "Opening" }];
+    // The plan has it now: drawn once, FROM THE PLAN - the plan's own object, never the pending one it
+    // equals now - in the render the plan lands in too, where the marker is still pending (the effect
+    // that gives it up runs after that render), and in the one after.
+    const landed: DrawnMarker = { ...held, name: "Opening" };
+    m.state.storedMarkers = [INTRO, HIDDEN, LATER, landed];
     renders = [];
     m.rerender();
     expect(renders.length).toBeGreaterThanOrEqual(2);
-    for (const drawn of renders) expect(drawn).toEqual([INTRO, LATER, { ...held, name: "Opening" }]);
+    for (const drawn of renders) {
+      expect(drawn).toEqual([INTRO, LATER, landed]);
+      expect(drawn[2]).toBe(landed);
+      expect(drawn[2]).not.toBe(inFlight);
+    }
     expect(m.current().pending).toBeNull();
     press(() => m.current().onMarkerDoubleClick(click(), INTRO));
     expect(m.current().nameBoxAt).toBe(1);

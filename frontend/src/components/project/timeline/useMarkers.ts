@@ -54,8 +54,8 @@ export interface MarkersDeps {
   /** The commit lock, as the value (`onMarkerPointerDown` takes it as a dependency) and as the ref every commit path reads. */
   editLocked: boolean;
   editLockedRef: RefObject<boolean>;
-  /** The stack's one entry point, and what the server holds as far as the client knows. */
-  commitEdit: (next: EditState) => void;
+  /** The stack's one entry point (`keepSelection`: the range outlives the commit, E6), and what the server holds as far as the client knows. */
+  commitEdit: (next: EditState, keepSelection?: boolean) => void;
   committedRef: RefObject<EditState>;
   setRefusal: Dispatch<SetStateAction<string | null>>;
   /** The playhead, the picture's list, the source's length and the pixels per second - the root's refs. */
@@ -141,11 +141,13 @@ export function useMarkers({
   // trim carries the markers along unchanged in turn, because nothing
   // rewrites a marker (trap 39). The rules live in lib/edit.ts (`newMarker`,
   // `renameMarker`, `moveMarker`, `markersAfterDelete`, `markerNeighbours`),
-  // where they are tested.
-  const commitMarkers = useCallback((list: Marker[]) => {
+  // where they are tested. `keepSelection` is the gesture's own say on the
+  // range selection (E6): a drop, a rename and a move leave it, a removal
+  // clears it as every other edit does.
+  const commitMarkers = useCallback((list: Marker[], keepSelection: boolean) => {
     if (editLockedRef.current) return;
     const before = committedRef.current;
-    commitEdit({ video: before.video, narration: before.narration, music: before.music, markers: list });
+    commitEdit({ video: before.video, narration: before.narration, music: before.music, markers: list }, keepSelection);
   }, [commitEdit, committedRef, editLockedRef]);
 
   /**
@@ -192,7 +194,12 @@ export function useMarkers({
         setRefusal("The marker was not added — wait for the last edit to be saved, then press M again.");
         return;
       }
-      commitMarkers(sortMarkers([...markersRef.current, { ...held, name }]));
+      // The flag shows the name being saved while its save is in flight
+      // (E6): drawn from the pending marker until the plan has it, which
+      // held the default until then - "Marker N" for some 600 ms after
+      // Enter (the R1d walk). Escape keeps the default, as the save does.
+      if (name !== held.name) setPending({ ...held, name });
+      commitMarkers(sortMarkers([...markersRef.current, { ...held, name }]), true);
       return;
     }
     if (!keep) return;
@@ -202,14 +209,14 @@ export function useMarkers({
       setRefusal("The name was not saved — wait for the last edit to be saved, then rename it again.");
       return;
     }
-    commitMarkers(next);
+    commitMarkers(next, true);
   }, [commitMarkers, editLockedRef, markersRef, setRefusal]);
 
   /** Delete / Backspace with a marker selected: the marker goes, before a clip and before the range. */
   const removeMarker = useCallback(() => {
     const id = selectedMarkerRef.current;
     if (id === null || editLockedRef.current) return;
-    commitMarkers(markersAfterDelete(markersRef.current, id));
+    commitMarkers(markersAfterDelete(markersRef.current, id), false);
   }, [commitMarkers, editLockedRef, markersRef, selectedMarkerRef]);
 
   /** Ctrl+[ / Ctrl+]: the playhead to the previous / next DRAWN marker, if there is one. */

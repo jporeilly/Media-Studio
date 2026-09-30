@@ -35,8 +35,14 @@ export interface Entry {
   undo: Op;
   redo: Op;
 }
+/**
+ * One commit through the stack. A `do` may carry `keepSelection` (E6): the
+ * gesture's own intent that the range selection outlives it - a marker
+ * dropped, named or moved. Nothing else keeps it, and an undo or a redo never
+ * does: the stack's entries do not remember the gesture that made them.
+ */
 export type Commit =
-  | { kind: "do"; op: Op; before: Op }
+  | { kind: "do"; op: Op; before: Op; keepSelection?: true }
   | { kind: "undo" | "redo"; op: Op; entry: Entry };
 /** What a commit answers with: the stored edit, or the sentences a batch of offsets updated. */
 export type Answer = EditPayload | { sentences: SavedSentence[] };

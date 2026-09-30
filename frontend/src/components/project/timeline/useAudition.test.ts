@@ -66,7 +66,12 @@ afterEach(() => {
 });
 
 /** The hook with the root's refs, state and nodes faked; the props thunk reads the mutable `state`, as the root's render would. */
-function mount(over: Partial<AuditionDeps> = {}, state0: { sentences?: PlanSentence[]; keep?: Keep; duration?: number; storedMusic?: MusicClip[]; selection?: Selection | null } = {}) {
+function mount(
+  over: Partial<AuditionDeps> = {},
+  state0: { sentences?: PlanSentence[]; keep?: Keep; duration?: number; storedMusic?: MusicClip[]; selection?: Selection | null } = {},
+  /** `inRender`: attach the transport's nodes during the render, as the JSX's refs attach in the commit, BEFORE the first effects run; `position`: the root's held playhead. */
+  opts: { inRender?: boolean; position?: number } = {},
+) {
   const state = {
     active: true,
     sentences: state0.sentences ?? SENTENCES,
@@ -86,7 +91,7 @@ function mount(over: Partial<AuditionDeps> = {}, state0: { sentences?: PlanSente
   });
   const dragRef = ref<Drag | null>(null);
   const ppsRef = ref(10);
-  const positionRef = ref(0);
+  const positionRef = ref(opts.position ?? 0);
   const totalRef = ref(0);
   const nodes = {
     playhead: el("div"), clock: el("span"), headClock: el("span"), shuttleLabel: el("span"),
@@ -98,7 +103,18 @@ function mount(over: Partial<AuditionDeps> = {}, state0: { sentences?: PlanSente
   const inLabelRef = ref<HTMLSpanElement | null>(nodes.inLabel);
   const outLabelRef = ref<HTMLSpanElement | null>(nodes.outLabel);
   const video = new FakeVideo();
-  const m = mountHook(useAudition, () => {
+  const useAttached = (deps: AuditionDeps) => {
+    const out = useAudition(deps);
+    if (opts.inRender) {
+      out.videoRef.current = video as unknown as HTMLVideoElement;
+      out.playheadRef.current = nodes.playhead;
+      out.clockRef.current = nodes.clock;
+      out.headClockRef.current = nodes.headClock;
+      out.shuttleLabelRef.current = nodes.shuttleLabel;
+    }
+    return out;
+  };
+  const m = mountHook(useAttached, () => {
     // The root mirrors these every render; the selection's ref is the hook's own to mirror.
     durationRef.current = state.duration;
     keepRef.current = state.keep;
@@ -705,6 +721,58 @@ describe("what the plan and the picture do to a running audition", () => {
     m.rerender();
     expect(m.current().waitingToPlay).toBe(false);
     expect(m.current().playing).toBe(false);
+  });
+
+  it("adds nothing on the FIRST mount with the tab active: the one seek there is the plan's own halt, as before E6 (E6)", () => {
+    // The rejoin rule fires on `active` turning true AGAIN, never on the
+    // mount. Its effect's work is not visible on its own there: the plan
+    // effect already halts at the held position on the mount, which paints
+    // and seeks the picture (unchanged by E6). So the test counts: mounted
+    // with the <video> attached in the render - as the JSX attaches it in the
+    // commit, BEFORE the first effects; the harness's own mount attaches it
+    // after them, where any seek on mount lands on no <video> and every count
+    // is zero - and a playhead the root holds at 12.5 s, the picture is sought
+    // there exactly ONCE. A rejoin rule firing on the mount too seeks it twice.
+    const m = (mounted = mount({ sourceDurationRef: ref(30) }, { keep: wholeKeep(30), duration: 30 }, { inRender: true, position: 12.5 }));
+    expect(m.video.seeks).toEqual([12.5]);
+    expect(m.nodes.clock.textContent).toBe(timecode(12.5));
+    expect(m.current().playing).toBe(false);
+  });
+
+  it("rejoining the tab paints the clock and the playhead at the held position and seeks the NEW <video> there, once (E6)", () => {
+    // The root returns nothing while the tab is away, so on the way back the
+    // clock, the playhead and the <video> are new nodes: the clock reading
+    // 0:00.000 and the picture at 0 as the JSX makes them, the position held
+    // all along (R1b's walk) - until the next frame painted them.
+    const m = (mounted = mount({ sourceDurationRef: ref(30) }, { keep: wholeKeep(30), duration: 30 }));
+    act(() => m.current().halt(17.86));
+    expect(m.nodes.clock.textContent).toBe(timecode(17.86));
+    expect(m.video.currentTime).toBe(17.86);
+    m.state.active = false;
+    m.rerender();
+    expect(m.positionRef.current).toBe(17.86);
+    // What the JSX attaches when the tab comes back: fresh nodes at zero.
+    const clock = el("span");
+    clock.textContent = timecode(0);
+    const headClock = el("span");
+    headClock.textContent = timecode(0);
+    const playhead = el("div");
+    const video = new FakeVideo();
+    m.current().clockRef.current = clock;
+    m.current().headClockRef.current = headClock;
+    m.current().playheadRef.current = playhead;
+    m.current().videoRef.current = video as unknown as HTMLVideoElement;
+    m.state.active = true;
+    m.rerender();
+    expect(clock.textContent).toBe(timecode(17.86));
+    expect(headClock.textContent).toBe(timecode(17.86));
+    expect(playhead.style.transform).toBe(`translateX(${17.86 * 10}px)`);
+    expect(video.seeks).toEqual([17.86]);
+    expect(video.currentTime).toBe(17.86);
+    expect(m.current().playing).toBe(false);
+    // Once per rejoin: a render while the tab stays open paints and seeks nothing more.
+    m.rerender();
+    expect(video.seeks).toEqual([17.86]);
   });
 });
 
