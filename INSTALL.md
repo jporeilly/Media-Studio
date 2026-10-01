@@ -181,7 +181,7 @@ An install that was updated in place anyway says so at every start, with a warni
   on this machine, so the app cannot self-update") and the app otherwise works
   normally. `winget install -e --id Git.Git` adds it.
 - **Access to the app's Git remote.** The remote is the private GitHub repository
-  `jporeilly/media-studio-enterprise`, so in-app updates work on machines whose Git
+  `jporeilly/Media-Studio`, so in-app updates work on machines whose Git
   credentials can read it (the team's own). Git runs with prompts disabled, so a machine
   without stored credentials sees **"Could not reach the Git remote"** right away rather
   than hanging; such a machine is updated by running a newer installer instead.

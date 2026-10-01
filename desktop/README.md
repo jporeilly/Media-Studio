@@ -125,7 +125,7 @@ npm run icons             # python scripts/make-icons.py
 
 ### Output & install
 
-- Installer: `C:\Projects\Media-Studio-Enterprise\dist\Media-Studio-Enterprise_<ver>_x64-setup.exe` (0.9.0: 154,761,799 bytes, 148 MB; 0.9.1 about 25 MB larger, measured after the build: **178,044,267 bytes (170 MB)**)
+- Installer: `C:\Projects\Media-Studio\dist\Media-Studio-Enterprise_<ver>_x64-setup.exe` (0.9.0: 154,761,799 bytes, 148 MB; 0.9.1 about 25 MB larger, measured after the build: **178,044,267 bytes (170 MB)**)
 - Install (double-click, **per-user, no admin**; silent: `/S`): `C:\Media-Studio-Enterprise\`
   - `media-studio-desktop.exe` - the shell (named after the Cargo crate, not the product), and `uninstall.exe`
   - `app\` - the git checkout (with the committed `frontend\dist`) + `boot.py` + `bin\ffmpeg.exe` + `bin\ffprobe.exe`
@@ -268,7 +268,7 @@ FAILs; everything else is a WARN that names the feature it affects.
 | Install mode | NSIS `currentUser` (per-user) |
 | Install root | `C:\Media-Studio-Enterprise\` |
 | App data | `<install>\app\data\`; rendered output `<install>\app\assets\finished\` |
-| Git remote of the install | `https://github.com/jporeilly/media-studio-enterprise.git` (private) |
+| Git remote of the install | `https://github.com/jporeilly/Media-Studio.git` (private) |
 
 ---
 
@@ -361,7 +361,7 @@ Requirements on the machine:
   says "git is not installed on this machine, so the app cannot self-update" and
   everything else works.
 - Credentials for the remote. The remote is the **private** repo
-  `jporeilly/media-studio-enterprise`, so self-update works on machines whose
+  `jporeilly/Media-Studio`, so self-update works on machines whose
   Git credentials can read it (the team's own). Git runs with
   `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never` - the backend has no
   console to answer a prompt in - so a machine without credentials gets
@@ -417,5 +417,5 @@ once; every restart after it works.
 - **Unsigned.** `sign.ps1` is a no-op without `MSE_SIGN_THUMBPRINT`; SmartScreen
   warns on first run.
 - **Private remote.** Self-update reaches only machines with credentials for
-  `jporeilly/media-studio-enterprise`; a customer install is updated by
+  `jporeilly/Media-Studio`; a customer install is updated by
   installer until the repo (or a release feed) is public.
