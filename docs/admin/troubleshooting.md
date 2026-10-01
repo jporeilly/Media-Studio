@@ -93,7 +93,7 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 | --- | --- | --- |
 | "This install is not a Git checkout, so the app cannot self-update." | The app directory has no `.git` | Update with a newer installer |
 | "git is not installed on this machine, so the app cannot self-update." | No `git` on PATH | `winget install -e --id Git.Git` |
-| "Could not reach the Git remote" | No credentials for the remote, or no network | Store credentials that can read the repository, or use a newer installer |
+| "Could not reach the Git remote" | No network, or github.com blocked by a proxy or firewall | Check the connection to github.com, or use a newer installer |
 | The update fails with "git pull failed: …" | The update touches a file that was edited by hand under the checkout, or the local branch has commits upstream does not (it has diverged) | Revert the hand edit and update again; a diverged branch has to be reconciled with Git by hand |
 | "The backend hasn't come back after four minutes." | The restart failed, or a cold start is slower than the wait | Relaunch the app; **Keep waiting** re-arms the wait |
 

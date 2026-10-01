@@ -268,7 +268,7 @@ FAILs; everything else is a WARN that names the feature it affects.
 | Install mode | NSIS `currentUser` (per-user) |
 | Install root | `C:\Media-Studio-Enterprise\` |
 | App data | `<install>\app\data\`; rendered output `<install>\app\assets\finished\` |
-| Git remote of the install | `https://github.com/jporeilly/Media-Studio.git` (private) |
+| Git remote of the install | `https://github.com/jporeilly/Media-Studio.git` (public) |
 
 ---
 
@@ -360,11 +360,11 @@ Requirements on the machine:
 - `git` on PATH (`check-environment.ps1` has a row for it). Without it the card
   says "git is not installed on this machine, so the app cannot self-update" and
   everything else works.
-- Credentials for the remote. The remote is the **private** repo
-  `jporeilly/Media-Studio`, so self-update works on machines whose
-  Git credentials can read it (the team's own). Git runs with
+- Access to the remote. The remote is the **public** repo
+  `jporeilly/Media-Studio`, so self-update needs no Git credentials, only a
+  connection to github.com. Git runs with
   `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never` - the backend has no
-  console to answer a prompt in - so a machine without credentials gets
+  console to answer a prompt in - so a machine that cannot reach it gets
   "Could not reach the Git remote: ..." within the timeout and is updated by
   running a newer installer.
 
@@ -416,6 +416,3 @@ once; every restart after it works.
   stdlib `wave`) would let the prober go again; that is deferred, not rejected.
 - **Unsigned.** `sign.ps1` is a no-op without `MSE_SIGN_THUMBPRINT`; SmartScreen
   warns on first run.
-- **Private remote.** Self-update reaches only machines with credentials for
-  `jporeilly/Media-Studio`; a customer install is updated by
-  installer until the repo (or a release feed) is public.

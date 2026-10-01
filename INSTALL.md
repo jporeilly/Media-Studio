@@ -180,11 +180,11 @@ An install that was updated in place anyway says so at every start, with a warni
 - **`git` on PATH** on the machine. Without it Settings says so ("git is not installed
   on this machine, so the app cannot self-update") and the app otherwise works
   normally. `winget install -e --id Git.Git` adds it.
-- **Access to the app's Git remote.** The remote is the private GitHub repository
-  `jporeilly/Media-Studio`, so in-app updates work on machines whose Git
-  credentials can read it (the team's own). Git runs with prompts disabled, so a machine
-  without stored credentials sees **"Could not reach the Git remote"** right away rather
-  than hanging; such a machine is updated by running a newer installer instead.
+- **Access to the app's Git remote.** The remote is the public GitHub repository
+  `jporeilly/Media-Studio`, so in-app updates need no Git credentials, only a connection
+  to github.com. Git runs with prompts disabled, so a machine that cannot reach it sees
+  **"Could not reach the Git remote"** right away rather than hanging; such a machine is
+  updated by running a newer installer instead.
 
 ### Things to know
 
@@ -265,8 +265,8 @@ PowerPoint bridge (pywin32) can fail to find its DLLs — a known gap listed und
 working with the basic renderer; find the line "PowerPoint COM failed: … — using Pillow
 fallback" in `app\data\logs\app.log` and report it.
 
-**"Could not reach the Git remote" in Settings.** The machine has no Git credentials for
-the app's repository (or no network). Updates on that machine come from a newer
+**"Could not reach the Git remote" in Settings.** The machine cannot reach github.com (no
+network, or a proxy or firewall in the way). Updates on that machine come from a newer
 installer — see [Updating](#updating).
 
 ## Run from a checkout
