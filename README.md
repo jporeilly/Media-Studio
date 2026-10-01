@@ -8,6 +8,9 @@ Kokoro narration, faster-whisper transcription, moviepy/ffmpeg assembly, Ollama-
 notes/QA/translation — behind a modern SPA that shares the **OpenSight** design system so
 the whole app suite looks and feels the same.
 
+<img width="1442" height="952" alt="image" src="https://github.com/user-attachments/assets/8b5fcf82-c1a5-450e-bbc1-7f6968bde720" />
+
+
 ## What it does
 
 - **A deck or a PDF becomes a narrated video.** Import a PowerPoint deck or a PDF, write
@@ -32,6 +35,9 @@ the whole app suite looks and feels the same.
 - **For a team.** Accounts with two roles, a password policy, projects that belong to
   whoever imported them, an audit log of every change, and updates pulled from Git from
   inside the app.
+
+  <img width="1442" height="1440" alt="image" src="https://github.com/user-attachments/assets/ce88eb4c-d823-4238-8536-b1f61b0cd57a" />
+
 
 The app's **Docs** page has a guide for each of these. What changed in each release, and
 when, is in [CHANGELOG.md](CHANGELOG.md).
