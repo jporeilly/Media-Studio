@@ -1,6 +1,6 @@
 {
   "name": "media-studio-desktop",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "description": "Windows desktop shell for Media Studio Enterprise",
   "scripts": {
