@@ -77,6 +77,11 @@ interface Props {
   jobActive: boolean;
   /** Whether this viewer may cancel `job`: its starter or an administrator (lib/jobs.ts mayCancelJob); anyone else sees it read-only. */
   mayCancel: boolean;
+  /** The page's one cancel request (lib/useFollowedJob.ts), shared with the Generate and Re-voice cards: asks the followed job to stop. */
+  onCancelJob: () => void;
+  cancelPending: boolean;
+  /** A refused or failed cancel; shown here only while the job is one of this card's (an AI job). */
+  cancelError?: unknown;
   /** The line the page keeps for this card once its job is over (a job lost in a restart), with its dismiss. */
   jobNotice?: string | null;
   onDismissJobNotice?: () => void;
@@ -115,8 +120,8 @@ function firstError(mutations: UseMutationResult<any, unknown, any, unknown>[]):
  * issues under the notes with a Fix per criterion.
  */
 export function SlidesCard({
-  projectId, projectName, projectKind, provider, job, jobActive, mayCancel, jobNotice, onDismissJobNotice, onJobStarted,
-  onVoiceSuggested, qaDoc,
+  projectId, projectName, projectKind, provider, job, jobActive, mayCancel, onCancelJob, cancelPending, cancelError,
+  jobNotice, onDismissJobNotice, onJobStarted, onVoiceSuggested, qaDoc,
 }: Props) {
   const qc = useQueryClient();
   const query = useSlides(projectId);
@@ -359,15 +364,9 @@ export function SlidesCard({
       qc.setQueryData<SlidesPayload>(slidesQueryKey(projectId), (old) => (old ? { ...old, qa_review: markFixed(old.qa_review, index, criterion) } : old));
     },
   });
-  const cancel = useMutation({
-    mutationFn: (jobId: string) => api.post<Job>(`/api/jobs/${jobId}/cancel`, {}),
-  });
-  // A Cancel that failed says so under its own job, not under the next one.
-  const resetCancel = cancel.reset;
-  const currentJobId = job?.id;
-  useEffect(() => {
-    resetCancel();
-  }, [currentJobId, resetCancel]);
+  // A Cancel that failed says so under its own job (the page's hook clears it when it follows another), and
+  // only when that job is this card's: the Generate and Re-voice cards show it under theirs.
+  const cancelErrorText = cancelError && job && isAiJob(job.kind) ? errorMessage(cancelError) : null;
 
   const revert = (index: number) => {
     const original = aiOriginal[index];
@@ -407,8 +406,8 @@ export function SlidesCard({
   // result, so they wait for Save all (or a discard) - a review and the read-only actions do not.
   const draftsBlock = dirtyCount > 0;
   const draftsTitle = `Save all or discard the ${dirtyCount} unsaved ${dirtyCount === 1 ? "draft" : "drafts"} first: this rewrites the saved notes.`;
-  const problem = pauseError ?? renderError ?? aiError ?? firstError([
-    saveNotes, saveAll, undo, reset, saveOverride, render, startAi, pacingRules, analyze, enhanceOne, qaFix, cancel,
+  const problem = pauseError ?? renderError ?? aiError ?? cancelErrorText ?? firstError([
+    saveNotes, saveAll, undo, reset, saveOverride, render, startAi, pacingRules, analyze, enhanceOne, qaFix,
   ]);
   const notice = payload ? imagesNotice(payload.images_source, payload.slides_ready) : null;
   const version = payload?.images_rendered_at;
@@ -478,7 +477,7 @@ export function SlidesCard({
           {/* Read-only for a viewer who did not start the job (the page follows the project's job whoever
               started it); the cancel route's rule, lib/jobs.ts mayCancelJob. */}
           {canCancel(job.kind) && mayCancel && (
-            <CancelJobButton job={job} pending={cancel.isPending} title={cancelTitle(job.kind)} onCancel={() => cancel.mutate(job.id)} />
+            <CancelJobButton job={job} pending={cancelPending} title={cancelTitle(job.kind)} onCancel={onCancelJob} />
           )}
         </div>
       )}

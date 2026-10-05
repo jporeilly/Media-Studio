@@ -99,9 +99,16 @@ describe("banner", () => {
     expect(canCancel("ai-enhance")).toBe(true);
     expect(canCancel("ai-qa")).toBe(true);
     expect(canCancel("ai-qa-doc")).toBe(false);
-    expect(canCancel("generate")).toBe(false);
+    // A render and its preview are one kind, cancellable at every stage (T2).
+    expect(canCancel("generate")).toBe(true);
+    expect(canCancel("render-slides")).toBe(false);
+    expect(canCancel("transcribe")).toBe(false);
     expect(cancelTitle("ai-qa")).toContain("between review passes");
     expect(cancelTitle("ai-tone")).toContain("after the slide");
+    // The title says what a cancel leaves, before and after the video is written, for the render and the preview.
+    expect(cancelTitle("generate")).toContain("the render or the preview");
+    expect(cancelTitle("generate")).toContain("the previous video (or preview) stays as it was");
+    expect(cancelTitle("generate")).toContain("kept, with the sidecars that were finished");
   });
 });
 

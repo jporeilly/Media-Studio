@@ -134,13 +134,24 @@ export function isAiJob(kind: string | null | undefined): boolean {
 /** The AI jobs that rewrite the notes: when one ends, the editor's drafts are stale and are dropped. */
 export const REWRITE_KINDS = new Set(["ai-notes", "ai-enhance", "ai-tone", "ai-translate", "ai-pacing"]);
 
-/** Whether Cancel does anything for a job kind: the per-slide loops and the QA review poll the flag, the Q&A document (one prompt) does not. */
+/** The Generate card's job: a deck or PDF's full render and its 15-second preview alike (services/processing.py). */
+export const GENERATE_JOB_KIND = "generate";
+
+/**
+ * Whether Cancel does anything for a job kind: the per-slide loops and the QA review poll the flag, and so
+ * does a render (the full video and the preview) at every stage; the Q&A document (one prompt) does not.
+ */
 export function canCancel(kind: string | null | undefined): boolean {
-  return isAiJob(kind) && kind !== "ai-qa-doc";
+  return kind === GENERATE_JOB_KIND || (isAiJob(kind) && kind !== "ai-qa-doc");
 }
+
+/** What the Generate card's Cancel does (api/routers/projects.py `generate`): the render and the preview alike. */
+export const RENDER_CANCEL_TITLE =
+  "Stops the render or the preview: while the slides are exported or narrated, or the video is encoded, nothing is written and the previous video (or preview) stays as it was; once the new video is written - during the subtitles or the extra formats - it is kept, with the sidecars that were finished.";
 
 /** What Cancel does, per kind. */
 export function cancelTitle(kind: string | null | undefined): string {
+  if (kind === GENERATE_JOB_KIND) return RENDER_CANCEL_TITLE;
   if (kind === "ai-qa") return "Stops between review passes; nothing is saved until every pass is done.";
   return "Stops after the slide the model is working on; what is written so far is kept.";
 }

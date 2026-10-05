@@ -5,6 +5,24 @@ Handles the full generate and rebuild workflows:
 
 Separated from the UI so the logic is independently testable and
 keeps web_app.py focused on presentation.
+
+**A cancel** (``VideoProcessor(cancel_check=...)``, the generate job's
+``services.jobs.cancel_check_here()``) is looked at before and after the slide
+export (PowerPoint is not interrupted mid-export), before every slide the
+narration synthesises - on the pool worker that would synthesise it, which is
+why the check is a callable bound to the job rather than a question about the
+calling thread - and before each retry of a failed one, while ffmpeg encodes
+(``core.video_creator.create_video``: killed within a poll, the ``.part.mp4``
+removed, the previous video untouched), before the subtitles, and before and
+during each extra format (each one ffmpeg run, killed the same way, its part
+file removed). ``cancelled`` and ``cancel_stage`` then say that the run
+stopped and where (``RENDER_STAGES``); a run that returned nothing for any
+other reason is a failure, and the two are never confused. What a cancel
+leaves: before the video is written (the export, the narration, the encode)
+nothing the project record names is touched, and the slide images and the
+narration clips already made are kept for the next render; after it (the
+subtitles, the formats) the new video stands with the sidecars that were
+finished, and ``cancelled_render_line`` says so in the user's terms.
 """
 
 import re
@@ -38,6 +56,129 @@ ProgressCallback = Callable[[float, str], None]
 # The subtitle modes a render accepts: one cue per slide from the notes, a
 # word-level Whisper pass over the rendered MP4, or nothing.
 SUBTITLE_MODES = ("none", "slide", "whisper")
+
+# Where a cancelled render stopped (``VideoProcessor.cancel_stage``), in the
+# order the stages run: the stage the cancel kept the job from starting or
+# finishing. The first three come before the video is written, the last two
+# after it (``RENDER_STAGES_AFTER_VIDEO``).
+RENDER_STAGE_EXPORT = "export"
+RENDER_STAGE_NARRATION = "narration"
+RENDER_STAGE_ENCODE = "encode"
+RENDER_STAGE_SUBTITLES = "subtitles"
+RENDER_STAGE_FORMATS = "formats"
+RENDER_STAGES = (RENDER_STAGE_EXPORT, RENDER_STAGE_NARRATION, RENDER_STAGE_ENCODE,
+                 RENDER_STAGE_SUBTITLES, RENDER_STAGE_FORMATS)
+RENDER_STAGES_AFTER_VIDEO = (RENDER_STAGE_SUBTITLES, RENDER_STAGE_FORMATS)
+
+# How often the narration's back-off before a retry looks at the cancel.
+RETRY_POLL_SECONDS = 0.25
+
+# A cancelled render's closing line, which the Generate card shows once the
+# job is over: what the cancel left behind, in the user's terms.
+RENDER_CANCELLED_BEFORE_VIDEO = "Render cancelled before the video was written; the project is as it was."
+PREVIEW_CANCELLED = "Preview cancelled before it was written; the previous preview is as it was."
+RENDER_CANCELLED_AFTER_VIDEO = (
+    "Render cancelled once the video was written: the new video is kept{kept}; {missing} not written. "
+    "Render again for the full set."
+)
+# The sidecar kinds in the user's words, in the order the line names them.
+# The two subtitle files are one thing to the user.
+SIDECAR_NAMES = (("srt", "subtitles"), ("vtt", "subtitles"), ("webm", "WebM"), ("gif", "GIF"), ("mp3", "MP3"))
+
+
+def _sidecar_words(kinds) -> list:
+    """The user's names of ``kinds``, in the order the line names them, each once."""
+    words = []
+    for kind, name in SIDECAR_NAMES:
+        if kind in kinds and name not in words:
+            words.append(name)
+    return words
+
+
+def _listed(words: list) -> str:
+    """"the subtitles", "the WebM and the GIF", "the WebM, the GIF and the MP3"."""
+    named = [f"the {word}" for word in words]
+    if len(named) <= 1:
+        return "".join(named)
+    return ", ".join(named[:-1]) + " and " + named[-1]
+
+
+def cancelled_render_line(stage: str, preview: bool, produced, wanted) -> str:
+    """The closing line of a render cancelled at ``stage``: before the video
+    was written (the first three stages) the project is as it was; after it,
+    the new video is kept with the sidecars that were finished (``produced``,
+    the kinds the run recorded) and the rest of what was asked for
+    (``wanted``) was not written. A preview has no sidecars, so it only ever
+    stops before it is written."""
+    if stage not in RENDER_STAGES_AFTER_VIDEO:
+        return PREVIEW_CANCELLED if preview else RENDER_CANCELLED_BEFORE_VIDEO
+    kept = _sidecar_words(set(produced))
+    missing = [word for word in _sidecar_words(set(wanted)) if word not in kept]
+    if not missing:
+        # Unreachable by construction (a cancel is only recorded when something
+        # asked for is missing) but never a lie if it is reached.
+        return "Render cancelled once the video was written: the new video is kept with everything asked for."
+    return RENDER_CANCELLED_AFTER_VIDEO.format(
+        kept=f", with its {' and '.join(kept)}" if kept else "",
+        missing=f"{_listed(missing)} {'was' if len(missing) == 1 else 'were'}",
+    )
+
+
+# The subtitle pair is one thing to the user (one Mode on the card) though the
+# record names its two files as two kinds: when a render asks for subtitles
+# in any mode, the previous render's subtitle files of BOTH kinds are judged.
+SIDECAR_GROUPS = {"srt": ("srt", "vtt"), "vtt": ("srt", "vtt")}
+
+
+def stale_sidecars(previous: dict, produced: dict, wanted) -> list:
+    """The previous render's files that must not sit beside a new video: for
+    every kind this render asked for (``wanted``, the subtitle pair as one),
+    the file the previous record named under that kind unless the new record
+    (``produced``, its ``outputs``) names that same file under any kind - so
+    a kind not produced (cancelled or failed) and a kind produced under
+    another name (a per-slide ``deck.srt`` after a Whisper render's
+    ``deck.whisper.srt`` and ``.vtt``, or the other way round) both go. Each
+    name once, in ``wanted``'s order. Kinds not asked for are not touched.
+    Either way the record no longer names the file, and a stale sidecar
+    beside the new video is a lie waiting to be served."""
+    named = set(produced.values())
+    kinds: list = []
+    for kind in wanted:
+        for member in SIDECAR_GROUPS.get(kind, (kind,)):
+            if member not in kinds:
+                kinds.append(member)
+    names: list = []
+    for kind in kinds:
+        name = previous.get(kind)
+        if not name or name in named or name in names:
+            continue
+        names.append(name)
+    return names
+
+
+def remove_stale_sidecars(output_dir: Path, previous: dict, produced: dict, wanted) -> list:
+    """Delete :func:`stale_sidecars` from ``output_dir`` and return the names
+    removed. A name the record carries is only as trustworthy as the record,
+    so a path that resolves outside the project directory is refused, and a
+    file that cannot be removed is logged and left (the record no longer
+    names it either way)."""
+    base = Path(output_dir).resolve()
+    removed: list = []
+    for name in stale_sidecars(previous, produced, wanted):
+        path = (base / name).resolve()
+        if base not in path.parents:
+            logger.warning("Refusing to remove '%s': it is not inside the project directory", name)
+            continue
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+        except OSError as e:
+            logger.warning("Could not remove the previous render's %s: %s", name, e)
+            continue
+        removed.append(name)
+        logger.info("Removed the previous render's %s: asked for by this render and not produced", name)
+    return removed
 
 
 def _pinned(value, fallback):
@@ -497,6 +638,7 @@ class VideoProcessor:
         export_webm: bool = False,
         export_gif: bool = False,
         export_audio_only: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         self.voice_id = voice_id
         self.resolution = resolution
@@ -560,7 +702,33 @@ class VideoProcessor:
         # and reports it (``services.revoice``), the way the AI loops report
         # their own tally.
         self.failed_sentences = 0
+        # The cancel. ``cancel_check`` is the job's question (the generate
+        # job hands ``services.jobs.cancel_check_here()``, bound to the job
+        # in the job's own thread, so the narration's pool workers ask after
+        # the same job); ``cancel_requested`` is the latched answer, which a
+        # caller without a job may also raise by hand. ``_cancel_asked`` is
+        # the one place both are read. ``cancelled`` says whether the LAST
+        # run of this processor stopped on a cancel, and ``cancel_stage``
+        # where (``RENDER_STAGES``): a run that returned nothing for any
+        # other reason is a failure, and the two are never confused.
+        self.cancel_check = cancel_check
         self.cancel_requested = False
+        self.cancelled = False
+        self.cancel_stage: Optional[str] = None
+
+    def _cancel_asked(self) -> bool:
+        """Whether a cancel was asked for: the latched flag, else the job's
+        question, whose True is latched so every later check is cheap and
+        the answer never goes back. Safe from any thread."""
+        if not self.cancel_requested and self.cancel_check is not None and self.cancel_check():
+            self.cancel_requested = True
+        return self.cancel_requested
+
+    def _stopped(self, stage: str) -> None:
+        """Record that this run stopped on its cancel at ``stage``."""
+        self.cancelled = True
+        self.cancel_stage = stage
+        logger.info("Render cancelled at the %s stage", stage)
 
     def _create_tts_generator(self):
         """Create this run's TTS generator via the provider factory."""
@@ -588,6 +756,7 @@ class VideoProcessor:
         total = len(files)
         successes = 0
         self.outputs = {}
+        self.cancelled, self.cancel_stage = False, None
 
         # Count total slides across all files for step-level ETA
         total_slides = sum(f.slide_count for f in files)
@@ -595,7 +764,10 @@ class VideoProcessor:
         audio_start = None  # set lazily on first audio generation
 
         for idx, file_item in enumerate(files):
-            if self.cancel_requested:
+            # Asked while the job queued, or between files: nothing of this
+            # file is touched, and the slide export never starts.
+            if self._cancel_asked():
+                self._stopped(RENDER_STAGE_EXPORT)
                 break
 
             label = f"[{idx + 1}/{total}] {file_item.path.name}"
@@ -630,6 +802,12 @@ class VideoProcessor:
                     if progress:
                         progress(0, f"Error exporting slides: {e}")
                     continue
+                # PowerPoint is not interrupted mid-export: a cancel that
+                # arrived during it is honoured once the images are there
+                # (they are kept, so the next render needs no export).
+                if self._cancel_asked():
+                    self._stopped(RENDER_STAGE_EXPORT)
+                    break
 
             # --- Generate audio (parallel) ---
             if progress:
@@ -681,15 +859,28 @@ class VideoProcessor:
                     events.emit(events.AUDIO_GENERATED, file=file_item.path.name)
                 except Exception:
                     pass
-                pm.update_generation_settings(
-                    speed=self.speed, voice_id=self.voice_id,
-                    stability=self.stability, similarity_boost=self.similarity_boost,
-                    style=self.style,
-                )
+                # The settings are recorded only when the narration stage
+                # COMPLETED. A clip records its voice but not its speed, and
+                # the next render tells a speed change only by this stamp: a
+                # cancelled run that stamped it would hide the slides it
+                # never reached, and the next render would mux their clips
+                # at the old speed. The flag is latched, so it is True here
+                # exactly when a slide was skipped.
+                if not self._cancel_asked():
+                    pm.update_generation_settings(
+                        speed=self.speed, voice_id=self.voice_id,
+                        stability=self.stability, similarity_boost=self.similarity_boost,
+                        style=self.style,
+                    )
 
             slides_done += file_item.slide_count
 
-            if self.cancel_requested:
+            # The narration stops between slides (``_generate_audio_parallel``
+            # asks before each one, on the worker that would synthesise it):
+            # the clips already made are kept for the next render, and
+            # nothing the project record names was touched.
+            if self._cancel_asked():
+                self._stopped(RENDER_STAGE_NARRATION)
                 break
 
             # Brief pause to let Windows release file locks on newly-written audio
@@ -716,6 +907,9 @@ class VideoProcessor:
 
             if ok:
                 if not is_preview:
+                    # The sidecars honour the cancel too (``cancelled`` and
+                    # ``cancel_stage`` then say so); the video is on disk
+                    # either way and is counted, so the caller records it.
                     self.outputs = self._sidecar_outputs(pm, output_path, progress, label, idx, total)
                 pm.set_output_video(output_path)
                 successes += 1
@@ -726,6 +920,12 @@ class VideoProcessor:
                     pass
                 if progress:
                     progress((idx + 1) / total, f"{label}: Complete -> {output_path.name}")
+                if self.cancelled:
+                    break
+            elif self.cancelled:
+                # The encode stopped on the cancel (``_build_video``): ffmpeg
+                # killed, the part file gone, the previous video untouched.
+                break
             else:
                 if progress:
                     progress((idx + 1) / total, f"{label}: Failed to create video")
@@ -753,9 +953,11 @@ class VideoProcessor:
         total_slides = sum(f.slide_count for f in files)
         slides_done = 0
         audio_start = None
+        self.cancelled, self.cancel_stage = False, None
 
         for idx, file_item in enumerate(files):
-            if self.cancel_requested:
+            if self._cancel_asked():
+                self._stopped(RENDER_STAGE_EXPORT)
                 break
 
             label = f"[{idx + 1}/{total}] {file_item.path.name}"
@@ -812,11 +1014,13 @@ class VideoProcessor:
                     slides_done_ref=[slides_done],
                     total_slides=total_slides,
                 )
-                pm.update_generation_settings(
-                    speed=self.speed, voice_id=self.voice_id,
-                    stability=self.stability, similarity_boost=self.similarity_boost,
-                    style=self.style,
-                )
+                # Stamped only when the stage completed, as in ``process_files``.
+                if not self._cancel_asked():
+                    pm.update_generation_settings(
+                        speed=self.speed, voice_id=self.voice_id,
+                        stability=self.stability, similarity_boost=self.similarity_boost,
+                        style=self.style,
+                    )
 
             slides_done += file_item.slide_count
             file_item.project_manager = pm
@@ -841,9 +1045,11 @@ class VideoProcessor:
         _ensure_temp_dir()
         total = len(files)
         successes = 0
+        self.cancelled, self.cancel_stage = False, None
 
         for idx, file_item in enumerate(files):
-            if self.cancel_requested:
+            if self._cancel_asked():
+                self._stopped(RENDER_STAGE_EXPORT)
                 break
 
             pm = file_item.project_manager
@@ -902,8 +1108,21 @@ class VideoProcessor:
         export formats. Returns ``{kind: filename}`` for every file produced;
         a failure in any of them is logged and leaves that kind out, the video
         itself is already done. Not run for previews.
+
+        The cancel is asked before the subtitles (the Whisper pass is one
+        model call and is not interrupted; the per-slide SRT is instant) and
+        before and during each extra format (``generate_extra_formats``). A
+        cancel seen then marks the run ``cancelled`` at that stage with what
+        was finished returned - the video stands - and a cancel that arrives
+        once everything asked for is written is too late: the run completes.
         """
         outputs: dict = {}
+        wants_subtitles = self.subtitles != "none"
+        wanted_formats = [kind for kind, wanted in (("webm", self.export_webm), ("gif", self.export_gif),
+                                                    ("mp3", self.export_audio_only)) if wanted]
+        if wants_subtitles and self._cancel_asked():
+            self._stopped(RENDER_STAGE_SUBTITLES)
+            return outputs
         if self.subtitles == "slide":
             try:
                 srt = _generate_srt(
@@ -922,9 +1141,22 @@ class VideoProcessor:
                     progress((file_idx + 0.99) / total_files, f"{file_label}: Whisper subtitles - {message}")
 
             outputs.update(_whisper_subtitles(output_path, self.whisper_model, on_progress=_on_progress))
+        if not wanted_formats:
+            return outputs
+        if self._cancel_asked():
+            self._stopped(RENDER_STAGE_FORMATS)
+            return outputs
+
+        def _on_format(message: str):
+            if progress:
+                progress((file_idx + 0.995) / total_files, f"{file_label}: {message}")
+
         outputs.update(generate_extra_formats(
             output_path, webm=self.export_webm, gif=self.export_gif, audio_only=self.export_audio_only,
+            cancel_check=self._cancel_asked, progress=_on_format,
         ))
+        if self._cancel_asked() and any(kind not in outputs for kind in wanted_formats):
+            self._stopped(RENDER_STAGE_FORMATS)
         return outputs
 
     def _get_or_create_project(self, file_item: FileItem) -> ProjectManager:
@@ -997,7 +1229,14 @@ class VideoProcessor:
             audio_path = pm.audio_dir / f"slide_{slide_idx + 1:03d}_audio.mp3"
             result = None
             for attempt in range(3):
-                if self.cancel_requested:
+                # Asked HERE, on the pool worker, before the sentence is
+                # synthesised and before each retry: this is the check that
+                # keeps a cancelled render from starting another slide (the
+                # loop below only sees a cancel when a slide completes, and
+                # the worker has dequeued the next one by then). The check
+                # is the job's callable, bound to the job in its own thread,
+                # so it answers the same on this thread.
+                if self._cancel_asked():
                     return slide_idx, None
                 result = audio_gen.generate_audio(
                     text=text,
@@ -1011,8 +1250,13 @@ class VideoProcessor:
                 )
                 if result:
                     break
-                if attempt < 2 and not self.cancel_requested:
-                    time.sleep(2 ** attempt * 3)  # 3s, 6s
+                if attempt < 2:
+                    # The back-off before a retry (3 s, then 6 s), in short
+                    # waits that look at the cancel, so a cancel does not
+                    # sit out the wait.
+                    deadline = time.monotonic() + 2 ** attempt * 3
+                    while time.monotonic() < deadline and not self._cancel_asked():
+                        time.sleep(min(RETRY_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
             return slide_idx, result
 
         max_workers = min(2, total_to_gen)
@@ -1023,7 +1267,10 @@ class VideoProcessor:
             }
 
             for future in as_completed(futures):
-                if self.cancel_requested:
+                if self._cancel_asked():
+                    # The slides not started yet are dropped; one in flight is
+                    # not interrupted (the worker returns when its service
+                    # does) and its clip is kept for the next render.
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
@@ -1616,13 +1863,20 @@ class VideoProcessor:
                     title = first_line
                 slide_titles.append(title)
 
-            return creator.create_video(
+            ok = creator.create_video(
                 slide_clips=clip_infos, output_path=output_path,
                 progress_callback=_on_assembly_progress,
                 encoding_callback=_on_encode_progress,
-                cancel_check=lambda: self.cancel_requested,
+                cancel_check=self._cancel_asked,
                 slide_titles=slide_titles,
             )
+            # The creator says whether it stopped on the cancel (ffmpeg
+            # killed, the part file gone, ``output_path`` untouched) rather
+            # than on a failure: only its own word marks the run cancelled,
+            # so a failure under a pending cancel is still reported as one.
+            if not ok and getattr(creator, "cancelled", False):
+                self._stopped(RENDER_STAGE_ENCODE)
+            return ok
         finally:
             if tmp_dir.exists():
                 try:
@@ -1736,66 +1990,98 @@ def _srt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def generate_extra_formats(video_path: Path, *, webm: bool = False, gif: bool = False, audio_only: bool = False) -> dict:
+def extra_format_part(final: Path) -> Path:
+    """Where an extra format is written while ffmpeg runs: ``<stem>.part<ext>``
+    beside its final name (``deck.part.webm``), so the extension still picks
+    the muxer and a half-written file never sits under the name the record
+    would serve."""
+    return final.with_name(f"{final.stem}.part{final.suffix}")
+
+
+def generate_extra_formats(
+    video_path: Path, *, webm: bool = False, gif: bool = False, audio_only: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None, progress: Optional[Callable[[str], None]] = None,
+) -> dict:
     """Generate additional export formats (WebM, GIF, audio MP3) from the MP4.
 
-    The flags are this job's own (never the shared config). Uses ffmpeg
-    directly. Returns ``{"webm"|"gif"|"mp3": filename}`` for every file
-    produced; a format that fails is logged and left out.
+    The flags are this job's own (never the shared config). Each format is
+    one ffmpeg run (WebM: VP9 and Opus; GIF: the first 30 s at 5 frames a
+    second, 480 wide; MP3: the audio alone), written to its part file
+    (``extra_format_part``) and published over the final name only when it
+    is whole, and polled for ``cancel_check`` every half second while it
+    runs - the loop the deck render and the music mix share,
+    ``core.video_creator._run_until_done``: a cancel KILLS ffmpeg, removes the
+    part file and ends the run with what was produced so far (a WebM of a
+    long video takes minutes, and a cancel must not wait for it). A format
+    that fails, or runs past its time, is logged with ffmpeg's last words,
+    its part file removed, and the rest still made. The previous render's
+    file of a kind that was asked for and not produced - cancelled or failed
+    - is removed by the generate route once the new record is saved
+    (:func:`remove_stale_sidecars`), so no stale sidecar sits beside the new
+    video. ``progress(message)`` is told each format as it starts. Returns
+    ``{"webm"|"gif"|"mp3": filename}`` for every file produced.
     """
+    from core.video_creator import _run_until_done
     from utils.config import FFMPEG_PATH
+    from utils.helpers import replace_with_retry
+
     outputs: dict = {}
     if not FFMPEG_PATH or not video_path.exists():
         return outputs
 
-    import subprocess as sp
+    def _cancelled() -> bool:
+        return bool(cancel_check and cancel_check())
 
-    flags = 0x08000000  # CREATE_NO_WINDOW on Windows
-
-    # WebM
+    # kind, the user's name, the final file, ffmpeg's output options, the timeout
+    runs = []
     if webm:
-        webm_path = video_path.with_suffix(".webm")
-        try:
-            sp.run(
-                [FFMPEG_PATH, "-i", str(video_path), "-c:v", "libvpx-vp9",
-                 "-crf", "30", "-b:v", "0", "-c:a", "libopus", "-y", str(webm_path)],
-                capture_output=True, timeout=600, creationflags=flags,
-            )
-            if webm_path.exists():
-                outputs["webm"] = webm_path.name
-                logger.info("WebM: %s", webm_path)
-        except Exception as e:
-            logger.error("WebM failed: %s", e)
-
-    # GIF (first 30 seconds, scaled down)
+        runs.append(("webm", "WebM", video_path.with_suffix(".webm"),
+                     ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-c:a", "libopus"], 600))
     if gif:
-        gif_path = video_path.with_suffix(".gif")
-        try:
-            sp.run(
-                [FFMPEG_PATH, "-i", str(video_path), "-t", "30",
-                 "-vf", "fps=5,scale=480:-1:flags=lanczos",
-                 "-y", str(gif_path)],
-                capture_output=True, timeout=300, creationflags=flags,
-            )
-            if gif_path.exists():
-                outputs["gif"] = gif_path.name
-                logger.info("GIF: %s", gif_path)
-        except Exception as e:
-            logger.error("GIF failed: %s", e)
-
-    # Audio-only MP3
+        runs.append(("gif", "GIF", video_path.with_suffix(".gif"),
+                     ["-t", "30", "-vf", "fps=5,scale=480:-1:flags=lanczos"], 300))
     if audio_only:
-        mp3_path = video_path.with_stem(video_path.stem + "_audio").with_suffix(".mp3")
-        try:
-            sp.run(
-                [FFMPEG_PATH, "-i", str(video_path), "-vn",
-                 "-acodec", "libmp3lame", "-q:a", "2", "-y", str(mp3_path)],
-                capture_output=True, timeout=300, creationflags=flags,
-            )
-            if mp3_path.exists():
-                outputs["mp3"] = mp3_path.name
-                logger.info("Audio MP3: %s", mp3_path)
-        except Exception as e:
-            logger.error("Audio MP3 failed: %s", e)
+        runs.append(("mp3", "MP3", video_path.with_stem(video_path.stem + "_audio").with_suffix(".mp3"),
+                     ["-vn", "-acodec", "libmp3lame", "-q:a", "2"], 300))
+    if not runs:
+        return outputs
 
+    scratch = _job_scratch("formats_")
+    try:
+        for kind, label, final, options, timeout in runs:
+            if _cancelled():
+                logger.info("Extra formats cancelled before the %s", label)
+                break
+            if progress:
+                progress(f"Writing {label}...")
+            part = extra_format_part(final)
+            part.unlink(missing_ok=True)
+            cmd = [FFMPEG_PATH, "-hide_banner", "-nostats", "-loglevel", "error", "-y",
+                   "-i", str(video_path), *options, str(part)]
+            log = scratch / f"{kind}.log"
+            try:
+                outcome, proc = _run_until_done(cmd, log, timeout, _cancelled)
+            except Exception as e:  # noqa: BLE001 - one format's failure never stops the rest
+                logger.error("%s failed: %s", label, e)
+                part.unlink(missing_ok=True)
+                continue
+            if outcome == "cancelled":
+                part.unlink(missing_ok=True)
+                logger.info("%s cancelled; ffmpeg stopped and the part file removed", label)
+                break
+            if outcome == "timeout" or proc.returncode != 0 or not part.is_file():
+                tail = log.read_text(encoding="utf-8", errors="replace")[-800:] if log.is_file() else ""
+                logger.error("%s failed (%s, exit %s): %s", label, outcome, proc.returncode, tail)
+                part.unlink(missing_ok=True)
+                continue
+            try:
+                replace_with_retry(part, final)
+            except OSError as e:
+                logger.error("%s could not be published: %s", label, e)
+                part.unlink(missing_ok=True)
+                continue
+            outputs[kind] = final.name
+            logger.info("%s: %s", label, final)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     return outputs

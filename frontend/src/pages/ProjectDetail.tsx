@@ -8,6 +8,7 @@ import { SlidesCard } from "../components/project/SlidesCard";
 import { TranscriptCard } from "../components/project/TranscriptCard";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import { GENERATE_JOB_KIND, canCancel, cancelTitle } from "../lib/ai";
 import { renderSummary } from "../lib/edit";
 import { duration, relativeTime } from "../lib/format";
 import { REVOICE_CANCEL_TITLE, noticeCard, type JobCard } from "../lib/jobs";
@@ -235,8 +236,10 @@ export default function ProjectDetailPage() {
   // owns the progress bar / error (a render-slides job belongs to the Slides
   // card, a transcribe or re-voice to the video cards), so the other cards stay put.
   const jobErrText = jobStatus === "error" ? jobData?.error || jobData?.message : null;
-  // A job the viewer did not start is shown read-only: Cancel is for its starter or an administrator.
+  // A job the viewer did not start is shown read-only: Cancel is for its starter or an administrator. The
+  // page's ONE cancel request (the hook's) serves every card; each shows its error only under its own job.
   const mayCancel = followedJob.mayCancel;
+  const cancelErrorText = followedJob.cancelError ? errorMessage(followedJob.cancelError) : null;
   // The line the page keeps once it let go of a job, on the card that ran it (lib/jobs.ts noticeCard).
   const noticeOn = noticeCard(followedJob.notice, p.kind);
   const noticeFor = (card: JobCard) => (noticeOn === card ? followedJob.notice?.text ?? null : null);
@@ -348,6 +351,9 @@ export default function ProjectDetailPage() {
           job={jobData}
           jobActive={jobActive}
           mayCancel={mayCancel}
+          onCancelJob={followedJob.cancel}
+          cancelPending={followedJob.cancelPending}
+          cancelError={followedJob.cancelError}
           jobNotice={noticeFor("slides")}
           onDismissJobNotice={dismissNotice}
           onJobStarted={follow}
@@ -363,7 +369,22 @@ export default function ProjectDetailPage() {
           {!running && voicesError && <ErrorBox message={voicesError} />}
 
           {running ? (
-            <JobProgress job={jobData} />
+            <div style={{ display: "grid", gap: 10 }}>
+              <JobProgress job={jobData} />
+              {/* The render (or the preview) stops at its next check - around the slide export, between the
+                  slides it narrates, while ffmpeg encodes, before the subtitles and during the extra formats
+                  (services/processing.py); its closing line then stays on this card as the notice above. The
+                  same look and rule as the Slides and Re-voice cards' Cancel: the starter or an administrator. */}
+              {jobData && activeKind === GENERATE_JOB_KIND && canCancel(jobData.kind) && mayCancel && (
+                <CancelJobButton
+                  job={jobData}
+                  pending={followedJob.cancelPending}
+                  title={cancelTitle(jobData.kind)}
+                  onCancel={followedJob.cancel}
+                />
+              )}
+              {activeKind === GENERATE_JOB_KIND && cancelErrorText && <ErrorBox message={cancelErrorText} />}
+            </div>
           ) : (
             <div style={{ display: "grid", gap: 16 }}>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
@@ -610,7 +631,7 @@ export default function ProjectDetailPage() {
                   onCancel={followedJob.cancel}
                 />
               )}
-              {!!followedJob.cancelError && <ErrorBox message={errorMessage(followedJob.cancelError)} />}
+              {activeKind === "revoice" && cancelErrorText && <ErrorBox message={cancelErrorText} />}
             </div>
           ) : (
             <div style={{ display: "grid", gap: 16 }}>

@@ -60,7 +60,11 @@ def _capture_creator(monkeypatch):
 
 
 def _fake_ffmpeg(monkeypatch, path="ffmpeg-test", fail_when=None):
-    """Capture ffmpeg commands; the output file (the last argument) is created."""
+    """Capture ffmpeg commands; the output file (the last argument) is created.
+    Both seams: ``subprocess.run`` (the audio extraction) and the polled loop
+    the extra formats share with the deck render and the music mix
+    (``video_creator._run_until_done``, T2), which answers as a run that
+    finished with exit 0."""
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -70,7 +74,11 @@ def _fake_ffmpeg(monkeypatch, path="ffmpeg-test", fail_when=None):
         Path(cmd[-1]).write_bytes(b"x")
         return types.SimpleNamespace(returncode=0, stderr=b"")
 
+    def fake_run_until_done(cmd, log, timeout, cancelled, **kwargs):
+        return "finished", fake_run(cmd)
+
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(video_creator, "_run_until_done", fake_run_until_done)
     monkeypatch.setattr(config_module, "FFMPEG_PATH", path)
     return calls
 
@@ -472,8 +480,10 @@ def test_extra_formats_run_only_the_requested_ones(tmp_path, monkeypatch):
     out = processing.generate_extra_formats(video, webm=True, audio_only=True)
     assert out == {"webm": "deck.webm", "mp3": "deck_audio.mp3"}
     assert [c[0] for c in calls] == ["ffmpeg-test", "ffmpeg-test"]
-    assert "libvpx-vp9" in calls[0] and calls[0][-1].endswith("deck.webm")
-    assert "-vn" in calls[1] and calls[1][-1].endswith("deck_audio.mp3")
+    # Written to the part file and published over the final name (T2).
+    assert "libvpx-vp9" in calls[0] and calls[0][-1].endswith("deck.part.webm")
+    assert "-vn" in calls[1] and calls[1][-1].endswith("deck_audio.part.mp3")
+    assert (tmp_path / "deck.webm").exists() and not (tmp_path / "deck.part.webm").exists()
     assert not (tmp_path / "deck.gif").exists()
 
     out = processing.generate_extra_formats(video, gif=True)

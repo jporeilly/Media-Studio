@@ -19,11 +19,24 @@ work loops over slides (the ``ai-*`` kinds, ``services.ai_slides``) checks
 ``cancel_requested_here()`` between slides, stops, and finishes as ``done`` with
 ``result["cancelled"] = True`` and what it had written so far kept; a re-voice
 (``services.revoice``) checks it between its stages and between the sentences
-it synthesises, and finishes the same way; a job that never looks at the flag
-simply runs to its end. A cancelled job's closing message is the line it
-reported at 1.0, when it reported one (the re-voice says what it left on
+it synthesises, and finishes the same way; a render (the ``generate`` job,
+``api.routers.projects``, the full video and the 15-second preview alike)
+hands ``cancel_check_here()`` to its processor, which looks at it around the
+slide export, between the slides it narrates, while ffmpeg encodes (killed
+within a poll), before the subtitles and before and during each extra
+format, and finishes the same way - before the new video is written nothing
+is written and the project is as it was; after it, the new video is kept with
+the sidecars that were finished. A job that never looks at the flag simply
+runs to its end. A cancelled job's closing message is the line it reported at
+1.0, when it reported one (a re-voice and a render say what they left on
 disk), else "Cancelled". A job remembers the user who started it
 (``user_id``): only that user, or an admin, may cancel it.
+
+``cancel_requested_here()`` answers for the job of the CALLING thread, so it
+is right only on the job's own worker thread; work that spreads over other
+threads (the render's narration is synthesised on a thread pool) binds the
+check in the job's thread with ``cancel_check_here()`` and hands the callable
+down, and every thread then asks after the same job.
 
 **Jobs live in memory**, so a restart of the process forgets every one of
 them: a page still polling an id then gets ``None`` here (404 at the route)
@@ -190,6 +203,18 @@ def cancel_requested_here() -> bool:
     (False outside a job, so a service loop can be called directly as well)."""
     job_id = current_job_id()
     return bool(job_id) and cancel_requested(job_id)
+
+
+def cancel_check_here() -> Callable[[], bool]:
+    """A callable answering whether the job of the CALLING thread was asked to
+    stop - bound to that job now, so it answers the same from any thread
+    (``cancel_requested_here`` asks after the thread it is called on, which
+    is nobody's job on a thread pool's worker). Outside a job it always
+    answers False, so a service can be called directly as well."""
+    job_id = current_job_id()
+    if not job_id:
+        return lambda: False
+    return lambda: cancel_requested(job_id)
 
 
 def active_for(project_id: str) -> dict | None:

@@ -181,8 +181,9 @@ export function wasCancelled(result: unknown): boolean {
 
 /**
  * The line a done job leaves on its card once the page lets go of it, or null: a cancelled job's closing line
- * (a re-voice says what it left on disk), and a transcription's when it dropped sentences' adjustments ("…; the
- * adjustments on 3 sentences were dropped") - the count the dialog warned about, now as it happened.
+ * (a re-voice and a render say what they left on disk), and a transcription's when it dropped sentences'
+ * adjustments ("…; the adjustments on 3 sentences were dropped") - the count the dialog warned about, now as
+ * it happened.
  */
 export function lineToKeep(job: { kind: string; status: string; message?: string | null; result?: unknown }): string | null {
   if (job.status !== "done") return null;

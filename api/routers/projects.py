@@ -232,6 +232,43 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     (subtitles, extra formats) at /api/projects/{pid}/outputs/{kind}. With
     ``preview_seconds`` > 0 only the first seconds render, to a separate file
     served as the ``preview`` kind; the full video is left as it was.
+
+    **A cancel** (``POST /api/jobs/{id}/cancel``) reaches the processor
+    through a check bound to the job in the job's own thread
+    (``jobs.cancel_check_here``: the narration is synthesised on a thread
+    pool, and a question about the calling thread would answer nobody's job
+    there). The processor looks at it around the slide export, between the
+    slides it narrates, while ffmpeg encodes, before the subtitles and before
+    and during each extra format (``services.processing``). The job then
+    finishes ``done`` with ``result = {"cancelled": True, "stage": ...}`` and
+    a closing line saying what is on disk:
+
+    - **before the new video is written** (``stage`` "export", "narration" or
+      "encode"): the record is untouched - ``output_video``, ``outputs`` and
+      ``rendered_at`` are not written - except for where the slide images
+      came from (``images_source`` and ``images_rendered_at``, written by
+      ``slides.record_images_source`` when the export ran, as after a failed
+      encode: the images are there), and the previous video and every
+      sidecar it names are byte for byte what they were (the encode writes a
+      ``.part.mp4`` and publishes it only when whole). The slide images and
+      the narration clips already made are kept for the next render. A
+      cancelled preview likewise leaves the previous preview -
+      ``processing.RENDER_CANCELLED_BEFORE_VIDEO`` / ``PREVIEW_CANCELLED``;
+    - **after it** (``stage`` "subtitles" or "formats"): the new video is
+      recorded with the sidecars that were finished; the unfinished ones are
+      absent from ``outputs`` and from disk: a format's part file is removed
+      with its ffmpeg, and once the new record is saved the file the
+      previous record named under each kind this render asked for and did
+      not produce is deleted (``processing.remove_stale_sidecars``; unless
+      the new record names that same file; kinds not asked for keep their
+      files) - the same rule as for a format that FAILED on a render that
+      completed, and for the previous subtitles when the mode changed (both
+      of a Whisper render's files go before a per-slide SRT, and the
+      reverse), so no stale sidecar of an asked-for kind sits beside the new
+      video - and the line names them - ``processing.cancelled_render_line``.
+
+    A cancel is never reported as a failure, and a failure never as a cancel:
+    only the processor's own word (``cancelled``) makes the result a cancel.
     """
     record = require_project(pid, user)
     if record.get("kind") not in ("deck", "pdf"):
@@ -261,9 +298,22 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         else:
             fi.load()
 
+        # The cancel, bound to THIS job here on its own thread: the processor
+        # asks it from the narration's pool workers as well, where a question
+        # about the calling thread (``jobs.cancel_requested_here``) would
+        # find no job and never see the cancel.
+        cancel_check = jobs.cancel_check_here()
+
+        def _cancelled(stage: str, line: str, **result) -> dict:
+            # The closing line is reported at 1.0, which ``services.jobs``
+            # keeps as the job's message, as a cancelled re-voice does.
+            progress(1.0, line)
+            return {"cancelled": True, "stage": stage, **result}
+
         processor = processing.VideoProcessor(
             voice_id=voice_id,
             provider=provider,
+            cancel_check=cancel_check,
             resolution=tuple(preset["resolution"]),
             speed=body.speed,
             video_bitrate=preset["video_bitrate"],
@@ -294,7 +344,14 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         backend = "pdf" if record.get("kind") == "pdf" else getattr(processor, "images_backend", None)
         if backend:
             slides.record_images_source(pid, backend)
+        cancelled = bool(getattr(processor, "cancelled", False))
+        stage = getattr(processor, "cancel_stage", None) or processing.RENDER_STAGE_ENCODE
         if not rendered:
+            if cancelled:
+                # Stopped before the video was written: nothing below is
+                # recorded, and the previous video (or preview) and its
+                # sidecars are the files the record still names.
+                return _cancelled(stage, processing.cancelled_render_line(stage, preview, (), ()))
             raise RuntimeError("The video could not be rendered; the server log has the reason.")
 
         video_path = get_output_filename(source_path, output_dir)
@@ -320,10 +377,29 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         # A full render replaces every sidecar with what it produced (an
         # earlier preview file is still there and stays listed, and so does
         # the Q&A document the AI assistant wrote - it is not a render output).
+        # A render cancelled after the video was written is recorded the same
+        # way, with the sidecars that were finished: the video is on disk and
+        # the record must describe it.
         current["output_video"] = video_path.name
         kept = {kind: outputs[kind] for kind in ("preview", "qa_doc") if kind in outputs}
         current["outputs"] = {**kept, **processor.outputs}
         store.save_project(current)
+        # The sidecar kinds this render asked for: the closing line's and the
+        # stale rule's reference.
+        wanted = [kind for kind, asked in (
+            ("srt", body.subtitles != "none"), ("vtt", body.subtitles == "whisper"),
+            ("webm", body.export_webm), ("gif", body.export_gif), ("mp3", body.export_audio_only),
+        ) if asked]
+        # No stale sidecar beside the new video: the file the PREVIOUS record
+        # named under a kind this render asked for and did not produce - the
+        # format in flight when the cancel landed, the ones never started, the
+        # subtitles of a cancel before them, or a format that failed - is
+        # deleted now that the new record is saved and no longer names it
+        # (``outputs`` is the record's list as it was before this save).
+        processing.remove_stale_sidecars(output_dir, outputs, current["outputs"], wanted)
+        if cancelled:
+            line = processing.cancelled_render_line(stage, False, processor.outputs, wanted)
+            return _cancelled(stage, line, video=video_path.name, outputs=current["outputs"])
         return {"video": video_path.name, "outputs": current["outputs"]}
 
     # One job per project: a render over a running AI job would save its own

@@ -1798,6 +1798,8 @@ class VideoCreator:
         onset_profile: Optional[OnsetProfile] = None,
     ):
         self.resolution = resolution
+        # Set by ``create_video``: whether its last run stopped on a cancel.
+        self.cancelled = False
         self.video_bitrate = video_bitrate
         # The rest of the output preset's encode (Q1), threaded here the way
         # the video bitrate is: the x264 preset (the preview passes
@@ -2271,6 +2273,10 @@ class VideoCreator:
         master_audio_path = None
         scratch = None
         t0 = time.time()
+        # Whether THIS run stopped on its cancel check: False is also what a
+        # failure answers, and the processor must tell the two apart (a
+        # cancel is never reported as a failure, nor a failure as a cancel).
+        self.cancelled = False
         try:
             total = len(slide_clips)
 
@@ -2336,6 +2342,7 @@ class VideoCreator:
             return True
 
         except CancelledError:
+            self.cancelled = True
             logger.warning("Encoding cancelled by user; ffmpeg stopped and the partial video discarded")
             return False
 

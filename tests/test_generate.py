@@ -48,7 +48,7 @@ class _FakeVideoProcessor:
     last = None
 
     def __init__(self, voice_id="", resolution=(1920, 1080), speed=1.0, video_bitrate="", provider="",
-                 x264_preset=None, h264_profile=None, audio_bitrate=None, **kwargs):
+                 x264_preset=None, h264_profile=None, audio_bitrate=None, cancel_check=None, **kwargs):
         # None, not the processor's defaults: a route that stopped passing
         # the preset's encode must show as None, never as a lucky default.
         self.voice_id = voice_id
@@ -59,6 +59,9 @@ class _FakeVideoProcessor:
         self.h264_profile = h264_profile
         self.audio_bitrate = audio_bitrate
         self.provider = provider
+        # The job's cancel check (T2): a callable bound to the job, or None
+        # if the route stopped passing one (tests/test_generate_cancel.py).
+        self.cancel_check = cancel_check
         self.kwargs = kwargs
         self.preview_seconds = None
         self.outputs = {}
@@ -323,6 +326,7 @@ def test_generate_forwards_every_option_to_the_processor(client, monkeypatch):
 
     p = _FakeVideoProcessor.last
     assert p.speed == 1.2 and p.resolution == (1920, 1080)
+    assert callable(p.cancel_check), "the job's cancel check reaches the processor (T2)"
     assert p.kwargs == {
         "slide_transition": "crossfade", "transition_duration": 0.7, "transition_pause": 1.2,
         "intro_text": "Welcome", "intro_subtitle": "Q3 review", "intro_duration": 4.0,

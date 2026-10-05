@@ -12,7 +12,7 @@ export interface Job {
   project_id?: string | null;
   /** What the work returned once the job is done (its shape is the job kind's). */
   result?: any;
-  /** True once POST /api/jobs/{id}/cancel was called; the ai-* jobs and a re-voice stop at their next check. */
+  /** True once POST /api/jobs/{id}/cancel was called; the ai-* jobs, a re-voice and a render stop at their next check. */
   cancel_requested?: boolean;
   /** Who started the job: only they, or an administrator, may cancel it (lib/jobs.ts `mayCancelJob`). */
   user_id?: string | null;
@@ -33,9 +33,10 @@ export function JobProgress({ job }: { job?: Job }) {
 }
 
 /**
- * Cancel for a running job: the Slides card's AI jobs and the Re-voice card. Shown only to a viewer who may
- * cancel it (the starter or an administrator); it reads "Cancelling…" once asked, until the job stops at its
- * next check.
+ * Cancel for a running job: the Slides card's AI jobs, the Re-voice card and the Generate card (a render or a
+ * preview). Shown only to a viewer who may cancel it (the starter or an administrator); it reads "Cancelling…"
+ * once asked, until the job stops at its next check. The one cancel request lives in `useFollowedJob`
+ * (lib/useFollowedJob.ts); every card is handed its `cancel`, `cancelPending` and `cancelError`.
  */
 export function CancelJobButton({ job, pending, title, onCancel }: { job: Job; pending: boolean; title: string; onCancel: () => void }) {
   return (
@@ -49,8 +50,8 @@ export function CancelJobButton({ job, pending, title, onCancel }: { job: Job; p
 
 /**
  * A line a card keeps once its job is over and the page has let go of it: a job the server lost in a restart,
- * a poll that kept failing, a cancelled re-voice saying what it left. Dismissed with its cross, or replaced by
- * the next job.
+ * a poll that kept failing, a cancelled re-voice or render saying what it left. Dismissed with its cross, or
+ * replaced by the next job.
  */
 export function JobNotice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
   return (

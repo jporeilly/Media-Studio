@@ -17,7 +17,8 @@
  *   error stays on its card), and the line a job leaves - a cancel's, a transcription's dropped adjustments -
  *   is kept as the notice.
  * - **Cancel** is offered to the job's starter or an administrator (`mayCancel`); its error is cleared when
- *   the page follows another job.
+ *   the page follows another job. This is the ONE cancel request of the page: the Slides, Generate and
+ *   Re-voice cards are each handed `cancel`, `cancelPending` and `cancelError` rather than keeping their own.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

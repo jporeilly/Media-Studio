@@ -513,7 +513,7 @@ ffmpeg's `bicubic` would be 0.9979 / 44.3 dB.
 **Follow-ups for the owner.**
 
 - Crossfade is a fade through the black pause, not a dissolve; it is kept as it was.
-- `POST /api/jobs/{id}/cancel` does not reach a deck render (the review's m2): the render polls a flag no route sets.
+- `POST /api/jobs/{id}/cancel` does not reach a deck render (the review's m2): the render polls a flag no route sets. *Done in T2 (2026-10-05): the generate job hands `jobs.cancel_check_here()` to the processor, every stage stops on it, and the Generate card has its Cancel; `tests/test_generate_cancel.py`.*
 - The chapters could use the master track's own spans: exact on every binary, and following a transition sound.
 - moviepy can leave `requirements.txt` once the two desktop environment checks stop importing it. imageio-ffmpeg, the ffmpeg the installer ships, is pinned on its own.
 - Most of a static render is now the pydub master track.

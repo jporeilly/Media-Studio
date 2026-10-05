@@ -74,17 +74,23 @@ def get_job(job_id: str, user: dict = Depends(current_user)):
 def cancel_job(job_id: str, user: dict = Depends(current_user)):
     """Ask a job to stop. Cooperative: it raises the job's flag and the job's
     own work decides when to look at it. The ``ai-*`` jobs check it between
-    slides (the QA review between passes) and a re-voice between its stages
+    slides (the QA review between passes), a re-voice between its stages
     (the translation, the picture cut, each sentence it synthesises, the
-    music mix); each then finishes as ``done`` with ``result.cancelled`` true,
-    the per-slide AI jobs keeping what they had written and a re-voice leaving
-    the files and the record as its closing message says. The Q&A document,
-    a transcription, a render, the slide previews and an update never look
-    and run to their end. Returns the job's state (a finished job is returned
-    as it is); keep polling GET. Only the user who started the job, or an
-    admin, may cancel it - the project's owner may watch a job an admin
-    started on it, but not stop it, and a job that records no starter (an
-    update) is an admin's to cancel."""
+    music mix) and a render - a deck or PDF's full video and its 15-second
+    preview alike - around the slide export, between the slides it narrates,
+    while ffmpeg encodes (killed within about a second), before the subtitles
+    and before and during each extra format; each then finishes as ``done``
+    with ``result.cancelled`` true and the stage it stopped at, the per-slide
+    AI jobs keeping what they had written and a re-voice or a render leaving
+    the files and the record as its closing message says (a render stopped
+    before its video is written leaves the project exactly as it was; one
+    stopped after keeps the new video with the sidecars that were finished -
+    ``api.routers.projects.generate``). The Q&A document, a transcription,
+    the slide previews and an update never look and run to their end. Returns
+    the job's state (a finished job is returned as it is); keep polling GET.
+    Only the user who started the job, or an admin, may cancel it - the
+    project's owner may watch a job an admin started on it, but not stop it,
+    and a job that records no starter (an update) is an admin's to cancel."""
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=JOB_NOT_FOUND)
