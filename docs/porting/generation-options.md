@@ -288,3 +288,318 @@ the mux alone, the cut and the music pass, and all three with the chapter remux 
 stereo AAC between 85 % and 105 % of 192k over dense narration, the voice within 1 dB of its own track
 (the unity up-mix), `moov` first and the cut's level within what its size and rate need; plus the argv
 of the cut, the mux and the preview.
+
+## As built — T1: ffmpeg composes the deck's picture (2026-10-02)
+
+On 0.11.0 the owner's 20-slide deck (`pdi-hello-world`, 443 s of Edge narration, 1080p) took 105.0 s to render with no transition and 2,522.2 s (42 minutes) with a transition and the text watermark. moviepy built every frame in numpy and piped raw RGB to ffmpeg; a transition raised the whole video from 2 to 24 frames a second; and the watermark was composited onto each of its frames (10,704 by its log, at 24 a second). The brief is `t1-brief.md`, the owner's decisions after the interim report are `t1-decisions.md`, and the review that led to the fix round below is `t1-review.md`. The decisions:
+
+- fade-to-white is fixed;
+- the slide directions are fixed;
+- animated slides are fixed;
+- the narration plays at its source level;
+- a transition and watermark render may take at most 3× the static one;
+- memory must not grow with the slides.
+
+**What the render is now** (`core/video_creator.py`, *the deck render*). Python prepares the stills and the narration track and never touches a frame:
+
+- Each slide's image is hard-linked into a scratch folder under a short name. If it has transparency, it is flattened onto black first.
+- The title cards and the watermark are drawn once each with Pillow (`_title_card`, `_watermark`), using moviepy's own positions and alpha maths.
+- The master track is `_build_master_audio`. It now reports the gap it left after each slide (`gaps_out`), so the picture follows the track; it is otherwise unchanged.
+
+ffmpeg builds and encodes every frame:
+
+- A still is decoded and scaled once (`scale` with lanczos, stretched as `ImageClip.resized` stretched it). It is converted to 4:2:0 once and repeated in memory by `loop`.
+- A transition's frames are split off the same still and drawn in RGB, on a clock that follows the slide's exact start on the master track:
+  - `fade`, through black or white;
+  - `pad` + `crop`, for a slide-in;
+  - a per-frame `scale` + `crop` + `fade`, for the zoom.
+- That clock is the slide's own time plus one second (`transition_clock_shift`), so it never starts below zero; the fade's start and the slide and zoom expressions are moved by the same second (see the fix round).
+- A pause is a `color` source.
+- The watermark is one `overlay` over each chunk's concatenated picture. Its still is padded so that it lands on exactly the pixel it was placed at (`even_origin`; see the fix round).
+- Boundaries between segments are the cumulative time rounded half up to a frame (`frame_boundaries`); the last one rounds up, so the picture never ends before the track.
+
+Other changes:
+
+- `processing._build_video` chooses the frame rate with `deck_fps`: 24 fps for a transition or an animated slide.
+- `encode_settings()` returns the encode as ffmpeg arguments (`video`, `audio`, `container`).
+- The chapters read each narration's length from ffmpeg's header (`_probe_duration`).
+- moviepy is gone from the app: nothing under `api/`, `core/`, `services/` or `utils/` imports it. `_open_audio_with_retry`, the clip builders and the proglog logger went with it. It stays in `requirements.txt` because `desktop/scripts/check-environment.ps1` and `fetch-python.ps1` import it in their environment checks.
+
+**The architecture, by measurement.** Two shapes were built from the same code and measured on the owner's deck (first round, before the fix round; the fix round changes neither shape). The figures below are ffmpeg's peak working set, summed over its processes and sampled every 50 ms.
+
+- **A:** one filter graph over the whole deck.
+- **B:** chunks of at most K segments, each one ffmpeg run, joined by a stream copy.
+
+| Crossfade + the watermark | A | B |
+| --- | --- | --- |
+| 1080p, 20 slides | 44.4 s, 2,986 MiB | 46.7–52.0 s, 1,373–1,390 MiB (K = 8); 45.6 s, 1,781 MiB (K = 16) |
+| 4K, 20 slides | 125.3 s, 9,964 MiB | 131.9 s, 4,029 MiB (K = 4) |
+| 1080p, 60 slides | 133.5 s, 7,177 MiB | 138.6 s, 1,390 MiB (K = 8) |
+| 1080p, 60 slides, no transition | 77.9 s, 2,831 MiB | 77.8 s, 993 MiB (K = 8) |
+
+On the final code B's peaks are the same: 1,349–1,382 MiB for 20 slides with a crossfade and the watermark (both binaries), 1,396 MiB for 60, 993 MiB for 60 with no transition, 4,039 MiB at 4K (`results_batch5.jsonl`, `results_batch7_8_clean.jsonl`).
+
+**Why A's memory grows.** ffmpeg configures and primes every chain of a graph before its first frame: 1 GB was resident before frame 0 with 40 chains. So A's memory grows with the slides:
+
+- about 11 MB a still at 1080p, scaled straight to 4:2:0;
+- 27 MB a still scaled in RGB;
+- about 70 MB a slide with a transition's three chains;
+- about 220 MB a slide at 4K.
+
+None of these changed that:
+
+- `-threads 1` per input;
+- `movie=` sources instead of `-i`;
+- one ffconcat input split to every branch (10.6 MB a segment).
+
+**B ships**, with K = 8 at 1080p, 18 at 720p and 4 at 4K, never fewer than 4 (`CHUNK_PIXELS`). A chunk takes more segments than K only while it is shorter than 48 frames (at 2 fps, a run of very short slides). B's memory is the same for 60 slides as for 20, and it costs a few percent of time: one x264 start-up per chunk.
+
+Also measured and rejected:
+
+- **One ffmpeg per segment, in parallel.** x264 `medium` already uses about 11 of the 16 logical cores. 2,400 static 1080p frames took 5.73 s in one run, 5.51 s in two and 5.60 s in four.
+- **Raw frames through an OS pipe into one encoder.** It added 30–45 % at 24 fps, whatever the pipe buffer.
+
+**The join** is the concat demuxer with a stream copy and `+faststart`. The frame count is exact, and every frame is the right one, on 7.1 and 8.0.1 for chunks of 2 frames and more. The timestamps are uniform on 7.1 (every step 512 ticks of 1/12288 s at 24 fps); on 8.0.1 the Reviewer found one 508-tick step (0.33 ms short) at the second join of one zoom render. On 8.0.1 a chunk of ONE frame broke the join (fudged DTS, two extra frames decoded). So no chunk is shorter than 48 frames (`MIN_CHUNK_FRAMES`) unless it is the whole deck.
+
+**The sound** (the master track and any music) is encoded by its own ffmpeg run beside the picture's. Inside the first chunk's graph, its AAC encode of 443 s ran on the frames' thread and put about 10 s on a static render's critical path.
+
+**The owner's deck, old and new, on the final code.** Both paths ran through `VideoProcessor._build_video`, not the app, on the i9-9900K (the owner's desktop). The old path is the 7da8e03 snapshot. Other sessions' work (an Ollama model server, an antivirus scan) kept 1.6 to 4.0 cores busy throughout the runs below, measured per run by `measure.py` (`foreign_cores`); runs that had four or more foreign cores were repeated. The old renderer's figures are the first round's, on a quiet machine.
+
+| Render (1080p, `youtube_1080p`) | Old (7da8e03, moviepy) | New, ffmpeg 8.0.1 (the dev box's) | New, bundled 7.1 (the app's) |
+| --- | --- | --- | --- |
+| No transition | 115.8 s (the owner's 0.11.0 run: 105.0 s) | 26.4, 26.8, 28.0 s | 25.0, 25.2, 25.0 s |
+| Crossfade + watermark | 2,522.2 s (the owner's) | 47.8, 48.4, 48.6 s | 49.3, 49.6, 51.5 s |
+| Zoom In + watermark | — | 62.4, 65.5 s | 65.0, 66.3 s |
+| Crossfade + watermark, first 4 slides | 472.9 s | 9.3 s | — |
+| Preview 15 s (text watermark) | — | 2.0 s | 1.9 s |
+
+The other kinds, on 8.0.1, from an earlier batch on the final code that ran beside another session's build and test
+run (upper bounds): no transition + text / image watermark 30.5 / 29.4 s; Crossfade alone 54.0 s; Slide Left
+54.7 s, with the watermark 52.5 s; Fade to White + watermark 58.4 s; Zoom In alone 76.0 s
+(`results_batch5.jsonl`).
+
+**What the renders are made of:**
+
+- **Ratios.** Crossfade + watermark ÷ no transition: 1.7–1.8× on 8.0.1 and 2.0–2.1× on 7.1; Zoom In + watermark: 2.2–2.5× on 8.0.1 and 2.6–2.7× on 7.1. Every pairing is under the owner's 3×. The new static render is 4.4× (8.0.1) to 4.6× (7.1) faster than the old one.
+- **Time split, static render.** Building the master track takes about 13 s (pydub: trims, levels, MP3 export). Writing the video takes 12.6–13.3 s, most of it the sound's AAC encode: 48–50 % of the render.
+- **Time split, crossfade + watermark.** The encode is 33.9–38.8 s of 47.8–51.5 s (70–75 %); with Zoom In, 48.2–53.6 s of 62.4–66.3 s.
+- **CPU.** A static render costs about 55 CPU-seconds; a crossfade + watermark one about 350 (7 cores over 48 s).
+- **Peak memory, new.** 0.96–1.0 GB at 2 fps, 1.35–1.38 GB with the crossfade, 1.13–1.15 GB with the zoom (ffmpeg); Python about 104 MiB.
+- **Peak memory, old.** Python 1,930 MiB plus ffmpeg 914 MiB.
+- **Files.**
+  - Every new file: H.264 High, level 4.0 (5.1 at 4K), yuv420p, untagged like the old one, AAC 48 kHz stereo at 181 kbit/s (193 with music).
+  - Sizes: 12.70 MB static, 16.21 MB crossfade + watermark, 17.54 MB zoom + watermark; the preview is 0.61 MB and 16.0 s.
+  - Frame counts: 887 frames at 2 fps (443.5 s), 10,633 at 24 (443.04 s), for a 443.01 s track.
+
+**Parity, frame against frame, on slides of both lead signs.** `parity2.py` renders a short deck through the old renderer and the new one:
+
+- the owner's first three slide images (slide 1 is dark, slides 2 and 3 bright);
+- the first 3 s of each narration;
+- an intro card with a subtitle and an outro card;
+- the watermark;
+- 1080p;
+- a 0.53 s pause after slide 1 and 0.51 s after slide 2, so that slide 2's first frame is 0.36 of a frame BEFORE its exact start (its start rounds down: a negative first timestamp) and slide 3's is 0.36 of a frame after it (its start rounds up).
+
+Frame n of each render is compared at the same timestamp with ffmpeg's `ssim` and `psnr`.
+
+- **Kinds whose look did not change** (none, Fade to Black, Crossfade, Slide Right, Slide Down, Zoom In):
+
+  | Frames | SSIM | PSNR |
+  | --- | --- | --- |
+  | Mid-slide | 0.9954–0.9995 | 43.2–52.6 dB |
+  | Intro card | 0.9998–1.0000 | 68.3 dB to identical |
+  | Pause | 1.0000 | identical |
+  | Watermark corner on slide 1 (dark: the white mark is visible; bottom-right 220×60) | 0.9999 | 52.6–52.7 dB |
+
+  Through the transitions, at 25, 50 and 75 % (SSIM, PSNR):
+
+  | Transition | Slide 2 (start rounds down) | Slide 3 (start rounds up) |
+  | --- | --- | --- |
+  | fade-in (Fade to Black, Crossfade), first frame | identical (black) | 0.9780, 45.2 dB (3 % of the way in) |
+  | fade-in, 25–75 % | 0.9940–0.9969, 42.1–48.7 dB | 0.9937–0.9956, 40.7–46.8 dB |
+  | Slide Right, first frame and 25–75 % | identical; 0.9985–0.9999, 45.4–56.5 dB | identical; 0.9973–0.9996, 44.2–52.4 dB |
+  | Slide Down, first frame and 25–75 % | identical; 0.9976–0.9994, 42.5–49.0 dB | identical; 0.9974–0.9994, 44.3–51.3 dB |
+  | Zoom In, first frame and 25–75 % | identical; 0.9916–0.9942, 40.3–45.6 dB | 0.9856, 48.2 dB; 0.9884–0.9935, 35.5–45.0 dB |
+
+  The fade-out: on slide 2 (bright) 0.9954–0.9969, 43.6–46.8 dB; on slide 1 (dark) 0.9992 / 54.7 dB at 50 %, but 0.9717 / 38.2 dB at 25 % and 0.9161 / 48.0 dB at 75 % (see below).
+- **The low fade-out figures are on the dark slide, and the old renderer is the one that is off.** 85 % of slide 1 is one dark colour, (18, 21, 25). A fade multiplies those small values, and the two renderers quantise the result differently: moviepy truncates the faded value when it composites, ffmpeg's `fade` rounds. With no encoder on either side (`fadeout_quant.py`: moviepy's frames as it hands them to its encoder, against ffmpeg's `fade` on the same still):
+
+  | Frame (ideal factor) | Old | New | That colour: ideal | Old | New |
+  | --- | --- | --- | --- | --- | --- |
+  | 114 (0.720) | 0.703 | 0.720 | 12.96, 15.12, 18.00 | 12, 15, 17 | 13, 15, 18 |
+  | 117 (0.470) | 0.452 | 0.470 | 8.46, 9.87, 11.75 | 8, 9, 11 | 8, 10, 12 |
+  | 120 (0.220) | 0.203 | 0.227 | 3.96, 4.62, 5.50 | 3, 4, 5 | 4, 5, 6 |
+
+  The old fade-out is darker than the ideal fade by 0.6–0.7 of a level a pixel; the new one is within 0.02–0.29 of it. The Reviewer measured the same with lossless x264 in both renders (the dips stay: SSIM 0.971 and 0.917; at frame 114 the ideal factor is 0.720, the old 0.632, the new 0.717), so the encoder is not the cause, as the first version of this note said it was. On the bright slide 2 the two agree with the ideal to 0.003 on every frame of the fade-out but its last, read from the encoded files (the last frame, at 3 % brightness, belongs to the pause in the new render's rounding).
+- **The three kinds the owner chose to fix differ during their transitions only, as intended.** Their slides, cards and pauses are 0.9967–1.0000.
+  - Fade to White: fade-in SSIM 0.89–0.99; fade-out 0.37–0.95 (the old one cut to black first).
+  - Slide Left and Slide Up: SSIM 0.05–0.56, now mirrored.
+- **One 2 fps point compares black with a slide.** The pause after slide 1 runs from 5.11 s to 5.64 s. The new render's round-half-up boundaries put it on frame 10 alone (5.11 × 2 = 10.22 and 5.64 × 2 = 11.28). moviepy sampled each frame at k/2 s, which put the pause on frame 11 (5.5 s). Both are within a frame of the track.
+- **The same check on the owner's whole deck** (`fadein_check.py`: each of the 19 slides that fade in, its first frame against its settled one): Crossfade + watermark, Crossfade alone, Crossfade at 4K, Zoom In with and without the watermark and Fade to White all start at their fade's colour, 19 of 19. Eight of the 19 start before their frame.
+
+**The narration and the music** (`audio_check.py`, on the full-deck renders, against the master track the render was given):
+
+- **Narration level.**
+
+  | Voiced RMS | dB | Against the master |
+  | --- | --- | --- |
+  | Master track | -20.07 | — |
+  | New render, each channel | -20.07 | -0.004 dB |
+  | Old render | -23.09 | -3.016 dB (moviepy's reader asked ffmpeg for `-ac 2`: a mono-to-stereo up-mix at -3 dB) |
+
+- **Clipping.** No sample is at or over full scale in any of these: the master, the new render, the new render with the default music volume (0.25) under a two-track playlist and under one looped track, and the two library tracks. The peaks are 0.644 for the master and the render, 0.660 with music, 0.12 and 0.19 for the tracks. At the default volume, even a full-scale track adds at most 0.25 to the narration's 0.644.
+- **Music behaviour.** The playlist order, the whole-playlist loop, the single-track loop, the fade in and out and the linear volume are read back from real renders by `tests/test_deck_render.py`.
+- **The end of the track.** The picture's last boundary rounds up, so the sound is never cut before the narration ends: the 443.0096 s track now gets 443.5 s of picture at 2 fps and 443.04 s at 24, where rounding to the nearest frame gave 443.0 s and dropped the track's last 9.6 ms (up to half a frame on another deck: 250 ms at 2 fps). The chapters are identical before and after, and the per-slide SRT is identical to the 7da8e03 one (`end_check.py`).
+
+**The scaler.** Each of the 20 slides (960×540) was stretched by Pillow's LANCZOS (moviepy's) and by ffmpeg's `scale=...:flags=lanczos`:
+
+| Size | SSIM min / mean | PSNR min / mean |
+| --- | --- | --- |
+| 1080p | 0.99989 / 0.99994 | 55.8 / 59.5 dB |
+| 4K | 0.99981 / 0.99989 | 56.3 / 59.8 dB |
+
+ffmpeg's `bicubic` would be 0.9979 / 44.3 dB.
+
+**Animated slides** (`anim_drift.py`: a red slide, a 4 s clip whose narration is 2 s, a blue slide; 0.5 s pauses):
+
+| | Next slide starts | Master track says | Drift | Clip shown | Distinct pictures | Frame rate |
+| --- | --- | --- | --- | --- | --- | --- |
+| Old (2 fps, as processing chose) | 7.0 s | 5.0 s | +2.0 s | its own 4 s | 8 | 2 fps |
+| New | 5.0 s | 5.0 s | 0.0 s | its 2.0 s span | 48 | 24 fps |
+
+**The fix round** (the review's B1, M1, M2, m1, m3, n1, n2; m2, wiring the cancel route to a deck render, is the owner's call and is not in it).
+
+- **B1: the fade-in was skipped on every slide whose start rounds down to a frame.**
+  - Such a slide's first frame is up to half a frame before its exact start, so the transition's first timestamp was negative, and ffmpeg's `fade` never fades from a negative first timestamp: every frame of the slide came out at full brightness. In isolation, on 7.1 and 8.0.1 alike (`fade_probe.py`, a grey 200 still, 0.5 s fade at 24 fps): first timestamp −0.24 frame gives luma 200 on every frame; 0 gives 0, 17, 33, 50…; +0.28 gives 5, 21, 38….
+  - On the owner's deck 8 of the 19 fading slides cut in unfaded (Crossfade and Zoom In alike), exactly the 8 whose start rounds down.
+  - The first round missed it because every slide its tests and its parity deck checked had a start that rounds up.
+  - The fix: every transition chain's clock is the slide's own time plus one second, and the fade's start and the slide and zoom expressions move with it. With the shift, each lead from −0.5 to +0.499 of a frame gives the ideal fade on both binaries (−0.24: 0, 13, 29, 46, 63…).
+  - After it: 0 of 19 unfaded, in every render checked above.
+- **M1: the watermark was drawn one pixel up or left at an odd coordinate.**
+  - In 4:2:0 `overlay` snaps an odd x or y down to even. The owner's mark is placed at (1826, 1057); it was drawn on rows 1059–1075 where the old renderer drew it on 1060–1076.
+  - On slide 1's dark corner, old against new, before the fix: PSNR 25.5 dB as drawn, 46.7 dB with the new corner moved down one row. The first round's "corner SSIM 1.0000" was measured on slide 2, whose corner is white, where the white mark cannot be seen.
+  - Two cures were measured on the owner's crossfade + watermark render (`corner.py`, `measure.py --overlay`). All three land the mark on rows 1060–1076:
+
+    | Cure | Render | Corner against the old renderer |
+    | --- | --- | --- |
+    | the still padded to an even origin | 50.0 s, 52.1 s | 52.65 dB, SSIM 0.9996 |
+    | `overlay=format=yuv444` | 61.0 s, 65.6 s | 52.65 dB, SSIM 0.9996 |
+    | `overlay=format=rgb` | 61.7 s, 70.9 s | 46.63 dB, SSIM 0.9987 |
+
+  - The padded still ships: it costs nothing, where converting every frame to 4:4:4 or RGB and back costs 10 to 19 s.
+- **M2: the cancel test flaked.** ffmpeg's first `-progress` block can say `frame=0` before x264 has given it a frame, and the test asserted the first report was above zero. It now asserts the reports never go back and end above zero. Run ten times per binary after the change: 10 of 10 green on the bundled 7.1 and 10 of 10 on 8.0.1 (`cancel_x10.log`).
+- **m1: three paths no test guarded** now have one each, on both binaries: progress counted across the chunks of a render; a join that fails after the partial file is written, or is cancelled while it writes, leaves no `.part.mp4`; a sound encode that fails is reported as a sound failure. The code already did all three.
+- **m3: this note's claims.** The plant table below is from the final file. The fade-out dips' cause, the `-ac 2` wording and the join's exactness are corrected above.
+- **n1: the picture never ends before the track** (the last boundary rounds up; see *The end of the track*).
+- **n2: wording.** The module's docstring no longer says "one run"; the guide and the limits page give the part size per resolution.
+
+**Found on the way.**
+
+- **The transition sound.**
+  - After a narrated slide, the master track's gap is the longer of the pause and the sound, which the old pause clip matched.
+  - After a SILENT slide, the track's gap is the pause alone, while the old pause clip held for the sound's length. The picture now follows the track.
+  - The chapters and the per-slide SRT still use the pause alone. Wherever a sound outlasts the pause, they run early by the difference, unchanged as the brief asked.
+  - No route passes a transition sound or background music to a deck render today.
+- **The chapters' lengths depend on the binary.**
+  - They come from the header's `Duration`, which moviepy's `AudioFileClip` read too. On the bundled 7.1 that number equals moviepy's for 20 of 20 clips, so the product's chapters are unchanged.
+  - ffmpeg 8.0.1 estimates an MP3's length more closely: 433.52 s over the 20 trimmed clips, against 433.51 s decoded and 434.70 s on 7.1.
+  - So on 7.1 the chapters have always drifted about 60 ms a slide late against the picture; the last one ends 1.2 s past the end of the video.
+- **The zoom.** `crop`'s `iw` keeps the first frame's width when `scale` changes size frame by frame, so the zoom tells `crop` the size by the same expression.
+- **Fades through a colour.** `fade` with a colour other than black takes RGB only. So a transition's frames are drawn in RGB and converted once each.
+- **Colour tags.** A slide PNG says sRGB/BT.709, while moviepy's raw RGB said nothing and the file went out untagged. `setparams` drops the tags, so the conversion and the file are as before.
+- **A default argument.** `deck_chunks`' default argument was bound at definition time, so a patched `MIN_CHUNK_FRAMES` never reached the render. It is read at call time now.
+- **Other work on the machine.** Timings on this desktop are only comparable when nothing else is running: a first re-timing ran beside another session's build and test run and read up to twice as long. `measure.py` now waits for an idle machine and records what every other process used during each render.
+
+**Follow-ups for the owner.**
+
+- Crossfade is a fade through the black pause, not a dissolve; it is kept as it was.
+- `POST /api/jobs/{id}/cancel` does not reach a deck render (the review's m2): the render polls a flag no route sets.
+- The chapters could use the master track's own spans: exact on every binary, and following a transition sound.
+- moviepy can leave `requirements.txt` once the two desktop environment checks stop importing it. imageio-ffmpeg, the ffmpeg the installer ships, is pinned on its own.
+- Most of a static render is now the pydub master track.
+- The zoom's per-frame lanczos is its extra cost.
+
+**The proof.** `tests/test_deck_render.py` covers these pure checks:
+
+- cumulative rounding over 560 odd durations at 2, 24, 25 and 30 fps, and the last boundary rounding up;
+- the timeline following the track;
+- the gaps the track reports;
+- each kind's plan;
+- `deck_fps`;
+- the chunk limits, and the claim that 60 slides need no bigger chunk than 20;
+- the timeouts;
+- the sound graph and the music graph;
+- the chunk graph's exact-start timing;
+- no transition chain's clock below zero, for every kind and for animated slides, over decks with more than 50 slides whose start rounds down;
+- `even_origin`.
+
+On every real ffmpeg it also checks:
+
+- each of the nine transition kinds rendered from a three-slide deck (two stills and a looped animated clip, a title card and the watermark), read back for:
+  - the encode;
+  - the frame count against the decoded master track;
+  - mid-slide quadrants;
+  - mid-fade between the slide and black or white;
+  - each direction's half-way frame;
+  - the zoom darker and enlarged;
+  - the watermark's blend;
+  - the card;
+  - the animated clip looped and moving;
+  - the narration within 0.5 dB of the master;
+- each fading kind (Fade to Black, Crossfade, Fade to White, Zoom In) on a still and an animated slide whose start rounds down, and on ones whose start rounds up: the first frame at the fade's colour, half way at half way;
+- the watermark pixel by pixel against a reference composite on a dark slide, at an odd position (0.8 of a grey level a pixel where it was placed, 10 or more one pixel off);
+- a 2 fps render with no outro card whose narration ends between frames: 5 frames for 2.2 s, and the last 0.2 s of the narration in the file;
+- a deck in several chunks against the same deck in one;
+- progress across the chunks of a render;
+- a join that fails or is cancelled, and a sound encode that fails;
+- the music's order, loop, fades and levels, as a playlist and as a single track;
+- a cancel mid-encode: stopped within 2 s, nothing left, progress never going back.
+
+`tests/test_encode_settings.py` reads the encode from the chunk's command, the sound's command and the join's. `tests/test_fonts.py` draws the cards and the watermark as stills.
+
+**Each check was watched failing** under a plant that breaks what it guards, on the final `core/video_creator.py` (sha256 `973db62d254c009987d524732d491eadd37e6d60a86d326a2e5e7e49a22bb932`). Each plant was restored from a copy and the file's sha256 verified against that hash. F = the fix round's, P = the first round's, R = the Reviewer's own:
+
+| Plant | What it broke | Red because | Result |
+| --- | --- | --- | --- |
+| F01-clock-shift-removed | the transition clock is not shifted (a negative first timestamp again) | fade-to-black, still, lead -0.24: the first frame is 1.00 of the way in | 6 failed |
+| F02-watermark-snapped | the watermark is overlaid at its odd corner unpadded (snapped up/left by overlay) | the frame is 18.28 grey levels a pixel from the reference at (141, 85) | 3 failed |
+| F03-last-boundary-nearest | the picture's end rounds to the nearest frame (may end before the track) | 2.2 s of track is 5 frames at 2 fps, never 4 | 2 failed |
+| F04-progress-not-offset (R10) | progress reports each chunk's own frame count, not frames of the render | the count went back: [78, 71, 75, 25, 249] | 1 failed |
+| F05-part-left (R11) | the .part.mp4 is not removed after a failure or a cancel | assert ['deck.part.mp4'] == [] | 2 failed |
+| F06-sound-failure-ignored (R12) | a failed sound encode is not reported | ['Error creating video: ffmpeg failed (exit 4294967294): [in#1 @ 00000000027b5e40] Error opening input: No ... | 1 failed |
+| F07-fade-in-at-zero-not-shift | the fade-in starts at 0 of the shifted clock (a second early: over before the slide begins) | fade-to-black, still, lead -0.24: the first frame is 1.00 of the way in | 2 failed |
+| P01-cumulative-rounding | boundaries rounded segment by segment | a boundary is 15.076 frames from its time at 2 fps | 1 failed |
+| P02-timeline-follows-track | the pause setting instead of the track's gap | the 3.2 s gap is the track's (a transition sound longer than the 3 s pause), not the pause setting | 1 failed |
+| P03-master-reports-gap | the track reports the pause, not the sound's gap | sound 2.5 s > pause 1 s; silent: the pause; 3 s pause > sound; last: none | 1 failed |
+| P04-slide-left-direction | slide-left from the left again | ('slide-left', (0.2, 0.25), array([ 38., 198.,  38.]), (0, 0, 0)) | 1 failed |
+| P05-slide-up-direction | slide-up from the top again | ('slide-up', (0.25, 0.15), array([ 39.,  39., 219.]), (0, 0, 0)) | 2 failed |
+| P06-fade-through-white | the white fade drawn through black | ('fade-to-white', 'tl', 0.5166666666666657, array([113.,  19.,  19.]), array([236.91666667, 143.91666667, 1... | 1 failed |
+| P07-zoom-enlarges | ZOOM_FROM = 1.0 | (80, 80) | 1 failed |
+| P08-fade-black | crossfade's fade-in removed | ('crossfade', 'tl', 0.5166666666666657, array([220.,  39.,  39.]), array([113.66666667,  20.66666667,  20.6... | 1 failed |
+| P09-unity-upmix | aformat=channel_layouts=stereo instead of the unity pan | the narration is -3.03 dB against the master track | 2 failed |
+| P10-48k | no aresample=48000 | assert ('aac', '24000', 2) == ('aac', '48000', 2) | 1 failed |
+| P11-cancel-stops-ffmpeg | the cancel ignored while ffmpeg runs | the encode was stopped, not left to finish | 1 failed |
+| P12-progress-reported | no progress reported | the cancel came mid-encode | 1 failed |
+| P13-chunks-back-to-back | chunks overlapping by a segment | frame 78 differs across the join | 2 failed |
+| P14-chunk-minimum | no minimum chunk length | assert False | 1 failed |
+| P15-animated-loops | no -stream_loop for an animated slide | assert 214 == 249 | 1 failed |
+| P16-playlist-loops | the playlist not looped | the playlist again from its first track: looped | 1 failed |
+| P17-single-track-loops | a single track not looped | the next track in order | 1 failed |
+| P18-music-fades | no music fades | faded in | 2 failed |
+| P19-watermark-corner | the watermark placed 30 px left | assert (534, 337) == (564, 337) | 2 failed |
+| P20-watermark-blend | the watermark at opacity 1.0 | the corner's blend | 2 failed |
+| P20b-watermark-overlaid | the overlay disabled | the corner's blend | 2 failed |
+| P21-card-title-height | the title at 10 %, not 40 % | the title at 40 % | 2 failed |
+| P22-picture-follows-intro | the intro card 0.5 s longer than the track's silence | (10.875, 9.349416666666666) | 1 failed |
+| P23-faststart-on-the-join | no +faststart on the join | ['ftyp', 'free', 'mdat', 'moov'] | 1 failed |
+| P24-animated-fps | an animated deck at 2 fps | assert 2 == 24 | 2 failed |
+| P25-pause-is-the-slides-own | the job's pause for every slide | after the last slide, none | 1 failed 2.03s |
+| P26-profile-to-the-master-track | no onset profile to the track | assert [None, None] == [OnsetProfile...db=8.0), None] | 1 failed 1.50s |
+| P27-sound-bitrate | no -b:a for the sound | ('128287', '192k') | 3 failed |
+| P28-frame-rate-argument | no -r in the encode | assert {'video': ['-...'+faststart']} == {'video': ['-...'+faststart']} | 2 failed |
+| R02-frame-dropped-at-join | the first segment of every chunk after the first loses its first frame | (6, [77, 78, 148, 149, 223, 224, ...]) | 2 failed |
+| R03-frame-duplicated-at-join | the last segment of every chunk but the last gains a frame | frame 148 differs across the join | 2 failed |
+| R06-cancel-spares-sound | a cancel kills the picture's ffmpeg but never the sound encode | the sound encode was left running | 1 failed |
+| R09-chunk-limit-ignored | the render ignores the chunk limit (one graph for the whole deck) | 1 chunk(s) | 2 failed |
+| R13-white-pause-black | the fade-to-white pause is black | the pause | 2 failed |
+| R14-scratch-left | the stills scratch folder is not removed | the scratch is gone | 2 failed |

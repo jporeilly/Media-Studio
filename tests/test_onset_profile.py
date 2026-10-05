@@ -5,7 +5,9 @@ clips - the job's provider - not the studio's configured default. Kokoro is
 opening, and the default can change while a job runs.
 
 No audio is decoded: pydub is replaced by a stub for the master-audio test and
-the trim/level/moviepy calls are captured.
+the trim/level calls are captured. (Since T1 the master track is the only place
+a deck's narration is trimmed and levelled: the per-clip moviepy opener that
+trimmed again is gone with moviepy's assembly.)
 """
 
 import sys
@@ -65,22 +67,7 @@ def test_deck_assembly_defaults_to_the_configured_provider_when_none_is_given(tm
     assert seen["onset_profile"] is KOKORO_ONSET
 
 
-# -- VideoCreator threads the profile down to the audio helpers -----------------
-
-def test_open_audio_with_retry_uses_the_given_profile_else_the_configured_one(monkeypatch):
-    seen = []
-    monkeypatch.setattr(video_creator, "_trim_leading_silence", lambda path, profile=None: seen.append(profile) or path)
-    monkeypatch.setattr(video_creator, "AudioFileClip", lambda path: types.SimpleNamespace(path=path, duration=1.0))
-
-    video_creator._open_audio_with_retry("clip.mp3", profile=KOKORO_ONSET)
-    config._config["tts_provider"] = "edge_tts"
-    video_creator._open_audio_with_retry("clip.mp3")
-    config._config["tts_provider"] = "kokoro"
-    video_creator._open_audio_with_retry("clip.mp3")
-    video_creator._open_audio_with_retry("clip.mp3", trim_silence=False)
-
-    assert seen == [KOKORO_ONSET, EDGE_ONSET, KOKORO_ONSET]
-
+# -- VideoCreator threads the profile down to the master track ------------------
 
 class _Seg:
     """A pydub.AudioSegment stand-in: only lengths matter here."""
@@ -155,20 +142,22 @@ def test_build_master_audio_falls_back_to_the_configured_provider(tmp_path, monk
     assert trimmed == [EDGE_ONSET] and levelled == [EDGE_ONSET]
 
 
-def test_video_creator_hands_its_profile_to_both_helpers(tmp_path, monkeypatch):
-    seen = {}
+def test_video_creator_hands_its_profile_to_the_master_track(tmp_path, monkeypatch):
+    """The render trims and levels the narration in ONE place, the master
+    track, with the creator's profile (the job's provider); a legacy creator
+    with none hands None on, and the track falls back to the studio's."""
+    seen = []
 
-    def fake_master(slide_clips, voice_start_delay, transition_pause, transition_sound_path=None, profile=None):
-        seen["master"] = profile
+    def fake_master(slide_clips, voice_start_delay, transition_pause, transition_sound_path=None, profile=None,
+                    intro_offset=0.0, gaps_out=None):
+        seen.append(profile)
         return None, []
 
     monkeypatch.setattr(video_creator, "_build_master_audio", fake_master)
-    monkeypatch.setattr(video_creator, "_trim_leading_silence", lambda path, profile=None: seen.setdefault("trim", profile) or path)
-    monkeypatch.setattr(video_creator, "AudioFileClip", lambda path: types.SimpleNamespace(path=path, duration=1.0))
-
     creator = video_creator.VideoCreator(onset_profile=KOKORO_ONSET)
     assert creator.onset_profile is KOKORO_ONSET
-    # create_slide_clip opens the audio through _open_audio_with_retry with the creator's profile.
-    creator.create_slide_clip(_one_clip(tmp_path)[0])
-    assert seen["trim"] is KOKORO_ONSET
+    # No clips: the render stops right after the master track (the part under test).
+    assert creator.create_video([], tmp_path / "out.mp4") is False
+    assert video_creator.VideoCreator().create_video([], tmp_path / "out.mp4") is False
+    assert seen == [KOKORO_ONSET, None]
     assert video_creator.VideoCreator().onset_profile is None, "legacy callers keep the config-driven fallback"

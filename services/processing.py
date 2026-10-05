@@ -28,7 +28,7 @@ from utils.logger import get_logger
 logger = get_logger("PROC")
 from core.pptx_exporter import PPTXExporter
 from core.tts_provider import TTSProvider, effective_voice
-from core.video_creator import VideoCreator, SlideClipInfo, effective_pause, fps_for_transition
+from core.video_creator import VideoCreator, SlideClipInfo, deck_fps, effective_pause
 from core.project_manager import ProjectManager, get_project_dir
 
 
@@ -1463,8 +1463,9 @@ class VideoProcessor:
     ) -> bool:
         """Assemble slide images + audio into an MP4 file.
 
-        Copies audio files to assets/temp so antivirus scanners
-        don't hold locks on the originals while moviepy reads them.
+        Copies audio files to assets/temp first: the master track trims each
+        clip's leading silence IN PLACE, and antivirus scanners must not hold
+        locks on the originals while the render reads them.
         If preview_seconds > 0, only includes enough slides to fill
         the preview duration.
         """
@@ -1530,27 +1531,31 @@ class VideoProcessor:
                 video_duration += self.intro_duration
             if self.outro_text:
                 video_duration += self.outro_duration
-            # A transition needs real frames to play on; a static deck stays at 2 fps.
-            fps = fps_for_transition(self.slide_transition, self.transition_duration)
+            # A transition needs real frames to play on, and so does an animated
+            # slide (at 2 fps it played as two pictures a second); a static deck
+            # stays at 2 fps.
+            fps = deck_fps(self.slide_transition, self.transition_duration,
+                           animated=any(info.video_path for info in clip_infos))
             total_frames = int(video_duration * fps)
 
             logger.info("-- %d slides ready for video --", len(clip_infos))
             logger.info("Est. video duration: %.1fs  (%d frames at %dfps)", video_duration, total_frames, fps)
 
-            # Assembly progress — show which slide moviepy is processing
+            # Assembly progress — the audio track, then each slide's still
             def _on_assembly_progress(slide_num: int, total: int, msg: str):
                 if progress:
                     frac = 0.80 + 0.05 * slide_num / max(total, 1)
                     progress(frac, f"{file_label}: Assembling slide {slide_num}/{total}")
 
-            # Encoding progress callback — reports frame-level % to the UI
+            # Encoding progress callback — reports frame-level % to the UI, from
+            # ffmpeg's own -progress (frames encoded of the render's total)
             encode_start = [0.0]  # mutable so closure can update it
 
-            def _on_encode_progress(frame: int, total_from_logger: int):
+            def _on_encode_progress(frame: int, total_from_render: int):
                 if not progress:
                     return
-                # Use our pre-calculated total if the logger hasn't reported one yet
-                total = total_from_logger if total_from_logger > 0 else total_frames
+                # Use our pre-calculated total if the render hasn't reported one yet
+                total = total_from_render if total_from_render > 0 else total_frames
                 if total <= 0:
                     return
                 # Capture wall-clock start on first real frame callback

@@ -25,9 +25,12 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Watermark opacity | 0.1–1 | `services/studio_settings.py:75` |
 | Intro and outro card | 1–10 s; text 200 characters | `api/schemas.py:299`, `api/schemas.py:301`, `api/schemas.py:14` |
 | Preview render | 15 s on the card; the API takes 0–120 s | `frontend/src/lib/generateOptions.ts:37`, `api/schemas.py:317` |
-| GIF export | the first 30 s, 5 fps, 480 px wide | `services/processing.py:1770-1771` |
-| Frame rate | 2 fps static, 24 fps with a transition | `core/video_creator.py:33-34` |
-| Chapter title from a slide's notes | 60 characters | `services/processing.py:1610` |
+| GIF export | the first 30 s, 5 fps, 480 px wide | `services/processing.py:1775-1776` |
+| Frame rate | 2 fps static, 24 fps with a transition or an animated slide | `core/video_creator.py:38-39`, `core/video_creator.py:107` |
+| Render parts | up to 8 slides and pauses at 1080p, 18 at 720p, 4 at 4K (never fewer than 4); each part at least 48 frames unless it is the whole video, so a part takes more slides only while it is shorter than that | `core/video_creator.py:1403-1405` |
+| Render wait | each part 120 s plus 0.05 s a frame (more for a picture larger than 1080p); the sound 120 s plus half the video's length; the join 60 s plus a tenth | `core/video_creator.py:1411-1412`, `core/video_creator.py:2218`, `core/video_creator.py:2240` |
+| Zoom In | from 1.3 times the slide's size | `core/video_creator.py:1386` |
+| Chapter title from a slide's notes | 60 characters | `services/processing.py:1615` |
 | Edit ranges per track | 5,000 (bound on abuse) | `services/edit.py:116` |
 | Music clips per project | 200 | `services/edit.py:343` |
 | Music clip length | at least 0.1 s | `services/edit.py:346` |
@@ -60,7 +63,7 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Whisper voice activity | silences of 500 ms or more skipped | `core/video_importer.py:322` |
 | Document slug on the Docs page | 200 characters | `api/routers/docs.py:87` |
 
-The constants behind the music limits are `MAX_MUSIC_BYTES`, `MAX_CHANNELS` and `MAX_NAME_CHARS`; behind the edit's, `MAX_CLIPS`, `MIN_CLIP_SECONDS`, `MAX_MARKERS` and `MAX_MARKER_NAME`; behind the narration's, `MAX_OFFSET_SECONDS`, `MIN_SPEED` and `MAX_SPEED`.
+The constants behind the music limits are `MAX_MUSIC_BYTES`, `MAX_CHANNELS` and `MAX_NAME_CHARS`; behind the edit's, `MAX_CLIPS`, `MIN_CLIP_SECONDS`, `MAX_MARKERS` and `MAX_MARKER_NAME`; behind the narration's, `MAX_OFFSET_SECONDS`, `MIN_SPEED` and `MAX_SPEED`; behind the render's, `STATIC_FPS`, `TRANSITION_FPS`, `CHUNK_PIXELS`, `MIN_CHUNK_SEGMENTS`, `MIN_CHUNK_FRAMES`, `RENDER_BASE_SECONDS`, `RENDER_SECONDS_PER_FRAME` and `ZOOM_FROM`.
 
 ## See also
 

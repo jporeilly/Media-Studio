@@ -1,10 +1,11 @@
 """Q1: the encode every render writes, held to what its label says.
 
-A final deck render hands ``write_videofile`` the output preset's x264 preset
+A final deck render hands ffmpeg the output preset's x264 preset
 (``medium``), H.264 profile (High), video bitrate and AAC bitrate, plus
-``-pix_fmt yuv420p`` and ``-movflags +faststart``
-(``VideoCreator.encode_settings``, the one place ``create_video`` takes them
-from). The 15-second preview is the same render at ``ultrafast``. The
+``-pix_fmt yuv420p``, and its last write ``-movflags +faststart``
+(``VideoCreator.encode_settings``, the one place the render takes them from,
+as ffmpeg arguments since T1). The 15-second preview is the same render at
+``ultrafast``. The
 re-voice has no preset of its own: its picture cut is encoded like a final
 render and told the source's frame rate, its mux and its music pass give AAC
 one named bitrate at 48 kHz stereo (the unity up-mix, never ``-ac 2``), its
@@ -27,8 +28,9 @@ the prober beside that binary: the profile, the pixel format, the audio
 bitrate, and whether the index (``moov``) sits in front of the media
 (``mdat``). Two parameters leave nothing in the file to read when they are
 missing - ``-profile:v`` is a ceiling and ``medium`` writes High without it,
-and moviepy's own trailing ``-pix_fmt yuva420p`` ends in yuv420p anyway (see
-``core.video_creator``) - so the encoder's own command line is checked too.
+and the render's graph ends in yuv420p anyway (see ``core.video_creator``) -
+so the encoder's own command line is checked too: the chunk's encode and the
+join that writes the file.
 """
 
 import json
@@ -41,8 +43,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from moviepy.audio.io import ffmpeg_audiowriter
-from moviepy.video.io import ffmpeg_writer
 from PIL import Image
 
 import utils.config as config_module
@@ -55,7 +55,8 @@ from utils.config import config
 from test_chapters import _ffprobe_beside
 from test_generation_options import KEEP, REAL_FFMPEGS, _fake_cut, _mux_fixtures, needs_ffmpeg
 
-PARAMS = ["-profile:v", "high", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+PARAMS = ["-profile:v", "high", "-pix_fmt", "yuv420p"]
+FASTSTART = ["-movflags", "+faststart"]
 # How ffprobe names the stream each ``profile`` value produces at ``medium``.
 PROFILE_NAMES = {"main": "Main", "high": "High"}
 
@@ -96,12 +97,14 @@ def test_the_encode_settings_carry_the_preset_and_the_same_parameters_whatever_t
         resolution=(320, 240), video_bitrate="10M", x264_preset=x264_preset, h264_profile="high", audio_bitrate="192k",
     )
     assert creator.encode_settings() == {
-        "fps": video_creator.STATIC_FPS, "codec": "libx264", "audio_codec": "aac", "preset": x264_preset,
-        "bitrate": "10M", "audio_bitrate": "192k", "ffmpeg_params": PARAMS, "threads": 0,
+        "video": ["-r", str(video_creator.STATIC_FPS), "-c:v", "libx264", "-preset", x264_preset, *PARAMS,
+                  "-b:v", "10M", "-threads", "0"],
+        "audio": ["-c:a", "aac", "-b:a", "192k"],
+        "container": FASTSTART,
     }
     # "" is the codec's own default, exactly as the video bitrate has always been.
     plain = video_creator.VideoCreator(resolution=(320, 240)).encode_settings()
-    assert plain["bitrate"] is None and plain["audio_bitrate"] is None
+    assert "-b:v" not in plain["video"] and plain["audio"] == ["-c:a", "aac"]
 
 
 class _FakePM:
@@ -251,19 +254,19 @@ def _streams(ffprobe: Path, video: Path) -> dict:
     return {s["codec_type"]: s for s in json.loads(out)["streams"] if s.get("codec_type") in ("video", "audio")}
 
 
-def _render(tmp_path, monkeypatch, ffmpeg: str, creator_kwargs: dict, titles=None) -> tuple[Path, list[str]]:
+def _render(tmp_path, monkeypatch, ffmpeg: str, creator_kwargs: dict, titles=None) -> tuple[Path, list[str], list[str], list[str]]:
     """A one-slide deck through ``VideoCreator.create_video`` on ``ffmpeg``
-    (moviepy's encoder and the chapter remux alike): a 320×240 slide and 2 s
-    of stereo pink noise - noise, because an AAC encoder spends its bitrate on
-    it, where on silence or a pure tone it does not and the check would
-    measure the content rather than the setting. Returns the file and the
-    encoder's own command line."""
+    (the render's encode, its join and the chapter remux alike): a 320×240
+    slide and 2 s of stereo pink noise - noise, because an AAC encoder spends
+    its bitrate on it, where on silence or a pure tone it does not and the
+    check would measure the content rather than the setting. Returns the file,
+    the picture encoder's own command line, the sound encoder's, and the
+    join's (the write that gives the file its index)."""
     ffprobe = _ffprobe_beside(ffmpeg)
     if ffprobe is None:
         pytest.skip(f"no ffprobe beside {ffmpeg}")
-    monkeypatch.setattr(ffmpeg_writer, "FFMPEG_BINARY", ffmpeg)
-    monkeypatch.setattr(ffmpeg_audiowriter, "FFMPEG_BINARY", ffmpeg)
     monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
+    monkeypatch.setattr(config_module, "TEMP_DIR", tmp_path / "temp")
 
     image = tmp_path / "slide.png"
     Image.new("RGB", (320, 240), (40, 90, 160)).save(image)
@@ -294,8 +297,10 @@ def _render(tmp_path, monkeypatch, ffmpeg: str, creator_kwargs: dict, titles=Non
         [video_creator.SlideClipInfo(slide_index=0, image_path=image, audio_path=narration)],
         out, slide_titles=titles,
     ) is True
-    (encode,) = [cmd for cmd in seen if "-vcodec" in cmd]
-    return out, encode
+    (encode,) = [cmd for cmd in seen if "-c:v" in cmd and "libx264" in cmd]
+    (sound,) = [cmd for cmd in seen if "-c:a" in cmd and "sound.m4a" in cmd]
+    (join,) = [cmd for cmd in seen if "concat" in cmd and "-c" in cmd and "copy" in cmd]
+    return out, encode, sound, join
 
 
 def _creator_kwargs(preset: dict, x264_preset: str | None = None) -> dict:
@@ -319,7 +324,7 @@ def test_a_final_render_is_what_its_preset_says(tmp_path, monkeypatch, ffmpeg, p
     No slide titles, so no chapter remux runs after the encode: this is the
     render's OWN faststart (the remux's is the next test)."""
     preset = output_presets.get_preset(preset_id)
-    out, encode = _render(tmp_path, monkeypatch, ffmpeg, _creator_kwargs(preset))
+    out, encode, sound, join = _render(tmp_path, monkeypatch, ffmpeg, _creator_kwargs(preset))
 
     # The file first: what a player sees.
     streams = _streams(_ffprobe_beside(ffmpeg), out)
@@ -328,12 +333,16 @@ def test_a_final_render_is_what_its_preset_says(tmp_path, monkeypatch, ffmpeg, p
     assert audio["codec_name"] == "aac"
     assert _audio_within(audio, preset["audio_bitrate"]), (audio["bit_rate"], preset["audio_bitrate"])
     assert _index_in_front(out), _top_level_atoms(out)
-    # Then the command: the profile and the pixel format leave nothing in the
+    # Then the commands: the profile and the pixel format leave nothing in the
     # file to read when they are missing (see the module docstring).
     assert encode[encode.index("-preset") + 1] == preset["x264_preset"]
     assert _contains(encode, PARAMS), encode
+    assert sound[sound.index("-c:a") + 1] == "aac" and sound[sound.index("-b:a") + 1] == preset["audio_bitrate"]
     if preset["video_bitrate"]:
-        assert encode[encode.index("-b") + 1] == preset["video_bitrate"]
+        assert encode[encode.index("-b:v") + 1] == preset["video_bitrate"]
+    else:
+        assert "-b:v" not in encode
+    assert _contains(join, FASTSTART) and join[join.index("-c") + 1] == "copy", join
 
 
 @needs_ffmpeg
@@ -344,7 +353,7 @@ def test_the_chapter_remux_keeps_the_index_in_front(tmp_path, monkeypatch, ffmpe
     plain remux puts the index back at the end. So the remux passes faststart
     too, and the chaptered file still has it."""
     preset = output_presets.get_preset(output_presets.DEFAULT_PRESET_ID)
-    out, _ = _render(tmp_path, monkeypatch, ffmpeg, _creator_kwargs(preset), titles=["Opening slide"])
+    out, _, _, _ = _render(tmp_path, monkeypatch, ffmpeg, _creator_kwargs(preset), titles=["Opening slide"])
 
     assert b"chpl" in out.read_bytes(), "the chapters were written"
     assert _index_in_front(out), _top_level_atoms(out)
@@ -360,8 +369,8 @@ def test_the_preview_is_ultrafast_and_plays_where_the_final_render_does(tmp_path
     ceiling on the tools x264 may use, and ``ultrafast`` uses none of High's -
     a Baseline stream every High decoder plays."""
     preset = output_presets.get_preset(output_presets.DEFAULT_PRESET_ID)
-    out, encode = _render(tmp_path, monkeypatch, ffmpeg,
-                          _creator_kwargs(preset, x264_preset=output_presets.PREVIEW_X264_PRESET))
+    out, encode, _, join = _render(tmp_path, monkeypatch, ffmpeg,
+                                   _creator_kwargs(preset, x264_preset=output_presets.PREVIEW_X264_PRESET))
 
     streams = _streams(_ffprobe_beside(ffmpeg), out)
     assert (streams["video"]["profile"], streams["video"]["pix_fmt"]) == ("Constrained Baseline", "yuv420p")
@@ -369,6 +378,7 @@ def test_the_preview_is_ultrafast_and_plays_where_the_final_render_does(tmp_path
     assert _index_in_front(out), _top_level_atoms(out)
     assert encode[encode.index("-preset") + 1] == "ultrafast"
     assert _contains(encode, PARAMS), encode
+    assert _contains(join, FASTSTART), join
 
 
 # ── the re-voice, read back ───────────────────────────────────────────────────

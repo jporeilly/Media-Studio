@@ -4,7 +4,7 @@
 
 Media Studio Enterprise is the React + FastAPI successor to **Slide Studio Enterprise**
 (NiceGUI). It reuses the same Python media engine — PowerPoint/PDF export, Edge TTS &
-Kokoro narration, faster-whisper transcription, moviepy/ffmpeg assembly, Ollama-powered
+Kokoro narration, faster-whisper transcription, ffmpeg assembly, Ollama-powered
 notes/QA/translation — behind a modern SPA that shares the **OpenSight** design system so
 the whole app suite looks and feels the same.
 

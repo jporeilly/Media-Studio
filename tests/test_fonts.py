@@ -5,8 +5,12 @@ moviepy 2 / Pillow refuse a family name: ``TextClip(font="Arial")`` raised
 swallowed it, and the intro card rendered solid black with the watermark
 dropped. ``core/fonts.py`` resolves a font file once per VideoCreator and,
 when the host has none, draws the text with Pillow's built-in font - so text
-is never silently lost. moviepy and Pillow are real here (one frame through
-``get_frame`` needs no ffmpeg); only the font lookup is redirected.
+is never silently lost. Since T1 the cards and the watermark are stills drawn
+once by Pillow and handed to ffmpeg (``VideoCreator._title_card``,
+``VideoCreator._watermark``); Pillow is real here and needs no ffmpeg - the
+watermark is laid over a black frame here exactly as ffmpeg's ``overlay``
+lays it (straight alpha at its corner; ``tests/test_deck_render.py`` reads
+the real blend back from a render). Only the font lookup is redirected.
 """
 
 import logging
@@ -14,8 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from moviepy import ColorClip
-from PIL import ImageFont
+from PIL import Image, ImageFont
 
 from core import fonts, video_creator
 from core.video_creator import VideoCreator
@@ -57,8 +60,13 @@ def records():
 SIZE = (640, 480)
 
 
-def _black(size=SIZE):
-    return ColorClip(size=size, color=(0, 0, 0), duration=1.0).with_fps(2)
+def _watermarked(creator, size=SIZE) -> np.ndarray:
+    """A black frame with the creator's watermark laid over it at its corner,
+    as the render's ``overlay`` lays it."""
+    layer, (x, y) = creator._watermark()
+    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+    canvas.paste(layer, (x, y))
+    return np.asarray(Image.alpha_composite(Image.new("RGBA", size, (0, 0, 0, 255)), canvas).convert("RGB"))
 
 
 # -- resolve_font -----------------------------------------------------------------
@@ -169,7 +177,7 @@ def test_video_creator_warns_clearly_when_the_host_has_no_font_file(monkeypatch,
 
 def test_title_card_has_the_title_in_the_centre_band():
     creator = VideoCreator(resolution=SIZE)
-    frame = creator._create_title_card("Welcome", "", 1.0).get_frame(0.5)
+    frame = np.asarray(creator._title_card("Welcome", ""))
     h, w = frame.shape[:2]
     assert (h, w) == (480, 640)
     assert frame.max() > 0, "the card is solid black - the title was dropped"
@@ -180,7 +188,7 @@ def test_title_card_has_the_title_in_the_centre_band():
 
 def test_title_card_with_a_subtitle_draws_both():
     creator = VideoCreator(resolution=SIZE)
-    frame = creator._create_title_card("Welcome", "Q3 review", 1.0).get_frame(0.5)
+    frame = np.asarray(creator._title_card("Welcome", "Q3 review"))
     h = frame.shape[0]
     assert frame[int(h * 0.4) : int(h * 0.4) + 56].max() == 255, "the title at 40 %, white"
     subtitle_band = frame[int(h * 0.55) + 4 : int(h * 0.55) + 34]
@@ -190,15 +198,14 @@ def test_title_card_with_a_subtitle_draws_both():
 
 def test_watermark_adds_text_pixels_at_its_position():
     creator = VideoCreator(resolution=SIZE, watermark_text="ACME Corp", watermark_position="bottom-right", watermark_opacity=1.0)
-    out = creator._apply_watermark(_black())
-    frame = out.get_frame(0.5)
+    frame = _watermarked(creator)
     h, w = frame.shape[:2]
     assert frame.max() == 255, "white text"
     assert frame[h // 2 :, w // 2 :].max() > 0, "in the bottom-right quadrant"
     assert frame[: h // 2].max() == 0 and frame[:, : w // 2].max() == 0, "and nowhere else"
 
     creator = VideoCreator(resolution=SIZE, watermark_text="ACME Corp", watermark_position="top-left", watermark_opacity=0.5)
-    frame = creator._apply_watermark(_black()).get_frame(0.5)
+    frame = _watermarked(creator)
     assert frame[: h // 2, : w // 2].max() > 0, "top-left"
     assert frame[h // 2 :].max() == 0 and frame[:, w // 2 :].max() == 0
     assert 100 <= frame.max() <= 140, "half opacity over black"
@@ -209,12 +216,12 @@ def test_text_is_still_drawn_with_the_built_in_font_when_no_font_file_exists(mon
     creator = VideoCreator(resolution=SIZE, watermark_text="ACME", watermark_position="bottom-right", watermark_opacity=1.0)
     assert creator.font is None
 
-    frame = creator._create_title_card("Welcome", "Q3 review", 1.0).get_frame(0.5)
+    frame = np.asarray(creator._title_card("Welcome", "Q3 review"))
     h, w = frame.shape[:2]
     assert frame.max() > 0
     assert frame[int(h * 0.4) : int(h * 0.4) + 56].max() > 0 and frame[: int(h * 0.3)].max() == 0
 
-    frame = creator._apply_watermark(_black()).get_frame(0.5)
+    frame = _watermarked(creator)
     assert frame[h // 2 :, w // 2 :].max() > 0 and frame[: h // 2].max() == 0
 
 
@@ -229,7 +236,7 @@ def test_title_and_watermark_glyphs_are_not_cut_off():
     (48 px "Welcome gyp" came out 36 rows tall instead of ~45). The engine
     draws with Pillow directly: capitals plus descenders keep their height."""
     creator = VideoCreator(resolution=SIZE, watermark_text="Agyp", watermark_position="bottom-right", watermark_opacity=1.0)
-    card = creator._create_title_card("Welcome gyp", "", 1.0).get_frame(0.5)
+    card = np.asarray(creator._title_card("Welcome gyp", ""))
     assert _lit_height(card) >= 42, "48 px: capitals plus descenders are ~45 rows; clipped text is ~36"
-    watermark = creator._apply_watermark(_black()).get_frame(0.5)
+    watermark = _watermarked(creator)
     assert _lit_height(watermark) >= 20, "24 px: ~22 rows; clipped text is ~18"

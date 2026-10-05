@@ -4,23 +4,27 @@ Assembles individual slide images (or video clips for animated slides)
 with their corresponding audio narration into a single MP4 video.
 Supports configurable resolution, transition pauses between slides,
 and optional transition sound effects.
+
+The deck's picture is composed by ffmpeg from stills
+(``VideoCreator.create_video``; see "the deck render" below): Python draws
+the title cards and the watermark once each and builds the narration track,
+and never touches a frame. A render is several ffmpeg runs - one per chunk
+of the picture, one for the sound and one that joins them.
 """
 
 import math
+import os
 import re
+import shutil
+import tempfile
 import time
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Callable, Tuple
 from dataclasses import dataclass
 
-import proglog
 import numpy as np
-from moviepy import (
-    ImageClip, AudioFileClip, VideoFileClip,
-    concatenate_videoclips, ColorClip, CompositeAudioClip,
-    CompositeVideoClip,
-)
+from PIL import Image
 
 from core.fonts import resolve_font, text_image
 from core.tts_provider import OnsetProfile
@@ -29,7 +33,8 @@ logger = get_logger("VIDEO")
 
 # A static deck is encoded at 2 fps (every frame is the same slide, so the
 # encode stays fast). A visual transition needs real frames to play on: at 2 fps
-# a 0.5 s fade is a single frame, so a deck with a transition renders at 24 fps.
+# a 0.5 s fade is a single frame, so a deck with a transition renders at 24 fps,
+# and so does a deck with an animated slide (``deck_fps``).
 STATIC_FPS = 2
 TRANSITION_FPS = 24
 
@@ -44,13 +49,10 @@ TRANSITION_FPS = 24
 #   uses none of them and writes Constrained Baseline whatever profile is
 #   asked for (measured on the bundled 7.1 and on 8.0.1).
 # - ``-pix_fmt yuv420p``: 4:2:0, the only chroma layout a High-profile decoder
-#   (a browser, a phone, a TV) is required to take. moviepy 2.1.2 appends its
-#   own ``-pix_fmt yuva420p`` AFTER these parameters and ffmpeg keeps the last
-#   one; libx264 has no yuva420p, so ffmpeg then picks yuv420p itself
-#   ("auto-selecting format 'yuv420p'", on the bundled 7.1 and on 8.0.1). Ours
-#   is passed all the same so the command says what the file is, and the file
-#   stays 4:2:0 if either side changes: ``tests/test_encode_settings.py`` reads
-#   the pixel format back from a real render.
+#   (a browser, a phone, a TV) is required to take. The deck render's graph
+#   ends in yuv420p as well, so the argument says what the file is; the
+#   real-binary tests read the pixel format back from a real render
+#   (``tests/test_encode_settings.py``, ``tests/test_deck_render.py``).
 #
 # Plus ``-movflags +faststart`` on every MP4 the app hands a user: the index
 # (``moov``) goes in front of the media (``mdat``), so a web upload or the
@@ -92,6 +94,19 @@ def fps_for_transition(slide_transition: str, transition_duration: float = 0.5) 
     if slide_transition and slide_transition != "none" and transition_duration > 0:
         return TRANSITION_FPS
     return STATIC_FPS
+
+
+def deck_fps(slide_transition: str, transition_duration: float = 0.5, animated: bool = False) -> int:
+    """The frame rate a deck renders at: ``fps_for_transition``'s, raised to
+    ``TRANSITION_FPS`` when any slide is ``animated`` (has a video clip).
+
+    The whole picture is sampled at one rate, so at ``STATIC_FPS`` an
+    animated slide played as two pictures a second - which is what every
+    static deck with an animated slide did before T1 (moviepy's writer
+    sampled the composite at the creator's fps)."""
+    if animated:
+        return TRANSITION_FPS
+    return fps_for_transition(slide_transition, transition_duration)
 
 
 def effective_pause(override, default: float) -> float:
@@ -248,35 +263,6 @@ def _active_onset_profile() -> OnsetProfile:
 
 class CancelledError(Exception):
     """Raised when video encoding is cancelled by the user."""
-
-
-class _EncodingProgressLogger(proglog.ProgressBarLogger):
-    """Custom proglog logger that forwards encoding progress to a callback.
-
-    Reports frame-level progress during write_videofile so the UI
-    can show a meaningful percentage instead of a static message.
-    Also supports cancellation via a callable check.
-    """
-
-    def __init__(
-        self,
-        callback: Optional[Callable[[int, int], None]] = None,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ):
-        super().__init__()
-        self._callback = callback
-        self._cancel_check = cancel_check
-        self._total_frames = 0
-
-    def bars_callback(self, bar, attr, value, old_value=None):
-        if bar == "frame_index" and attr == "total":
-            self._total_frames = value
-        if bar == "frame_index" and attr == "index":
-            if self._callback:
-                self._callback(value, self._total_frames)
-            # Check cancellation every frame
-            if self._cancel_check and self._cancel_check():
-                raise CancelledError("Video encoding cancelled")
 
 
 def trim_leading_silence_segment(audio, profile=None, chunk_ms: int = 5):
@@ -814,29 +800,51 @@ def _stop(proc) -> None:
         pass
 
 
-def _run_until_done(cmd, log: Path, timeout: float, cancelled) -> tuple[str, "subprocess.Popen"]:
+def _run_until_done(
+    cmd, log: Path, timeout: float, cancelled,
+    on_poll: Optional[Callable[[], None]] = None, cwd: Optional[Path] = None,
+) -> tuple[str, "subprocess.Popen"]:
     """Run one ffmpeg command with its stderr in ``log`` (a file, never a
     pipe nobody reads: a chatty run would fill it and stall), polling it
     every ``CUT_POLL_SECONDS`` until it exits, ``cancelled()`` answers True
     or ``timeout`` seconds pass - and killing it on either of the last two.
     Returns the outcome (``"finished"``, ``"cancelled"``, ``"timeout"``) and
     the process, whose ``returncode`` the caller reads when it finished. The
-    one loop the picture cut and the music mix share."""
+    one loop the picture cut, the music mix and the deck render share.
+
+    ``on_poll`` is called on every poll while ffmpeg runs (the deck render
+    reads its progress file there); ``cwd`` is the directory ffmpeg runs in
+    (the deck render's scratch, so its many stills are named short)."""
     with open(log, "w", encoding="utf-8", errors="replace") as err:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
-        deadline = _clock() + timeout
-        outcome = "finished"
-        while proc.poll() is None:
-            if cancelled():
-                outcome = "cancelled"
-                break
-            if _clock() >= deadline:
-                outcome = "timeout"
-                break
-            time.sleep(CUT_POLL_SECONDS)
-        if outcome != "finished":
-            _stop(proc)
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+            cwd=str(cwd) if cwd else None,
+        )
+        outcome = _wait_until_done(proc, timeout, cancelled, on_poll)
     return outcome, proc
+
+
+def _wait_until_done(proc, timeout: float, cancelled, on_poll: Optional[Callable[[], None]] = None) -> str:
+    """Poll a running ffmpeg every ``CUT_POLL_SECONDS`` until it exits,
+    ``cancelled()`` answers True or ``timeout`` seconds pass - killing it on
+    either of the last two - and return the outcome (``_run_until_done``'s
+    loop, for a process started elsewhere: the deck render's sound encode
+    runs beside its picture)."""
+    deadline = _clock() + timeout
+    outcome = "finished"
+    while proc.poll() is None:
+        if on_poll:
+            on_poll()
+        if cancelled():
+            outcome = "cancelled"
+            break
+        if _clock() >= deadline:
+            outcome = "timeout"
+            break
+        time.sleep(CUT_POLL_SECONDS)
+    if outcome != "finished":
+        _stop(proc)
+    return outcome
 
 
 def cut_picture(
@@ -1200,6 +1208,7 @@ def _build_master_audio(
     transition_sound_path=None,
     profile: Optional[OnsetProfile] = None,
     intro_offset: float = 0.0,
+    gaps_out: Optional[list] = None,
 ) -> tuple:
     """Build a single continuous audio track from all slide audio files.
 
@@ -1215,6 +1224,12 @@ def _build_master_audio(
     one: the card has no narration and sits before the first slide, so the
     track opens with that much silence - otherwise every slide's narration
     would play that much early.
+
+    ``gaps_out``, when given, gets the seconds of the gap the track left
+    after each slide appended to it (0 after the last), so the picture can
+    follow the track exactly: the pause, in whole milliseconds, or - after a
+    narrated slide, when there is a transition sound longer than the pause
+    - the sound's length (``create_video``).
 
     Returns:
         (master_audio_path, slide_durations) where slide_durations is a list
@@ -1257,6 +1272,8 @@ def _build_master_audio(
             master += silence_chunk
             if i < len(slide_clips) - 1 and pause_ms > 0:
                 master += pause_silence
+            if gaps_out is not None:
+                gaps_out.append(pause_ms / 1000.0 if i < len(slide_clips) - 1 and pause_ms > 0 else 0.0)
             continue
 
         has_any_audio = True
@@ -1275,14 +1292,19 @@ def _build_master_audio(
         master += slide_chunk
 
         # Transition gap between slides (except after last)
+        gap_ms = 0
         if i < len(slide_clips) - 1:
             if trans_sound and pause_ms > 0:
                 # Overlay transition sound on the pause
-                gap = AudioSegment.silent(duration=max(pause_ms, len(trans_sound)))
+                gap_ms = max(pause_ms, len(trans_sound))
+                gap = AudioSegment.silent(duration=gap_ms)
                 gap = gap.overlay(trans_sound)
-                master += gap[:max(pause_ms, len(trans_sound))]
+                master += gap[:gap_ms]
             elif pause_ms > 0:
+                gap_ms = pause_ms
                 master += pause_silence
+        if gaps_out is not None:
+            gaps_out.append(gap_ms / 1000.0)
 
     if not has_any_audio:
         return None, []
@@ -1295,38 +1317,6 @@ def _build_master_audio(
     return master_path, slide_info
 
 
-def _open_audio_with_retry(
-    path: str, retries: int = 4, delay: float = 0.3,
-    trim_silence: bool = True,
-    profile: Optional[OnsetProfile] = None,
-) -> AudioFileClip:
-    """Open an AudioFileClip with retries for antivirus file-lock delays.
-
-    Args:
-        trim_silence: If True, trim leading silence from TTS audio before loading.
-                      This prevents the fade-in artifact from TTS engines.
-        profile: The onset profile of the provider that made the clip; None
-                 falls back to the studio's configured provider.
-    """
-    if trim_silence:
-        path = _trim_leading_silence(path, profile=profile or _active_onset_profile())
-
-    last_exc: Exception = RuntimeError("Unknown error")
-    for attempt in range(retries):
-        try:
-            t0 = time.time()
-            clip = AudioFileClip(path)
-            logger.debug("Opened %s in %.2fs (attempt %d, duration=%.1fs)",
-                        Path(path).name, time.time() - t0, attempt+1, clip.duration)
-            return clip
-        except Exception as exc:
-            last_exc = exc
-            logger.debug("AudioFileClip attempt %d/%d failed for %s: %s", attempt+1, retries, path, exc)
-            if attempt < retries - 1:
-                time.sleep(delay * (attempt + 1))
-    raise last_exc
-
-
 @dataclass
 class SlideClipInfo:
     """Information for creating a slide clip."""
@@ -1336,6 +1326,445 @@ class SlideClipInfo:
     audio_path: Optional[Path] = None
     duration: Optional[float] = None  # If None, uses audio duration
     pause_after: Optional[float] = None  # Seconds of pause after this slide; None = the creator's transition_pause
+
+
+# ── the deck render: ffmpeg composes the picture (T1) ─────────────────────────
+#
+# Python prepares STILLS and the narration track, and never touches a frame:
+# each slide's image (linked into a scratch folder under a short name, or
+# flattened onto black once when it has transparency), the title cards and the
+# watermark, drawn once each with Pillow (``core.fonts.text_image``), and the
+# master track (``_build_master_audio``). ffmpeg builds and encodes every frame
+# from them. (moviepy used to build each frame in numpy and pipe raw RGB to
+# ffmpeg: any transition raised the whole deck to 24 fps and the watermark was
+# composited onto every frame - 42 minutes for the owner's 20-slide deck.)
+#
+# A still is decoded and scaled ONCE - ``scale`` with lanczos to the output
+# size, stretched exactly as ``ImageClip.resized(resolution)`` stretched it, no
+# letterbox - converted to 4:2:0 once and repeated in memory by ``loop``, so a
+# static stretch costs ffmpeg nothing but the encode. A transition's frames are
+# split off the same still and drawn in RGB by ffmpeg's own filters, on a clock
+# that follows the slide's EXACT start on the master track: ``fade`` (through
+# black or white), ``pad`` + ``crop`` (a slide-in) and a per-frame ``scale`` +
+# ``crop`` + ``fade`` (the zoom). A pause is a ``color`` source. The watermark
+# is one ``overlay`` over the whole picture, as moviepy composited it over the
+# whole video.
+#
+# **A transition's clock never goes below zero.** A slide whose start rounds
+# DOWN to a frame has its first frame a fraction of a frame BEFORE its exact
+# start, and ffmpeg's ``fade`` never fades at all when the first timestamp it
+# sees is negative (measured on the bundled 7.1 and on 8.0.1: every frame comes
+# out at full brightness - 8 of the owner's 19 fading slides cut in unfaded).
+# So every transition chain runs on the slide's own time PLUS
+# ``transition_clock_shift`` (a whole second), and the fade's start and the
+# slide and zoom expressions are moved by the same amount.
+#
+# **The watermark sits on the pixel it was placed at.** In 4:2:0 ``overlay``
+# snaps an odd x or y DOWN to the even pixel before it (its chroma is half the
+# size), which drew the owner's mark one row too high. The watermark's still is
+# padded with a clear row and column where its corner is odd
+# (``even_origin``), and overlaid at the even pixel before.
+#
+# **The picture is rendered in chunks** of at most ``chunk_limit`` segments
+# (a segment is a card, a slide or the pause after one), each chunk one ffmpeg
+# run that encodes its frames with the render's own settings
+# (``encode_settings``); the chunks are joined by the concat demuxer with a
+# stream copy, and the narration and music, encoded by one ffmpeg run of their
+# own beside the picture's, are muxed in with them. One filter graph over a
+# whole deck would be simpler and was measured first, but ffmpeg configures
+# and primes every chain of a graph before its first frame, so its memory grows
+# with the slides (on the owner's deck with a crossfade: 3.0 GB at 1080p and
+# 7.2 GB for 60 slides as one graph, 1.4 GB for either in chunks;
+# ``docs/porting/generation-options.md``, *As built - T1*). A chunk holds at
+# most ``chunk_limit`` segments' chains, so a 60-slide deck needs no more
+# memory than a 20-slide one. The join keeps every frame, in order, on the
+# bundled 7.1 and on 8.0.1, as long as no chunk is a single frame (on 8.0.1 a
+# one-frame chunk broke it), so a chunk is never shorter than
+# ``MIN_CHUNK_FRAMES`` unless it is the whole deck.
+
+# The zoom-in starts at this scale and settles at 1.0 over the transition.
+ZOOM_FROM = 1.3
+# The edge each slide transition brings the incoming slide in from. (Before T1
+# "slide-left" and "slide-right" drew the same - both came in from the left -
+# and "slide-up" and "slide-down" both came in from the top.)
+SLIDE_FROM = {"slide-left": "right", "slide-right": "left", "slide-up": "bottom", "slide-down": "top"}
+# The colour each fading transition passes through. "crossfade" is a fade
+# through the black pause, as it has always been, not a dissolve.
+FADE_COLOURS = {"fade-to-black": "black", "crossfade": "black", "fade-to-white": "white"}
+# A still's colour tags are dropped as it is read: a PNG says sRGB/BT.709,
+# moviepy's raw RGB said nothing, and the file has always gone out untagged.
+UNTAGGED = "setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown"
+# The chunk size: this many 1080p pictures' worth of segments at a time (8 at
+# 1080p, 18 at 720p, 4 at 4K - never fewer than 4), and never a chunk under
+# MIN_CHUNK_FRAMES frames unless it is the whole deck. Measured on the owner's
+# 20-slide deck with a crossfade and the watermark: ffmpeg's peak 1.37 GB at 8
+# and 1.8 GB at 16 for the same time (3.0 GB as one graph); at 4K, 4.0 GB at 4
+# (10.0 GB as one graph).
+CHUNK_PIXELS = 8 * 1920 * 1080
+MIN_CHUNK_SEGMENTS = 4
+MIN_CHUNK_FRAMES = 48
+# How long one ffmpeg run of the render may take: a base plus a budget per
+# frame, scaled by the picture's size against 1080p. Measured on the i9-9900K
+# at x264 ``medium`` on the owner's deck: about 0.003 s a 1080p frame with a
+# crossfade (0.0045 with the zoom) and 0.011 s a 4K frame, so this is eleven to
+# eighteen times headroom (plus the base) on that box.
+RENDER_BASE_SECONDS = 120.0
+RENDER_SECONDS_PER_FRAME = 0.05
+_PIXELS_1080P = 1920 * 1080
+# The positions of the watermark: (horizontal, vertical), as moviepy placed them.
+WATERMARK_POSITIONS = {
+    "top-left": ("left", "top"),
+    "top-right": ("right", "top"),
+    "bottom-left": ("left", "bottom"),
+    "bottom-right": ("right", "bottom"),
+    "center": ("center", "center"),
+}
+_VIDEO_STREAM = re.compile(r"Stream #\d+:\d+\S*: Video: ")
+_PROGRESS_FRAME = re.compile(rb"^frame=\s*(\d+)", re.MULTILINE)
+
+
+def round_frames(seconds: float, fps: float) -> int:
+    """``seconds × fps`` rounded half up: the frame a moment falls on."""
+    return int(math.floor(float(seconds) * fps + 0.5))
+
+
+def transition_clock_shift(fps: float) -> float:
+    """The seconds added to a slide's own time on every transition chain, so
+    no transition filter ever sees a negative timestamp (see "A transition's
+    clock never goes below zero" above): a whole number of seconds, at least
+    one frame - a slide's first frame is at most half a frame before its
+    exact start, so the clock starts at half a frame or later."""
+    return float(max(1, math.ceil(1.0 / fps)))
+
+
+def even_origin(layer: Image.Image, x: int, y: int) -> Tuple[Image.Image, int, int]:
+    """``layer`` and the corner to overlay it at so that it lands on exactly
+    (``x``, ``y``) in a 4:2:0 picture: ``overlay`` snaps an odd coordinate
+    down to the even one before it, so where a coordinate is odd the layer
+    gains one clear column (or row) on that side and is placed one pixel
+    earlier. An even corner is returned as it is."""
+    dx, dy = x % 2, y % 2
+    if not dx and not dy:
+        return layer, x, y
+    padded = Image.new("RGBA", (layer.width + dx, layer.height + dy), (0, 0, 0, 0))
+    padded.paste(layer, (dx, dy))
+    return padded, x - dx, y - dy
+
+
+def frame_boundaries(durations, fps: float) -> List[int]:
+    """Where each segment starts, in frames, and where the last one ends.
+
+    Boundary k is the CUMULATIVE time ``t_k`` rounded to a frame - never a sum
+    of per-segment roundings - so no boundary is more than half a frame from
+    the moment the master track puts it at, however many segments a deck has.
+    (Rounded segment by segment, a 60-slide deck could drift by 30 frames.)
+
+    The LAST boundary rounds UP: the picture never ends before the track
+    does, so the narration's last words are never cut to the last frame (at
+    2 fps, rounding to the nearest frame dropped up to a quarter of a second
+    of them). The picture is then at most one frame longer than the track,
+    over silence."""
+    bounds, elapsed = [0], 0.0
+    for seconds in durations:
+        elapsed += float(seconds)
+        bounds.append(round_frames(elapsed, fps))
+    if len(bounds) > 1:
+        # A millionth of a frame of slack: a total that is a whole number of
+        # frames but for float noise must not gain a frame.
+        bounds[-1] = max(bounds[-2], int(math.ceil(elapsed * fps - 1e-6)))
+    return bounds
+
+
+def render_timeout(frames: int, size: Tuple[int, int]) -> float:
+    """How long one ffmpeg run of the deck render may take, for ``frames``
+    frames of ``size`` (see :data:`RENDER_SECONDS_PER_FRAME`)."""
+    scale = max(1.0, (size[0] * size[1]) / _PIXELS_1080P)
+    return RENDER_BASE_SECONDS + RENDER_SECONDS_PER_FRAME * frames * scale
+
+
+@dataclass
+class DeckSegment:
+    """One stretch of the deck's picture, in the master track's seconds.
+
+    ``image`` / ``video`` are the slide's picture - its source path as
+    planned, the still's name in the scratch folder once prepared; a segment
+    with neither (a pause) is a ``color`` source. ``card`` is a title card's
+    (title, subtitle), drawn into a still when the stills are prepared."""
+    seconds: float
+    kind: str = "slide"            # "slide", "pause" or "card"
+    image: Optional[object] = None
+    video: Optional[object] = None
+    color: str = "black"
+    card: Optional[Tuple[str, str]] = None
+    effect_in: str = ""            # "fade", "slide-from-<edge>" or "zoom"
+    effect_out: str = ""           # "fade"
+    effect_seconds: float = 0.0
+    effect_color: str = "black"
+
+
+def _transition_filter(effect: str, opening: bool, seg: DeckSegment, size: Tuple[int, int], shift: float) -> str:
+    """The ffmpeg filters that draw one transition on a slide's RGB frames,
+    whose timestamps are the slide's own seconds plus ``shift``
+    (``transition_clock_shift``: ``shift`` = the slide's start on the master
+    track), so that no filter here sees a negative timestamp. ``p`` runs
+    from 0 to 1 over the transition, as moviepy's ``t / fade_dur`` did; a
+    frame before the slide's exact start is at ``p`` = 0."""
+    w, h = size
+    fd = seg.effect_seconds
+    p = f"clip((t-{shift:g})/{fd:.6f},0,1)"
+    if effect == "fade":
+        colour = "" if seg.effect_color == "black" else f":color={seg.effect_color}"
+        if opening:
+            return f"fade=t=in:st={shift:.6f}:d={fd:.6f}{colour}"
+        return f"fade=t=out:st={seg.seconds - fd + shift:.6f}:d={fd:.6f}{colour}"
+    if effect.startswith("slide-from-"):
+        # The incoming slide is offset by trunc(size × (1 - p)) pixels, over
+        # black: padded with black on the side it moves away from, then cut
+        # back to the frame with a moving window.
+        edge = effect[len("slide-from-"):]
+        if edge in ("left", "right"):
+            off = f"trunc({w}*(1-{p}))"
+            if edge == "left":   # enters from the left edge, moving right
+                return f"pad=w={2 * w}:h={h}:x=0:y=0:color=black,crop=w={w}:h={h}:x='{off}':y=0:exact=1"
+            return f"pad=w={2 * w}:h={h}:x={w}:y=0:color=black,crop=w={w}:h={h}:x='{w}-{off}':y=0:exact=1"
+        off = f"trunc({h}*(1-{p}))"
+        if edge == "top":        # enters from the top edge, moving down
+            return f"pad=w={w}:h={2 * h}:x=0:y=0:color=black,crop=w={w}:h={h}:x=0:y='{off}':exact=1"
+        return f"pad=w={w}:h={2 * h}:x=0:y={h}:color=black,crop=w={w}:h={h}:x=0:y='{h}-{off}':exact=1"
+    if effect == "zoom":
+        # moviepy's zoom: the frame resized to (int(w·s), int(h·s)) with
+        # lanczos, s from 1.3 to 1.0, the centre cut out, faded up from
+        # black. ``crop`` is told the size it cuts from by the same
+        # expression: its own ``iw`` keeps the first frame's width when
+        # ``scale`` changes size frame by frame.
+        s = f"(1+{ZOOM_FROM - 1:g}*(1-{p}))"
+        zw, zh = f"trunc({w}*{s})", f"trunc({h}*{s})"
+        return (f"scale=w='{zw}':h='{zh}':eval=frame:flags=lanczos,"
+                f"crop=w={w}:h={h}:x='floor(({zw}-{w})/2)':y='floor(({zh}-{h})/2)':exact=1,"
+                f"fade=t=in:st={shift:.6f}:d={fd:.6f}")
+    raise ValueError(f"Unknown transition effect {effect!r}")
+
+
+def _segment_parts(seg: DeckSegment, frames: int, lead: float, fps: float) -> List[Tuple[int, int, str]]:
+    """A still slide's frames ``[start, end)`` split by what they show: the
+    opening transition ("in"), the slide as it is (""), the closing one
+    ("out"). Frame j is at ``(j + lead) / fps`` of the slide's own time, and
+    a frame belongs to a transition exactly when moviepy would have drawn the
+    transition at that moment (``t < fade_dur``, ``t >= duration - fade_dur``)."""
+    in_end = 0
+    if seg.effect_in:
+        in_end = min(frames, max(0, math.ceil(seg.effect_seconds * fps - lead - 1e-6)))
+    out_start = frames
+    if seg.effect_out:
+        out_start = min(frames, max(in_end, math.ceil((seg.seconds - seg.effect_seconds) * fps - lead - 1e-6)))
+    parts = []
+    if in_end:
+        parts.append((0, in_end, "in"))
+    if out_start > in_end:
+        parts.append((in_end, out_start, ""))
+    if frames > out_start:
+        parts.append((out_start, frames, "out"))
+    return parts
+
+
+def chunk_limit(size: Tuple[int, int]) -> int:
+    """At most this many segments in one ffmpeg run of the render."""
+    return max(MIN_CHUNK_SEGMENTS, CHUNK_PIXELS // max(1, size[0] * size[1]))
+
+
+def deck_chunks(bounds: List[int], limit: int, min_frames: Optional[int] = None) -> List[Tuple[int, int]]:
+    """The segments ``[first, last)`` of each chunk: ``limit`` at a time,
+    longer while a chunk is under ``min_frames`` frames (default
+    :data:`MIN_CHUNK_FRAMES`), and a short tail folded into the chunk before
+    it - so no chunk but a whole deck is shorter than ``min_frames``, and none
+    holds more than ``limit`` segments plus the few frames' worth it takes to
+    reach that length."""
+    if min_frames is None:
+        min_frames = MIN_CHUNK_FRAMES
+    count = len(bounds) - 1
+    chunks, first = [], 0
+    for idx in range(count):
+        if idx + 1 - first >= limit and bounds[idx + 1] - bounds[first] >= min_frames:
+            chunks.append((first, idx + 1))
+            first = idx + 1
+    if first < count:
+        if chunks and bounds[count] - bounds[first] < min_frames:
+            chunks[-1] = (chunks[-1][0], count)
+        else:
+            chunks.append((first, count))
+    return chunks
+
+
+def deck_chunk_graph(
+    segments: List[DeckSegment], bounds: List[int], starts: List[float], first: int, last: int,
+    fps: float, size: Tuple[int, int], watermark: Optional[Tuple[str, int, int]] = None,
+) -> Tuple[List[str], str, int]:
+    """The ffmpeg inputs (argv), the filter graph (output ``[v]``) and the
+    number of inputs for ``segments[first:last]``: every segment exactly
+    ``bounds[k+1] - bounds[k]`` frames, the chunk ``bounds[last] -
+    bounds[first]``. Inputs are the stills' and clips' names in the scratch
+    folder ffmpeg runs in; ``watermark`` is (name, x, y)."""
+    w, h = size
+    inputs: List[str] = []
+    chains: List[str] = []
+    labels: List[str] = []
+    count = 0
+    # Every transition chain's clock is the slide's own time plus this, so it
+    # never starts below zero (ffmpeg's fade never fades from a negative one).
+    shift = transition_clock_shift(fps)
+    for idx in range(first, last):
+        seg = segments[idx]
+        frames = bounds[idx + 1] - bounds[idx]
+        if frames <= 0:
+            continue
+        # Frame j of the segment is at (j + lead) / fps of the segment's own
+        # time: the frame grid against the slide's exact start, within half a
+        # frame - so ``lead`` is NEGATIVE whenever the start rounds down.
+        lead = bounds[idx] - starts[idx] * fps
+        label = f"s{idx}"
+        if seg.video:
+            # An animated slide: looped for as long as its span when it is
+            # shorter, cut when it is longer, sampled at the render's rate.
+            inputs += ["-stream_loop", "-1", "-i", str(seg.video)]
+            chain = f"[{count}:v]{UNTAGGED},fps={fps},scale={w}:{h}:flags=lanczos,setsar=1,trim=end_frame={frames}"
+            count += 1
+            effects = [_transition_filter(effect, opening, seg, size, shift)
+                       for effect, opening in ((seg.effect_in, True), (seg.effect_out, False)) if effect]
+            if effects:
+                chain += (f",format=rgb24,settb=AVTB,setpts=(N+{lead:.6f})/{fps}/TB+{shift:g}/TB,"
+                          + ",".join(effects))
+            chains.append(chain + f",format=yuv420p,setpts=PTS-STARTPTS[{label}]")
+            labels.append(f"[{label}]")
+        elif seg.image:
+            inputs += ["-i", str(seg.image)]
+            parts = _segment_parts(seg, frames, lead, fps)
+            names = [f"[{label}p{part}]" for part in range(len(parts))]
+            chains.append(f"[{count}:v]{UNTAGGED},scale={w}:{h}:flags=lanczos,format=rgb24,setsar=1"
+                          + (f",split={len(parts)}" if len(parts) > 1 else "") + "".join(names))
+            count += 1
+            for part, (start, end, where) in enumerate(parts):
+                out = f"[{label}x{part}]"
+                if where:
+                    effect = seg.effect_in if where == "in" else seg.effect_out
+                    chains.append(
+                        f"{names[part]}loop=loop={end - start - 1}:size=1:start=0,settb=AVTB,"
+                        f"setpts=(N+{start + lead:.6f})/{fps}/TB+{shift:g}/TB,"
+                        f"{_transition_filter(effect, where == 'in', seg, size, shift)},"
+                        f"format=yuv420p,setpts=PTS-STARTPTS{out}"
+                    )
+                else:
+                    chains.append(f"{names[part]}format=yuv420p,loop=loop={end - start - 1}:size=1:start=0{out}")
+                labels.append(out)
+        else:
+            chains.append(f"color=c={seg.color}:s={w}x{h}:r={fps},setsar=1,format=yuv420p,"
+                          f"trim=end_frame={frames}[{label}]")
+            labels.append(f"[{label}]")
+    # Every frame renumbered on one grid: the segments' own timestamps only
+    # place their transitions.
+    tail = "".join(labels) + f"concat=n={len(labels)}:v=1:a=0,settb=1/{fps},setpts=N"
+    if watermark:
+        name, x, y = watermark
+        inputs += ["-i", name]
+        chains.append(f"[{count}:v]{UNTAGGED}[wm]")
+        count += 1
+        chains.append(tail + "[cat]")
+        chains.append(f"[cat][wm]overlay=x={x}:y={y},format=yuv420p,{UNTAGGED}[v]")
+    else:
+        chains.append(tail + f",format=yuv420p,{UNTAGGED}[v]")
+    return inputs, ";\n".join(chains), count
+
+
+def deck_audio_graph(
+    voice: Optional[int], music: List[int], seconds: float, volume: float, fade: float, loop_playlist: bool,
+) -> str:
+    """The deck's sound as one ffmpeg graph, output ``[a]``: the master
+    narration track (input ``voice``) and the background music playlist
+    (inputs ``music``, in order), ``seconds`` long.
+
+    The narration is up-mixed at UNITY (:data:`UPMIX_STEREO`, the re-voice
+    mux's own filter - never the -3 dB rematrix moviepy's reader applied),
+    resampled to 48 kHz and padded to the picture's length with a BOUNDED
+    ``apad`` (an unbounded one never finishes on the bundled 7.1). The music
+    is what moviepy's ``_apply_background_music`` made it: the tracks one
+    after another, looped as a whole to the video (``loop_playlist``, or the
+    single track's own ``-stream_loop``), at ``volume`` (a linear factor),
+    one fade in at the start and one out at the end when the video is longer
+    than both, never ducked, and summed under the voice with
+    ``normalize=0`` so the voice keeps its level."""
+    chains = []
+    if voice is not None:
+        chains.append(f"[{voice}:a]{UPMIX_STEREO},{RESAMPLE_48K},"
+                      f"apad=whole_dur={seconds:.6f},atrim=end={seconds:.6f}[voice]")
+    if music:
+        for i, k in enumerate(music):
+            chains.append(f"[{k}:a]{UPMIX_STEREO},{RESAMPLE_48K}[mu{i}]")
+        steps = []
+        if len(music) > 1:
+            chains.append("".join(f"[mu{i}]" for i in range(len(music))) + f"concat=n={len(music)}:v=0:a=1[playlist]")
+            source = "[playlist]"
+            if loop_playlist:
+                # The whole playlist again from its first track: held in
+                # memory once, as 16-bit samples (only when it is shorter
+                # than the video, so never more than the video's length).
+                steps += ["aformat=sample_fmts=s16", "aloop=loop=-1:size=2147483647"]
+        else:
+            source = "[mu0]"
+        steps += [f"atrim=end={seconds:.6f}", f"volume={volume:.6f}"]
+        if fade > 0 and seconds > 2 * fade:
+            steps += [f"afade=t=in:st=0:d={fade:.6f}", f"afade=t=out:st={seconds - fade:.6f}:d={fade:.6f}"]
+        chains.append(source + ",".join(steps) + "[bed]")
+    if voice is not None and music:
+        chains.append("[voice][bed]amix=inputs=2:duration=first:normalize=0[a]")
+    elif voice is not None:
+        chains[-1] = chains[-1][: -len("[voice]")] + "[a]"
+    elif music:
+        chains[-1] = chains[-1][: -len("[bed]")] + "[a]"
+    else:
+        raise ValueError("A deck's sound needs a narration track or music.")
+    return ";\n".join(chains)
+
+
+def _progress_frame(path: Path) -> Optional[int]:
+    """The last ``frame=`` ffmpeg's ``-progress`` wrote to ``path``, or None."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))
+            found = _PROGRESS_FRAME.findall(fh.read())
+    except OSError:
+        return None
+    return int(found[-1]) if found else None
+
+
+def _has_video_stream(path) -> bool:
+    """Whether ffmpeg finds a video stream in ``path`` (its own header)."""
+    return bool(_VIDEO_STREAM.search(_ffmpeg_header(path)))
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """``dst`` as a hard link to ``src``, or a copy where a link cannot be made."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copyfile(src, dst)
+
+
+def _compose(background: Image.Image, layer: Image.Image, pos: Tuple[int, int]) -> Image.Image:
+    """``layer`` (RGBA) over ``background`` (RGBA) at ``pos`` as moviepy 2.1.2
+    composited a clip with a mask (``VideoClip.compose_on``): the alpha as its
+    mask maths leaves it (``(a / 255) * 255`` truncated), pasted onto a clear
+    canvas and alpha-composited by Pillow."""
+    rgba = np.array(layer.convert("RGBA"))
+    rgba[:, :, 3] = (1.0 * rgba[:, :, 3] / 255 * 255).astype("uint8")
+    canvas = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    canvas.paste(Image.fromarray(rgba), pos)
+    return Image.alpha_composite(background, canvas)
+
+
+def _place(axis: str, outer: int, inner: int) -> int:
+    """moviepy's named position on one axis, truncated as it truncated it."""
+    return int({"left": 0, "top": 0, "center": (outer - inner) / 2, "right": outer - inner,
+                "bottom": outer - inner}[axis])
 
 
 class VideoCreator:
@@ -1405,7 +1834,7 @@ class VideoCreator:
         # (master track, chapters, the caller's subtitles) starts this much later.
         self.intro_offset = float(intro_duration) if intro_text else 0.0
         # The font FILE the title cards and the text watermark are drawn with,
-        # resolved once per render (moviepy/Pillow refuse a family name such as
+        # resolved once per render (Pillow refuses a family name such as
         # "Arial"): the configured title_font, else the host's own. None = no
         # font file on this host; the text is then drawn with Pillow's built-in
         # font rather than dropped.
@@ -1414,354 +1843,186 @@ class VideoCreator:
             logger.info("Text font: %s", self.font)
         else:
             logger.warning("No font file found on this host - title cards and the watermark use Pillow's built-in font")
-        # Cache the transition audio so it's decoded once, not per slide gap
-        self._transition_audio: Optional[AudioFileClip] = None
-        if transition_sound_path and transition_sound_path.exists():
-            self._transition_audio = AudioFileClip(str(transition_sound_path))
+        # At most this many segments go through one ffmpeg run (see "the deck
+        # render" above); the measurements set it, the tests move it.
+        self.chunk_limit = chunk_limit(resolution)
 
-    def create_slide_clip(
-        self,
-        clip_info: SlideClipInfo,
-        default_duration: float = 5.0
-    ) -> Optional[any]:
-        """Create a video clip for a single slide."""
-        audio_clip = None
-        visual_clip = None
-        try:
-            duration = clip_info.duration or default_duration
+    # ── the timeline ──────────────────────────────────────────────────────
 
-            # If we have audio, use its duration
-            if clip_info.audio_path and clip_info.audio_path.exists():
-                audio_clip = _open_audio_with_retry(str(clip_info.audio_path), profile=self.onset_profile)
-                duration = audio_clip.duration
+    def _effects(self, index: int, count: int, seconds: float) -> Tuple[str, str, float, str]:
+        """The transition slide ``index`` of ``count`` carries: (in, out,
+        seconds, colour). None on the first slide's opening or the last's
+        close, and none at all for "none" or a zero duration - the gate
+        ``fps_for_transition`` uses. ``fade_dur`` is ``min(duration, slide /
+        3)``, as it always was."""
+        kind = self.slide_transition
+        if not kind or kind == "none" or self.transition_duration <= 0:
+            return "", "", 0.0, "black"
+        fade = min(float(self.transition_duration), seconds / 3)
+        if fade <= 0:
+            return "", "", 0.0, "black"
+        first, last = index == 0, index == count - 1
+        if kind in FADE_COLOURS:
+            return ("" if first else "fade"), ("" if last else "fade"), fade, FADE_COLOURS[kind]
+        if kind in SLIDE_FROM:
+            return ("" if first else f"slide-from-{SLIDE_FROM[kind]}"), "", fade, "black"
+        if kind == "zoom-in":
+            return ("" if first else "zoom"), "", fade, "black"
+        return "", "", 0.0, "black"
 
-            # Create visual clip
-            if clip_info.video_path and clip_info.video_path.exists():
-                visual_clip = VideoFileClip(str(clip_info.video_path))
-                visual_clip = visual_clip.resized(self.resolution)
-                if audio_clip and visual_clip.duration != duration:
-                    if visual_clip.duration < duration:
-                        visual_clip = visual_clip.looped(duration=duration)
-                    else:
-                        visual_clip = visual_clip.subclipped(0, duration)
-            elif clip_info.image_path and clip_info.image_path.exists():
-                visual_clip = ImageClip(str(clip_info.image_path), duration=duration)
-                visual_clip = visual_clip.resized(self.resolution)
+    def deck_segments(
+        self, slide_clips: List[SlideClipInfo], slide_durations: List[float], gaps: Optional[List[float]] = None,
+    ) -> List[DeckSegment]:
+        """The picture's timeline, every length taken from the master track:
+        the intro card (the master's leading silence, in whole milliseconds),
+        each slide for its span on the track (``slide_durations``; a slide's
+        own ``duration``, or 5 s, when there is no track), the gap the track
+        left after it (``gaps``, as ``_build_master_audio`` reports them; the
+        pause when there is no track), and the outro card. A pause is white
+        for "fade-to-white" and black otherwise."""
+        segments: List[DeckSegment] = []
+        if self.intro_text:
+            intro_ms = int(round(max(0.0, self.intro_offset) * 1000))
+            segments.append(DeckSegment(intro_ms / 1000.0, kind="card", card=(self.intro_text, self.intro_subtitle)))
+        count = len(slide_clips)
+        followed = gaps is not None and len(gaps) == count
+        pause_colour = "white" if self.slide_transition == "fade-to-white" else "black"
+        for i, info in enumerate(slide_clips):
+            if slide_durations and i < len(slide_durations):
+                seconds = float(slide_durations[i])
             else:
-                visual_clip = ColorClip(
-                    size=self.resolution, color=(0, 0, 0), duration=duration
-                )
-
-            # Animated slides keep their native fps; static slides use low fps
-            if clip_info.video_path and clip_info.video_path.exists():
-                pass  # keep VideoFileClip's native fps
-            else:
-                visual_clip = visual_clip.with_fps(self.fps)
-
-            if audio_clip:
-                # Delay narration start so video plays first
-                delay = self.voice_start_delay
-                if delay > 0:
-                    audio_clip = audio_clip.with_start(delay)
-                    duration += delay
-                    visual_clip = visual_clip.with_duration(duration)
-                    combined_audio = CompositeAudioClip([audio_clip])
-                    combined_audio = combined_audio.with_duration(duration)
-                    visual_clip = visual_clip.with_audio(combined_audio)
+                seconds = float(info.duration or 5.0)
+            effect_in, effect_out, fade, colour = self._effects(i, count, seconds)
+            segments.append(DeckSegment(
+                seconds, kind="slide", image=info.image_path, video=info.video_path,
+                effect_in=effect_in, effect_out=effect_out, effect_seconds=fade, effect_color=colour,
+            ))
+            if i < count - 1:
+                if followed:
+                    gap = float(gaps[i])
                 else:
-                    visual_clip = visual_clip.with_audio(audio_clip)
+                    gap = int(pause_after(info, self.transition_pause) * 1000) / 1000.0
+                if gap > 0:
+                    segments.append(DeckSegment(gap, kind="pause", color=pause_colour))
+        if self.outro_text:
+            segments.append(DeckSegment(float(self.outro_duration), kind="card", card=(self.outro_text, "")))
+        return segments
 
-            return visual_clip
+    # ── the stills ────────────────────────────────────────────────────────
 
-        except Exception as e:
-            # Close any opened clips to prevent resource leaks
-            if audio_clip:
-                try:
-                    audio_clip.close()
-                except Exception:
-                    pass
-            if visual_clip:
-                try:
-                    visual_clip.close()
-                except Exception:
-                    pass
-            logger.error("Error creating slide clip: %s", e)
-            return None
-
-    def create_transition_clip(self, pause: Optional[float] = None) -> any:
-        """Create a transition/pause clip between slides, with optional sound.
-
-        ``pause`` is the gap after the slide just shown (a slide's own
-        override); None = the creator's ``transition_pause``.
-        """
-        pause = self.transition_pause if pause is None else float(pause)
-        bg_color = (255, 255, 255) if self.slide_transition == "fade-to-white" else (0, 0, 0)
-        if self._transition_audio:
-            duration = max(pause, self._transition_audio.duration)
-            clip = ColorClip(
-                size=self.resolution, color=bg_color, duration=duration,
-            ).with_fps(self.fps).with_audio(self._transition_audio)
-            return clip
-
-        return ColorClip(
-            size=self.resolution, color=bg_color, duration=pause
-        ).with_fps(self.fps)
-
-    def _apply_transition_effect(self, clip, slide_index: int, total_slides: int):
-        """Apply visual transition effects to a slide clip.
-
-        Supports: fade-to-black, fade-to-white, crossfade, slide-left,
-        slide-right, slide-up, slide-down, zoom-in.
-        """
-        from moviepy.video.fx import FadeIn, FadeOut
-
-        fade_dur = min(self.transition_duration, clip.duration / 3)
-        is_first = (slide_index == 0)
-        is_last = (slide_index == total_slides - 1)
+    def _title_card(self, text: str, subtitle: str = "") -> Image.Image:
+        """A title card as a still: black, the title 48 px white, centred - at
+        40 % of the height with a subtitle under it at 55 %, 28 px ``#cccccc``
+        - wrapped to the width less 200 px, composited as moviepy composited
+        it. Drawn by Pillow (``core.fonts.text_image``), with the resolved
+        font or Pillow's built-in one; a card whose text cannot be drawn is
+        left blank rather than failing the render."""
         w, h = self.resolution
-
-        if self.slide_transition == "fade-to-black":
-            effects = []
-            if not is_first:
-                effects.append(FadeIn(fade_dur))
-            if not is_last:
-                effects.append(FadeOut(fade_dur))
-            if effects:
-                clip = clip.with_effects(effects)
-
-        elif self.slide_transition == "fade-to-white":
-            # Fade from/to a white frame
-            white = ColorClip(size=self.resolution, color=(255, 255, 255))
-            layers = []
-            if not is_first:
-                white_in = white.with_duration(fade_dur).with_fps(self.fps)
-                white_in = white_in.with_effects([FadeOut(fade_dur)])
-                layers.append(white_in)
-            clip_layers = [clip]
-            if not is_last:
-                white_out = (white.with_duration(fade_dur)
-                             .with_fps(self.fps)
-                             .with_effects([FadeIn(fade_dur)])
-                             .with_start(clip.duration - fade_dur))
-                clip_layers.append(white_out)
-            if layers:
-                clip_layers = layers + clip_layers
-            if len(clip_layers) > 1:
-                clip = CompositeVideoClip(clip_layers, size=self.resolution).with_duration(clip.duration)
-                if clip_layers[0] != clip:
-                    clip = clip.with_fps(self.fps)
-
-        elif self.slide_transition == "crossfade":
-            # Simple opacity fade in/out — crossfade effect when combined with pause clips
-            effects = []
-            if not is_first:
-                effects.append(FadeIn(fade_dur))
-            if not is_last:
-                effects.append(FadeOut(fade_dur))
-            if effects:
-                clip = clip.with_effects(effects)
-
-        elif self.slide_transition in ("slide-left", "slide-right"):
-            direction = -1 if self.slide_transition == "slide-left" else 1
-
-            def _slide_in(get_frame, t):
-                if t < fade_dur and not is_first:
-                    progress = t / fade_dur
-                    offset = int(w * (1 - progress) * direction)
-                    frame = get_frame(t)
-                    canvas = np.zeros_like(frame)
-                    if direction == -1:  # slide from right
-                        src_start = max(0, -offset)
-                        dst_start = max(0, offset)
-                        visible = w - abs(offset)
-                        if visible > 0:
-                            canvas[:, dst_start:dst_start + visible] = frame[:, src_start:src_start + visible]
-                    else:  # slide from left
-                        src_start = max(0, offset)
-                        dst_start = max(0, -offset)
-                        visible = w - abs(offset)
-                        if visible > 0:
-                            canvas[:, dst_start:dst_start + visible] = frame[:, src_start:src_start + visible]
-                    return canvas
-                return get_frame(t)
-
-            # One transform (with the mask, when there is one): applying it a
-            # second time shifted the frame by twice the offset.
-            clip = clip.transform(_slide_in, apply_to="mask" if clip.mask else None)
-
-        elif self.slide_transition in ("slide-up", "slide-down"):
-            direction = -1 if self.slide_transition == "slide-up" else 1
-
-            def _slide_v(get_frame, t):
-                if t < fade_dur and not is_first:
-                    progress = t / fade_dur
-                    offset = int(h * (1 - progress) * direction)
-                    frame = get_frame(t)
-                    canvas = np.zeros_like(frame)
-                    if direction == -1:  # slide from bottom
-                        src_start = max(0, -offset)
-                        dst_start = max(0, offset)
-                        visible = h - abs(offset)
-                        if visible > 0:
-                            canvas[dst_start:dst_start + visible, :] = frame[src_start:src_start + visible, :]
-                    else:  # slide from top
-                        src_start = max(0, offset)
-                        dst_start = max(0, -offset)
-                        visible = h - abs(offset)
-                        if visible > 0:
-                            canvas[dst_start:dst_start + visible, :] = frame[src_start:src_start + visible, :]
-                    return canvas
-                return get_frame(t)
-
-            clip = clip.transform(_slide_v, apply_to="mask" if clip.mask else None)
-
-        elif self.slide_transition == "zoom-in":
-            def _zoom(get_frame, t):
-                if t < fade_dur and not is_first:
-                    progress = t / fade_dur
-                    # Zoom from 1.3x down to 1.0x with fade in
-                    scale = 1.0 + 0.3 * (1 - progress)
-                    alpha = progress
-                    frame = get_frame(t)
-                    from PIL import Image
-                    img = Image.fromarray(frame)
-                    new_w, new_h = int(w * scale), int(h * scale)
-                    img = img.resize((new_w, new_h), Image.LANCZOS)
-                    # Center crop
-                    left = (new_w - w) // 2
-                    top = (new_h - h) // 2
-                    img = img.crop((left, top, left + w, top + h))
-                    result = np.array(img).astype(np.float64) * alpha
-                    return result.astype(np.uint8)
-                return get_frame(t)
-
-            clip = clip.transform(_zoom)
-
-        return clip
-
-    def _apply_background_music(self, video):
-        """Mix background music across the entire video.
-
-        Supports multiple tracks: they play in sequence (track 1 then track 2, etc.).
-        If the combined playlist is shorter than the video, the whole sequence loops.
-        A single fade in at the start and fade out at the end is applied.
-        Music plays at a static lower level under the narration (no ducking).
-        """
-        from moviepy.audio.fx.AudioFadeIn import AudioFadeIn
-        from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
-        from moviepy.audio.fx.AudioLoop import AudioLoop
-        from moviepy import concatenate_audioclips
-
+        card = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+        max_width = w - 200
         try:
-            video_duration = video.duration
-
-            # Load all tracks and concatenate into one sequence
-            track_clips = []
-            for p in self.background_music_paths:
-                try:
-                    clip = AudioFileClip(str(p))
-                    track_clips.append(clip)
-                    logger.info("Loaded track: %s (%.1fs)", p.name, clip.duration)
-                except Exception as e:
-                    logger.error("Failed to load %s: %s", p.name, e)
-
-            if not track_clips:
-                return video
-
-            if len(track_clips) == 1:
-                music = track_clips[0]
-            else:
-                music = concatenate_audioclips(track_clips)
-                logger.info("Playlist total: %.1fs across %d tracks", music.duration, len(track_clips))
-
-            # Loop the whole playlist to cover the video duration
-            if music.duration < video_duration:
-                music = music.with_effects([AudioLoop(duration=video_duration)])
-            else:
-                music = music.subclipped(0, video_duration)
-
-            # Apply volume (linear 0-1 scale as direct multiplier)
-            volume_factor = max(0.0, self.music_volume)
-            music = music.with_volume_scaled(volume_factor)
-
-            # Single fade in at start, single fade out at end
-            fade_s = self.music_fade_duration
-            if fade_s > 0 and video_duration > fade_s * 2:
-                music = music.with_effects([
-                    AudioFadeIn(fade_s),
-                    AudioFadeOut(fade_s),
-                ])
-
-            # Composite: narration + music
-            if video.audio:
-                combined = CompositeAudioClip([video.audio, music])
-                return video.with_audio(combined)
-            else:
-                return video.with_audio(music)
-        except Exception as e:
-            logger.error("Error applying background music: %s", e)
-            return video
-
-    def _text_clip(self, text: str, font_size: int, color: str, duration: float, max_width: Optional[int] = None):
-        """A transparent clip of ``text`` drawn by Pillow (``core.fonts.text_image``)
-        with the resolved font file, or Pillow's built-in font when this host
-        has none - text is never dropped silently. Wrapped to ``max_width``
-        when given. Not moviepy's TextClip: in moviepy 2.1.2 it allocates an
-        image shorter than the text it draws, so every letter loses its bottom
-        rows and descenders (g, y, p) are cut flat."""
-        image = text_image(text, font_size, color, font=self.font, max_width=max_width)
-        return ImageClip(np.array(image), duration=duration)
-
-    def _apply_watermark(self, video):
-        """Overlay a text or image watermark on the video."""
-        from moviepy import CompositeVideoClip
-
-        try:
-            watermark = None
-            if self.watermark_text:
-                watermark = self._text_clip(
-                    self.watermark_text, 24, "white", video.duration,
-                ).with_opacity(self.watermark_opacity)
-            elif self.watermark_image and Path(self.watermark_image).exists():
-                watermark = ImageClip(str(self.watermark_image), duration=video.duration)
-                # Scale watermark to ~10% of video width
-                wm_width = int(self.resolution[0] * 0.10)
-                watermark = watermark.resized(width=wm_width).with_opacity(self.watermark_opacity)
-
-            if watermark is None:
-                return video
-
-            # Position mapping
-            pos_map = {
-                "top-left": ("left", "top"),
-                "top-right": ("right", "top"),
-                "bottom-left": ("left", "bottom"),
-                "bottom-right": ("right", "bottom"),
-                "center": ("center", "center"),
-            }
-            pos = pos_map.get(self.watermark_position, ("right", "bottom"))
-            watermark = watermark.with_position(pos)
-            return CompositeVideoClip([video, watermark])
-        except Exception as e:
-            logger.warning("The watermark could not be drawn (%s); the video has none", e)
-            return video
-
-    def _create_title_card(self, text: str, subtitle: str = "", duration: float = 3.0):
-        """Create a title card clip with centered text on black background."""
-        from moviepy import CompositeVideoClip
-        bg = ColorClip(size=self.resolution, color=(0, 0, 0), duration=duration).with_fps(self.fps)
-        clips = [bg]
-        max_width = self.resolution[0] - 200
-        try:
-            title = self._text_clip(text, 48, "white", duration, max_width=max_width)
-            title = title.with_position(("center", "center" if not subtitle else 0.4), relative=subtitle != "")
-            clips.append(title)
+            title = text_image(text, 48, "white", font=self.font, max_width=max_width)
+            y = int(h * 0.4) if subtitle else _place("center", h, title.height)
+            card = _compose(card, title, (_place("center", w, title.width), y))
             if subtitle:
-                sub = self._text_clip(subtitle, 28, "#cccccc", duration, max_width=max_width)
-                clips.append(sub.with_position(("center", 0.55), relative=True))
+                sub = text_image(subtitle, 28, "#cccccc", font=self.font, max_width=max_width)
+                card = _compose(card, sub, (_place("center", w, sub.width), int(h * 0.55)))
         except Exception as e:
             logger.warning("The title card text could not be drawn (%s); the card is blank", e)
-        return CompositeVideoClip(clips, size=self.resolution).with_duration(duration).with_fps(self.fps)
+        return card.convert("RGB")
+
+    def _watermark(self) -> Optional[Tuple[Image.Image, Tuple[int, int]]]:
+        """The watermark as a still and the corner it sits at, or None.
+
+        Text (which wins) is 24 px white; an image is scaled to 10 % of the
+        video's width, its colour and its alpha resized apart as moviepy
+        resized a clip and its mask. Either way the alpha is multiplied by the
+        opacity as moviepy's mask maths did, and the corner is one of the five
+        positions moviepy placed it at, flush with the frame's edges."""
+        w, h = self.resolution
+        try:
+            if self.watermark_text:
+                drawn = text_image(self.watermark_text, 24, "white", font=self.font)
+                rgb = drawn.convert("RGB")
+                alpha = np.asarray(drawn.getchannel("A"), dtype=np.float64)
+            elif self.watermark_image and Path(self.watermark_image).exists():
+                with Image.open(self.watermark_image) as source:
+                    rgba = source.convert("RGBA")
+                width = int(w * 0.10)
+                height = max(1, int(rgba.height * width / rgba.width))
+                rgb = rgba.convert("RGB").resize((width, height), Image.LANCZOS)
+                alpha = np.asarray(rgba.getchannel("A").resize((width, height), Image.LANCZOS), dtype=np.float64)
+            else:
+                return None
+            alpha = (self.watermark_opacity * (alpha / 255) * 255).astype("uint8")
+            layer = rgb.convert("RGBA")
+            layer.putalpha(Image.fromarray(alpha))
+            across, down = WATERMARK_POSITIONS.get(self.watermark_position, ("right", "bottom"))
+            return layer, (_place(across, w, layer.width), _place(down, h, layer.height))
+        except Exception as e:
+            logger.warning("The watermark could not be drawn (%s); the video has none", e)
+            return None
+
+    def _still(self, source: Path, scratch: Path, stem: str) -> Optional[str]:
+        """``source`` in ``scratch`` as ``stem`` + its suffix - a hard link, or a
+        copy - or flattened onto black first when it has transparency, as
+        moviepy's composition over black showed it. None when it cannot be
+        opened (the slide then shows black)."""
+        try:
+            with Image.open(source) as image:
+                transparent = image.mode in ("RGBA", "LA", "PA") or (
+                    image.mode == "P" and "transparency" in image.info)
+                if transparent:
+                    rgba = image.convert("RGBA")
+                    flat = Image.new("RGBA", rgba.size, (0, 0, 0, 255))
+                    name = f"{stem}.png"
+                    Image.alpha_composite(flat, rgba).convert("RGB").save(scratch / name, compress_level=1)
+                    return name
+        except Exception as e:
+            logger.warning("Slide image %s cannot be read (%s); the slide shows black", source.name, e)
+            return None
+        name = f"{stem}{source.suffix.lower() or '.png'}"
+        _link_or_copy(source, scratch / name)
+        return name
+
+    def _prepare_stills(self, segments: List[DeckSegment], scratch: Path, progress_callback=None) -> None:
+        """Every segment's picture as a file in ``scratch``: a slide's image or
+        clip under a short name (so a deck of any size stays far inside the
+        command line's limit), a card drawn, a black still for a slide with no
+        picture. An animated slide whose clip ffmpeg cannot read shows its
+        image instead."""
+        black = None
+        slides = sum(1 for seg in segments if seg.kind == "slide")
+        done = 0
+        for i, seg in enumerate(segments):
+            if seg.kind == "card":
+                name = f"card{i:04d}.png"
+                self._title_card(*seg.card).save(scratch / name, compress_level=1)
+                seg.image = name
+                continue
+            if seg.kind != "slide":
+                continue
+            done += 1
+            if progress_callback:
+                progress_callback(done, slides, f"Preparing slide {done}...")
+            if seg.video and Path(seg.video).is_file() and _has_video_stream(seg.video):
+                source = Path(seg.video)
+                name = f"a{i:04d}{source.suffix.lower()}"
+                _link_or_copy(source, scratch / name)
+                seg.video, seg.image = name, None
+                continue
+            if seg.video:
+                logger.warning("Animated slide %s has no picture ffmpeg can read; showing its image", Path(seg.video).name)
+            seg.video = None
+            name = None
+            if seg.image and Path(seg.image).is_file():
+                name = self._still(Path(seg.image), scratch, f"s{i:04d}")
+            if name is None:
+                if black is None:
+                    black = "black.png"
+                    Image.new("RGB", self.resolution, (0, 0, 0)).save(scratch / black, compress_level=1)
+                name = black
+            seg.image = name
 
     def _embed_chapters(self, video_path: Path, slide_clips: List[SlideClipInfo], slide_titles: List[str]):
         """Embed chapter markers into the MP4 using ffmpeg metadata.
@@ -1774,7 +2035,9 @@ class VideoCreator:
         try:
             # Each slide's on-screen time: its narration plus the voice start
             # delay (the master track opens every narrated slide with that
-            # silence), or the default hold for a silent slide.
+            # silence), or the default hold for a silent slide. The narration's
+            # length is ffmpeg's own (the header's ``Duration``, which is what
+            # moviepy's ``AudioFileClip`` read here before T1).
             durations = []
             titles = []
             for i, clip_info in enumerate(slide_clips):
@@ -1785,12 +2048,9 @@ class VideoCreator:
 
                 duration = clip_info.duration or 5.0
                 if clip_info.audio_path and clip_info.audio_path.exists():
-                    try:
-                        clip = AudioFileClip(str(clip_info.audio_path))
-                        duration = clip.duration + self.voice_start_delay
-                        clip.close()
-                    except Exception:
-                        pass
+                    seconds = _probe_duration(clip_info.audio_path)
+                    if seconds is not None:
+                        duration = seconds + self.voice_start_delay
                 durations.append(duration)
 
             # Shifted past the intro card, which has no chapter of its own; the
@@ -1807,54 +2067,218 @@ class VideoCreator:
         except Exception as e:
             logger.error("Error embedding chapters: %s", e)
 
-    def encode_settings(self) -> dict:
-        """The ``write_videofile`` arguments of this render's encode - the one
-        place ``create_video`` takes them from, so a test can encode with
-        exactly what the render does (``tests/test_encode_settings.py``).
+    # ── the encode ────────────────────────────────────────────────────────
 
-        libx264 at the output preset's x264 preset and H.264 profile, 4:2:0
-        (:func:`h264_params`), the index at the front (:data:`FASTSTART`),
-        the preset's video bitrate ("" = the codec's constant-quality
-        default) and AAC at its audio bitrate. The parameters are the same
-        whatever the x264 preset, so the preview (``ultrafast``) plays
-        everywhere the final render does.
+    def encode_settings(self) -> dict:
+        """The encode of this render as ffmpeg arguments - the one place every
+        deck render takes them from, so a test can read exactly what the
+        render passes (``tests/test_encode_settings.py``).
+
+        ``video``: the render's frame rate, libx264 at the output preset's
+        x264 preset and H.264 profile, 4:2:0 (:func:`h264_params`), the
+        preset's video bitrate when it has one (none = the codec's
+        constant-quality default), x264's own thread count. ``audio``: AAC at
+        the preset's bitrate. ``container``: the index at the front
+        (:data:`FASTSTART`). The parameters are the same whatever the x264
+        preset, so the preview (``ultrafast``) plays everywhere the final
+        render does.
         """
-        return {
-            "fps": self.fps,
-            "codec": "libx264",
-            "audio_codec": "aac",
-            "preset": self.x264_preset,
-            "bitrate": self.video_bitrate or None,
-            "audio_bitrate": self.audio_bitrate or None,
-            "ffmpeg_params": [*h264_params(self.h264_profile), *FASTSTART],
-            "threads": 0,
-        }
+        video = ["-r", str(self.fps), "-c:v", "libx264", "-preset", self.x264_preset, *h264_params(self.h264_profile)]
+        if self.video_bitrate:
+            video += ["-b:v", self.video_bitrate]
+        video += ["-threads", "0"]
+        audio = ["-c:a", "aac"]
+        if self.audio_bitrate:
+            audio += ["-b:a", self.audio_bitrate]
+        return {"video": video, "audio": audio, "container": list(FASTSTART)}
+
+    def _sound_inputs(self, master: Optional[Path], seconds: float, first_input: int) -> Tuple[List[str], Optional[str]]:
+        """The ffmpeg inputs and graph (output ``[a]``) of the deck's sound,
+        its inputs numbered from ``first_input``; no graph when there is
+        neither narration nor music."""
+        inputs: List[str] = []
+        voice = None
+        if master and Path(master).exists():
+            inputs += ["-i", str(master)]
+            voice = first_input
+        music_inputs: List[int] = []
+        tracks = self.background_music_paths
+        loop_playlist = False
+        if tracks:
+            lengths = [_probe_duration(track) for track in tracks]
+            # Looped only when the playlist is shorter than the video (or a
+            # track cannot be measured): a single track by ffmpeg's own
+            # -stream_loop, a playlist as a whole in the graph.
+            short = any(length is None for length in lengths) or sum(lengths) < seconds
+            for track in tracks:
+                if short and len(tracks) == 1:
+                    inputs += ["-stream_loop", "-1"]
+                inputs += ["-i", str(track)]
+                music_inputs.append(first_input + (1 if voice is not None else 0) + len(music_inputs))
+            loop_playlist = short and len(tracks) > 1
+        if voice is None and not music_inputs:
+            return [], None
+        graph = deck_audio_graph(voice, music_inputs, seconds, max(0.0, float(self.music_volume)),
+                                 float(self.music_fade_duration), loop_playlist)
+        return inputs, graph
+
+    def _run_ffmpeg(self, cmd: List[str], scratch: Path, timeout: float, cancel_check, on_frame=None) -> None:
+        """One ffmpeg run of the render in ``scratch``, its progress handed
+        to ``on_frame``; raises :class:`CancelledError` when it was
+        cancelled and ``RuntimeError`` when it timed out or failed."""
+        log = scratch / "ffmpeg.log"
+        progress = scratch / "progress.txt"
+        progress.unlink(missing_ok=True)
+
+        def _cancelled() -> bool:
+            return bool(cancel_check and cancel_check())
+
+        def _poll() -> None:
+            if on_frame is None:
+                return
+            frame = _progress_frame(progress)
+            if frame is not None:
+                try:
+                    on_frame(frame)
+                except Exception as e:  # noqa: BLE001 - a progress report never stops the render
+                    logger.debug("Progress callback failed: %s", e)
+
+        outcome, proc = _run_until_done(cmd, log, timeout, _cancelled, on_poll=_poll, cwd=scratch)
+        if outcome == "cancelled":
+            raise CancelledError("Cancelled while ffmpeg was rendering")
+        if outcome == "timeout":
+            raise RuntimeError(f"The render took longer than {timeout:.0f}s and was stopped")
+        if proc.returncode != 0:
+            tail = log.read_text(encoding="utf-8", errors="replace")[-800:] if log.is_file() else ""
+            raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}): {tail}")
+        _poll()
+
+    def _render(
+        self, segments: List[DeckSegment], master: Optional[Path], scratch: Path, output: Path,
+        watermark: Optional[Tuple[str, int, int]], encoding_callback=None, cancel_check=None,
+    ) -> None:
+        """The picture and the sound of ``segments`` into ``output``: each
+        chunk's run, then the join (see "the deck render" above)."""
+        from utils.config import FFMPEG_PATH
+
+        fps = self.fps
+        bounds = frame_boundaries([seg.seconds for seg in segments], fps)
+        starts, elapsed = [], 0.0
+        for seg in segments:
+            starts.append(elapsed)
+            elapsed += seg.seconds
+        total = bounds[-1]
+        seconds = total / fps
+        chunks = deck_chunks(bounds, self.chunk_limit)
+        settings = self.encode_settings()
+        logger.info("Rendering %d frames at %d fps (%.1fs) in %d chunk(s) of at most %d segments",
+                    total, fps, seconds, len(chunks), self.chunk_limit)
+        base = [FFMPEG_PATH, "-hide_banner", "-nostats", "-loglevel", "error", "-y"]
+
+        def _cancelled() -> bool:
+            return bool(cancel_check and cancel_check())
+
+        # The sound: one ffmpeg run of its own, started first and running beside
+        # the picture's (an AAC encode of a long narration takes seconds, and
+        # in the picture's graph it ran on the same thread as the frames).
+        sound_inputs, sound_graph = self._sound_inputs(master, seconds, 0)
+        sound = sound_log = None
+        try:
+            if sound_graph:
+                (scratch / "sound.txt").write_text(sound_graph, encoding="utf-8")
+                sound_log = open(scratch / "sound.log", "w", encoding="utf-8", errors="replace")
+                sound = subprocess.Popen(
+                    [*base, *sound_inputs, "-/filter_complex", "sound.txt", "-map", "[a]", *settings["audio"],
+                     "sound.m4a"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=sound_log, cwd=str(scratch),
+                )
+            names = []
+            for c, (first, last) in enumerate(chunks):
+                if _cancelled():
+                    raise CancelledError("Cancelled between chunks")
+                if sound is not None and sound.poll() not in (None, 0):
+                    break  # the sound failed: reported below, without encoding the rest
+                inputs, graph, _ = deck_chunk_graph(segments, bounds, starts, first, last, fps, self.resolution, watermark)
+                name = f"chunk{c:03d}.mp4"
+                graph_file = f"graph{c:03d}.txt"
+                (scratch / graph_file).write_text(graph, encoding="utf-8")
+                frames = bounds[last] - bounds[first]
+                done = bounds[first]
+                t1 = time.time()
+                self._run_ffmpeg(
+                    [*base, "-progress", "progress.txt", *inputs, "-/filter_complex", graph_file,
+                     "-map", "[v]", *settings["video"], name],
+                    scratch, render_timeout(frames, self.resolution), cancel_check,
+                    on_frame=(lambda frame, done=done: encoding_callback(min(total, done + frame), total))
+                    if encoding_callback else None,
+                )
+                logger.info("Chunk %d/%d: %d frames in %.1fs", c + 1, len(chunks), frames, time.time() - t1)
+                names.append(name)
+            if sound is not None:
+                outcome = _wait_until_done(sound, 120 + seconds / 2, _cancelled)
+                if outcome == "cancelled":
+                    raise CancelledError("Cancelled while the sound was encoding")
+                if outcome == "timeout" or sound.returncode != 0:
+                    sound_log.close()
+                    tail = (scratch / "sound.log").read_text(encoding="utf-8", errors="replace")[-800:]
+                    raise RuntimeError(f"The sound could not be encoded ({outcome}, exit {sound.returncode}): {tail}")
+        finally:
+            if sound is not None and sound.poll() is None:
+                _stop(sound)
+            if sound_log is not None:
+                sound_log.close()
+        # The join: the chunks back to back by a stream copy, the sound with
+        # them, the index at the front.
+        (scratch / "chunks.ffconcat").write_text(
+            "ffconcat version 1.0\n" + "".join(f"file '{name}'\n" for name in names), encoding="utf-8")
+        cmd = [*base, "-f", "concat", "-safe", "0", "-i", "chunks.ffconcat"]
+        if sound is not None:
+            cmd += ["-i", "sound.m4a", "-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            cmd += ["-map", "0:v:0"]
+        cmd += ["-c", "copy", *settings["container"], str(output)]
+        self._run_ffmpeg(cmd, scratch, 60 + seconds / 10, cancel_check)
+        if encoding_callback:
+            encoding_callback(total, total)
 
     def create_video(
         self,
         slide_clips: List[SlideClipInfo],
         output_path: Path,
-        add_transitions: bool = True,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         encoding_callback: Optional[Callable[[int, int], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         slide_titles: Optional[List[str]] = None,
     ) -> bool:
-        """Create a complete video from slide clips.
+        """Render the deck into ``output_path``: the master narration track,
+        the stills, then ffmpeg composes and encodes the picture (see "the
+        deck render" above) and the chapters are embedded.
 
-        Uses a single continuous audio track built from all slides' audio
-        to avoid click artifacts at slide boundaries.
+        ``encoding_callback(frame, total)`` is told the frames encoded so far
+        (from ffmpeg's ``-progress``) while ffmpeg runs; ``cancel_check`` is
+        polled every ``CUT_POLL_SECONDS`` and a cancel stops ffmpeg within a
+        poll. The video is written to ``<stem>.part.mp4`` and published over
+        ``output_path`` only when it is whole, so a cancelled or failed render
+        leaves no partial file and whatever was at ``output_path`` untouched.
+        True when the video is there.
         """
-        clips = []
-        final_video = None
+        from utils import config as config_module
+        from utils.config import FFMPEG_PATH
+        from utils.helpers import replace_with_retry
+
+        output_path = Path(output_path)
+        part = output_path.with_suffix(".part.mp4")
         master_audio_path = None
+        scratch = None
         t0 = time.time()
         try:
             total = len(slide_clips)
 
-            # Step 1: Build a single continuous audio track from all slides
+            # Step 1: one continuous audio track from all slides, and the gap
+            # it leaves after each - the picture follows the track exactly.
             if progress_callback:
                 progress_callback(0, total, "Building audio track...")
+            gaps: list = []
             master_audio_path, slide_durations = _build_master_audio(
                 slide_clips,
                 voice_start_delay=self.voice_start_delay,
@@ -1862,135 +2286,43 @@ class VideoCreator:
                 transition_sound_path=self.transition_sound_path,
                 profile=self.onset_profile,
                 intro_offset=self.intro_offset,
+                gaps_out=gaps,
             )
-
-            # Step 2: Build visual-only clips with durations from the master track
-            for i, clip_info in enumerate(slide_clips):
-                if cancel_check and cancel_check():
-                    logger.warning("Cancelled during slide assembly (slide %d/%d)", i + 1, total)
-                    raise CancelledError("Cancelled during slide assembly")
-
-                if progress_callback:
-                    progress_callback(i + 1, total, f"Processing slide {i + 1}...")
-
-                t1 = time.time()
-                logger.info("Assembling slide %d/%d  img=%s  audio=%s",
-                           i + 1, total, clip_info.image_path, clip_info.audio_path)
-
-                # Use duration from master audio track if available
-                if slide_durations and i < len(slide_durations):
-                    clip_info_copy = SlideClipInfo(
-                        slide_index=clip_info.slide_index,
-                        image_path=clip_info.image_path,
-                        video_path=clip_info.video_path,
-                        audio_path=None,  # No per-slide audio — master track handles it
-                        duration=slide_durations[i],
-                    )
-                else:
-                    clip_info_copy = clip_info
-
-                clip = self.create_slide_clip(clip_info_copy)
-                if clip:
-                    logger.info("Slide %d assembled in %.1fs duration=%.1fs", i + 1, time.time() - t1, clip.duration)
-                else:
-                    logger.warning("Slide %d FAILED", i + 1)
-                if clip is None:
-                    logger.warning("Skipping slide %d due to error", i + 1)
-                    continue
-
-                # Apply transition effects on the slide clip
-                if clip and self.slide_transition != "none" and self.transition_duration > 0:
-                    clip = self._apply_transition_effect(clip, i, total)
-
-                clips.append(clip)
-
-                # Add transition (except after last slide): the slide's own
-                # pause override, else the job's transition pause - the same
-                # gap the master track left after it.
-                pause = pause_after(clip_info, self.transition_pause)
-                if add_transitions and pause > 0 and i < total - 1:
-                    clips.append(self.create_transition_clip(pause))
-
-            if not clips:
+            if not slide_clips:
                 logger.error("No clips to combine")
                 return False
-
-            # Add intro title card
-            if self.intro_text:
-                intro = self._create_title_card(
-                    self.intro_text, self.intro_subtitle, self.intro_duration
-                )
-                clips.insert(0, intro)
-
-            # Add outro title card
-            if self.outro_text:
-                outro = self._create_title_card(
-                    self.outro_text, "", self.outro_duration
-                )
-                clips.append(outro)
-
-            if progress_callback:
-                progress_callback(total, total, "Combining clips...")
-
+            if not FFMPEG_PATH:
+                logger.error("Cannot render the video: ffmpeg is not available")
+                return False
             if cancel_check and cancel_check():
-                raise CancelledError("Cancelled before concatenation")
+                raise CancelledError("Cancelled after the audio track")
 
-            logger.info("Concatenating %d clips...", len(clips))
-            t1 = time.time()
-            final_video = concatenate_videoclips(clips, method="compose")
-            logger.info("Concatenation done in %.1fs  total_duration=%.1fs",
-                       time.time() - t1, final_video.duration)
+            # Step 2: the stills.
+            segments = self.deck_segments(slide_clips, slide_durations, gaps)
+            config_module.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+            scratch = Path(tempfile.mkdtemp(prefix="deck-", dir=str(config_module.TEMP_DIR)))
+            self._prepare_stills(segments, scratch, progress_callback)
+            watermark = None
+            drawn = self._watermark()
+            if drawn is not None:
+                # On exactly the pixel it was placed at: overlay snaps an odd
+                # corner down to an even one in 4:2:0 (see ``even_origin``).
+                layer, x, y = even_origin(drawn[0], *drawn[1])
+                layer.save(scratch / "watermark.png")
+                watermark = ("watermark.png", x, y)
+            if cancel_check and cancel_check():
+                raise CancelledError("Cancelled before the encode")
 
-            # Attach single continuous audio track (avoids per-clip boundary clicks).
-            # The track already opens with the intro card's silence (see
-            # _build_master_audio), so it is attached at t=0.
-            if master_audio_path and master_audio_path.exists():
-                master_audio_clip = AudioFileClip(str(master_audio_path))
-                # Trim or pad to match video duration
-                if master_audio_clip.duration > final_video.duration:
-                    master_audio_clip = master_audio_clip.subclipped(0, final_video.duration)
-                elif master_audio_clip.duration < final_video.duration:
-                    # Pad with silence — the outro card has no audio in master track
-                    pass  # AudioClip shorter than video is fine, moviepy fills with silence
-                final_video = final_video.with_audio(master_audio_clip)
-                logger.info("Attached master audio track (%.1fs)", master_audio_clip.duration)
-
-            # Mix background music across the whole video
-            if self.background_music_paths:
-                if progress_callback:
-                    progress_callback(total, total, "Mixing background music...")
-                logger.info("Mixing background music...")
-                t1 = time.time()
-                final_video = self._apply_background_music(final_video)
-                logger.info("Music mixed in %.1fs", time.time() - t1)
-
-            # Apply watermark overlay
-            if self.watermark_text or (self.watermark_image and Path(self.watermark_image).exists()):
-                if progress_callback:
-                    progress_callback(total, total, "Applying watermark...")
-                logger.info("Applying watermark...")
-                final_video = self._apply_watermark(final_video)
-
+            # Step 3: ffmpeg composes and encodes.
             if progress_callback:
                 progress_callback(total, total, "Writing video file...")
-
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            # Write moviepy's temp audio file to assets/temp instead of project root
-            temp_dir = Path(__file__).resolve().parent.parent / "assets" / "temp"
-            temp_dir.mkdir(parents=True, exist_ok=True)
-
-            # Use custom logger to report encoding progress and handle cancellation
-            enc_logger = _EncodingProgressLogger(
-                encoding_callback, cancel_check,
-            ) if (encoding_callback or cancel_check) else None
             logger.info("Writing video to %s...", output_path)
             t1 = time.time()
-            final_video.write_videofile(
-                str(output_path),
-                **self.encode_settings(),
-                logger=enc_logger,
-                temp_audiofile_path=str(temp_dir) + "/",
-            )
+            self._render(segments, master_audio_path, scratch, part, watermark, encoding_callback, cancel_check)
+            if cancel_check and cancel_check():
+                raise CancelledError("Cancelled after the encode")
+            replace_with_retry(part, output_path)
             logger.info("Video written in %.1fs", time.time() - t1)
 
             # Embed chapter markers if slide titles are available
@@ -2004,13 +2336,7 @@ class VideoCreator:
             return True
 
         except CancelledError:
-            logger.warning("Encoding cancelled by user")
-            # Clean up partial output
-            if output_path.exists():
-                try:
-                    output_path.unlink()
-                except OSError:
-                    pass
+            logger.warning("Encoding cancelled by user; ffmpeg stopped and the partial video discarded")
             return False
 
         except Exception as e:
@@ -2024,19 +2350,10 @@ class VideoCreator:
                     master_audio_path.unlink()
                 except OSError:
                     pass
-            # Always release moviepy resources
-            if final_video:
-                try:
-                    final_video.close()
-                except Exception:
-                    pass
-            for clip in clips:
-                try:
-                    clip.close()
-                except Exception:
-                    pass
-            if self._transition_audio:
-                try:
-                    self._transition_audio.close()
-                except Exception:
-                    pass
+            # No-op after a publish; the partial file on every other exit.
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)

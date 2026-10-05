@@ -19,7 +19,6 @@ import wave
 from pathlib import Path
 from typing import get_args
 
-import numpy as np
 import pytest
 
 import utils.config as config_module
@@ -153,13 +152,32 @@ def test_build_video_forwards_the_jobs_options_to_the_video_creator(tmp_path, mo
     assert seen["fps"] == video_creator.STATIC_FPS, "a static deck stays cheap to encode"
 
 
+def test_a_deck_with_an_animated_slide_renders_at_the_transition_rate(tmp_path, monkeypatch):
+    """The whole picture is sampled at one rate: at 2 fps an animated slide
+    played as two pictures a second (every static deck with one did, before
+    T1), so a deck with an animated slide renders at 24 fps, transition or
+    not."""
+    seen = _capture_creator(monkeypatch)
+    clip = tmp_path / "anim.mp4"
+    clip.write_bytes(b"mp4")
+    pm = _pm(("A", 2.0), ("B", 2.0))
+    pm.state.slides[1].video_path = str(clip)
+    assert processing.VideoProcessor(slide_transition="none")._build_video(pm, tmp_path / "out.mp4")
+    assert seen["fps"] == video_creator.TRANSITION_FPS
+    pm.state.slides[1].video_path = str(tmp_path / "gone.mp4")
+    assert processing.VideoProcessor(slide_transition="none")._build_video(pm, tmp_path / "out.mp4")
+    assert seen["fps"] == video_creator.STATIC_FPS, "a clip that is not there animates nothing"
+
+
 def test_fps_for_transition():
     assert video_creator.fps_for_transition("none") == 2
     assert video_creator.fps_for_transition("") == 2
     assert video_creator.fps_for_transition("crossfade", 0.0) == 2, "the same gate as create_video"
     for transition in list(studio_settings.TRANSITIONS)[1:]:
         assert video_creator.fps_for_transition(transition, 0.5) == 24, transition
+        assert video_creator.deck_fps(transition, 0.5) == 24, transition
     assert VideoCreator().fps == video_creator.STATIC_FPS
+    assert video_creator.deck_fps("none", 0.5, animated=True) == 24, "an animated slide needs the frames too"
 
 
 # -- every job step scratches in its own directory ----------------------------------
@@ -230,37 +248,47 @@ def test_process_files_never_sweeps_the_shared_scratch_dir(tmp_path, monkeypatch
     assert fi.project_manager.output == tmp_path / "out" / "deck.mp4"
 
 
-# -- the horizontal slide transform runs once ------------------------------------
+# -- each slide transition moves as its name says --------------------------------
 
-class _FakeClip:
-    def __init__(self):
-        self.mask = None
-        self.duration = 5.0
-        self.transforms = []
+def _offset(expression: str, t: float) -> int:
+    """An ffmpeg offset expression of the slide-in (``trunc``, ``clip``,
+    ``t``) evaluated at time ``t``."""
+    import math
 
-    def transform(self, func, apply_to=None):
-        self.transforms.append((func, apply_to))
-        return self
-
-
-def test_horizontal_slide_transition_shifts_the_frame_once():
-    creator = VideoCreator(resolution=(8, 2), slide_transition="slide-left", transition_duration=0.5)
-    clip = _FakeClip()
-    creator._apply_transition_effect(clip, slide_index=1, total_slides=3)
-    assert len(clip.transforms) == 1, "applied twice, the frame moved by twice the offset"
-
-    func, _ = clip.transforms[0]
-    frame = np.stack([np.arange(8)] * 2).astype(np.uint8)[:, :, None].repeat(3, axis=2)
-    # Halfway through the 0.5 s slide the offset is half the width: one shift, not two.
-    out = func(lambda t: frame, 0.25)
-    assert out[0, :, 0].tolist() == [4, 5, 6, 7, 0, 0, 0, 0]
-    assert func(lambda t: frame, 1.0)[0, :, 0].tolist() == list(range(8)), "after the slide: the frame as is"
+    return int(eval(expression, {"__builtins__": {}}, {  # noqa: S307 - our own expression, in a test
+        "trunc": math.trunc, "clip": lambda x, lo, hi: min(max(x, lo), hi), "t": t,
+    }))
 
 
-def test_vertical_slide_transition_also_runs_once():
-    clip = _FakeClip()
-    VideoCreator(slide_transition="slide-up")._apply_transition_effect(clip, 1, 3)
-    assert len(clip.transforms) == 1
+@pytest.mark.parametrize("kind, edge, pad, axis", [
+    ("slide-left", "right", "pad=w=16:h=4:x=8:y=0", "x"),
+    ("slide-right", "left", "pad=w=16:h=4:x=0:y=0", "x"),
+    ("slide-up", "bottom", "pad=w=8:h=8:x=0:y=4", "y"),
+    ("slide-down", "top", "pad=w=8:h=8:x=0:y=0", "y"),
+])
+def test_each_slide_transition_enters_from_the_edge_its_name_says(kind, edge, pad, axis):
+    """The incoming slide is padded with black on the side it moves away from
+    and cut back to the frame by a moving window: half way through, the
+    window is half a frame along - shifted ONCE (moviepy's old horizontal
+    transform was once applied twice) - and it ends on the slide itself.
+    Before T1, slide-left drew as slide-right and slide-up as slide-down."""
+    creator = VideoCreator(resolution=(8, 4), slide_transition=kind, transition_duration=0.5)
+    (_, segment, _) = [s for s in creator.deck_segments(
+        [SlideClipInfo(slide_index=i) for i in range(3)], [5.0, 5.0, 5.0], [0.0, 0.0, 0.0]) if s.kind == "slide"]
+    assert segment.effect_in == f"slide-from-{edge}"
+    # The transition's clock is the slide's own time plus a shift (never
+    # negative: ``tests/test_deck_render.py``), so 0 of the slide is at ``shift``.
+    shift = video_creator.transition_clock_shift(24)
+    drawn = video_creator._transition_filter(segment.effect_in, True, segment, (8, 4), shift)
+    assert drawn.startswith(pad + ":color=black,crop=w=8:h=4:"), drawn
+    expression = drawn.split(f"{axis}='")[1].split("'")[0]
+    size = 8 if axis == "x" else 4
+    start, half, done = (_offset(expression, shift + t) for t in (0.0, 0.25, 0.5))
+    assert _offset(expression, shift - 0.01) == _offset(expression, shift), "before its start: not yet moving"
+    if edge in ("right", "bottom"):          # the window starts on the black and slides onto the slide
+        assert (start, half, done) == (0, size // 2, size)
+    else:                                    # the window starts past the slide and slides back onto it
+        assert (start, half, done) == (size, size // 2, 0)
 
 
 # -- the intro card offsets everything timed against the slides ----------------------
@@ -341,7 +369,7 @@ def test_create_video_hands_the_intro_offset_to_the_master_track(tmp_path, monke
     seen = {}
 
     def fake_master(slide_clips, voice_start_delay, transition_pause, transition_sound_path=None,
-                    profile=None, intro_offset=0.0):
+                    profile=None, intro_offset=0.0, gaps_out=None):
         seen["intro_offset"] = intro_offset
         return None, []
 
@@ -718,11 +746,17 @@ def test_master_track_srt_and_chapters_agree_when_a_slide_overrides_the_pause(tm
     assert "START=8000\nEND=10000\ntitle=Three" in metadata["text"]
 
 
-def test_transition_clip_lasts_the_slides_own_pause():
+def test_the_pause_after_a_slide_lasts_its_own_pause():
+    """With no master track (no narration anywhere) the picture's pause is
+    the slide's own, else the job's; with one it is the gap the track left
+    (``tests/test_deck_render.py``), which is the same number unless a
+    transition sound outlasts it."""
     creator = VideoCreator(transition_pause=1.0)
-    assert creator.create_transition_clip().duration == 1.0
-    assert creator.create_transition_clip(3.0).duration == 3.0
-    assert creator.create_transition_clip(0.25).duration == 0.25
+    clips = [SlideClipInfo(slide_index=i, pause_after=p) for i, p in enumerate((None, 3.0, 0.25, None))]
+    pauses = [s.seconds for s in creator.deck_segments(clips, [], gaps=[]) if s.kind == "pause"]
+    assert pauses == [1.0, 3.0, 0.25], "after the last slide, none"
+    followed = [s.seconds for s in creator.deck_segments(clips, [2.0] * 4, gaps=[1.0, 3.0, 0.25, 0.0]) if s.kind == "pause"]
+    assert followed == [1.0, 3.0, 0.25]
 
 
 def test_build_video_threads_each_slides_pause_override_into_its_clip(tmp_path, monkeypatch):
