@@ -624,9 +624,12 @@ def test_no_ffmpeg_or_ffprobe_runs_for_a_download(client, monkeypatch):
     def _refuse(*args, **kwargs):
         raise AssertionError(f"a subprocess was started for a download: {args[:1]}")
 
+    # The project first: importing a video probes it with ffprobe for a
+    # moving picture (#p1-cover), which is the import's business, not the
+    # download's. Only the downloads run under the refusal.
+    pid = _video()
     for name in ("run", "Popen", "call", "check_call", "check_output"):
         monkeypatch.setattr(subprocess, name, _refuse)
-    pid = _video()
 
     for fmt in narration.EXPORT_FORMATS:
         for view in narration.EXPORT_VIEWS:

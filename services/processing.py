@@ -73,6 +73,64 @@ RENDER_STAGES_AFTER_VIDEO = (RENDER_STAGE_SUBTITLES, RENDER_STAGE_FORMATS)
 # How often the narration's back-off before a retry looks at the cancel.
 RETRY_POLL_SECONDS = 0.25
 
+# How long the WebM and the GIF may take (``generate_extra_formats``): a base
+# plus so many seconds per second of the source, never under the floor, and
+# the old flat 600 s only when the source's length cannot be told. A flat
+# 600 s was the WebM's limit whatever the video's length, and the WebM of a
+# 7.4-minute 1080p video took about 9 minutes under it (0.13.0, measured).
+EXTRA_FORMAT_TIMEOUT_BASE = 60.0
+EXTRA_FORMAT_TIMEOUT_PER_SECOND = 2.0
+EXTRA_FORMAT_TIMEOUT_FLOOR = 300.0
+EXTRA_FORMAT_TIMEOUT_UNKNOWN = 600.0
+
+
+def extra_format_timeout(duration: Optional[float]) -> float:
+    """How long one extra format's ffmpeg run may take for a source of
+    ``duration`` seconds: 60 s plus twice the length, never under 300 s;
+    600 s when the length is unknown (None or 0)."""
+    if not duration or duration <= 0:
+        return EXTRA_FORMAT_TIMEOUT_UNKNOWN
+    return max(EXTRA_FORMAT_TIMEOUT_FLOOR, EXTRA_FORMAT_TIMEOUT_BASE + EXTRA_FORMAT_TIMEOUT_PER_SECOND * duration)
+
+
+# The WebM's picture (``generate_extra_formats``): VP9 at constant quality
+# (``-crf 30 -b:v 0``, as before) on libvpx's realtime deadline at cpu-used
+# 8 with row-based multithreading, so every core works on the same frame.
+# Measured on the owner's 7.4-minute 1080p deck video with the bundled 7.1
+# (mean SSIM against the source by ffmpeg's ssim filter): libvpx's defaults
+# (the "good" deadline at cpu-used 1, no row threading) 634.8 s, 18.0 MB,
+# 0.99876; good at cpu-used 4 with row threading 190.2 s, 18.6 MB, 0.99867;
+# good at cpu-used 5 (6 is the same encode) 311.3 s, slower than 4 here;
+# realtime at cpu-used 8 with row threading 29.0 s, 28.0 MB, 0.99827 - the
+# fastest whose SSIM is within 0.01 of the defaults', fifteen times faster
+# than the video plays, at the cost of a file about half as large again.
+# ffmpeg's default thread count (every core) is kept: four threads cost a
+# third more time.
+WEBM_VP9_OPTIONS = ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0",
+                    "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1"]
+
+# How many times a slide's narration is tried before the slide is given up
+# for this run (the back-off between tries is 3 s, then 6 s).
+NARRATION_ATTEMPTS = 3
+
+
+def narration_failure_note(failed_slides) -> str:
+    """The closing line's note about the slides whose narration failed every
+    attempt this run - "; 1 slide (4) kept an older clip: its narration
+    failed after 3 attempts. Render again to redo it." - or "" when none did.
+    ``failed_slides`` are slide indices (0-based); the note names them as the
+    user counts them."""
+    numbers = [str(i + 1) for i in sorted(set(failed_slides))]
+    if not numbers:
+        return ""
+    if len(numbers) == 1:
+        return (f"; 1 slide ({numbers[0]}) kept an older clip: its narration failed after "
+                f"{NARRATION_ATTEMPTS} attempts. Render again to redo it.")
+    listed = ", ".join(numbers[:-1]) + " and " + numbers[-1]
+    return (f"; {len(numbers)} slides ({listed}) kept an older clip: their narration failed after "
+            f"{NARRATION_ATTEMPTS} attempts. Render again to redo them.")
+
+
 # A cancelled render's closing line, which the Generate card shows once the
 # job is over: what the cancel left behind, in the user's terms.
 RENDER_CANCELLED_BEFORE_VIDEO = "Render cancelled before the video was written; the project is as it was."
@@ -842,11 +900,12 @@ class VideoProcessor:
                             "(synthesised per sentence during video creation)", label)
                 slides_needing = []
             logger.info("slides_needing=%s", slides_needing)
+            failed_slides: List[int] = []
             if slides_needing:
                 if audio_start is None:
                     audio_start = time.time()
                 logger.info("%s: Generating audio for %d slides...", label, len(slides_needing))
-                self._generate_audio_parallel(
+                failed_slides = self._generate_audio_parallel(
                     audio_gen, pm, slides_needing,
                     idx, total, label, progress,
                     step_start_ref=[audio_start],
@@ -859,19 +918,27 @@ class VideoProcessor:
                     events.emit(events.AUDIO_GENERATED, file=file_item.path.name)
                 except Exception:
                     pass
-                # The settings are recorded only when the narration stage
-                # COMPLETED. A clip records its voice but not its speed, and
-                # the next render tells a speed change only by this stamp: a
-                # cancelled run that stamped it would hide the slides it
-                # never reached, and the next render would mux their clips
-                # at the old speed. The flag is latched, so it is True here
-                # exactly when a slide was skipped.
+                # The settings are stamped on the project only when the
+                # narration stage COMPLETED: the stamp records what the last
+                # completed stage ran at. It no longer tells the next render
+                # which slides to redo - each clip records its own settings
+                # (``update_slide_audio``), so a slide a preview, a cancel or
+                # a failure left at the old speed is redone on that alone;
+                # skipping the stamp on a cancel is kept so the record never
+                # claims settings that were not applied. The flag is latched,
+                # so it is True here exactly when a slide was skipped.
                 if not self._cancel_asked():
                     pm.update_generation_settings(
                         speed=self.speed, voice_id=self.voice_id,
                         stability=self.stability, similarity_boost=self.similarity_boost,
                         style=self.style,
                     )
+
+            # The run's failed slides, for the route's result (the card keeps
+            # the closing line on their account); [] when none, or when the
+            # narration stage did not run (a re-voice project, a preview
+            # that needed nothing).
+            self.failed_slides = failed_slides
 
             slides_done += file_item.slide_count
 
@@ -919,7 +986,10 @@ class VideoProcessor:
                 except Exception:
                     pass
                 if progress:
-                    progress((idx + 1) / total, f"{label}: Complete -> {output_path.name}")
+                    # The closing line (kept as the job's message) names the
+                    # slides whose narration failed and kept an older clip.
+                    progress((idx + 1) / total,
+                             f"{label}: Complete -> {output_path.name}{narration_failure_note(failed_slides)}")
                 if self.cancelled:
                     break
             elif self.cancelled:
@@ -1003,11 +1073,12 @@ class VideoProcessor:
             )
 
             logger.info("Prepare audio: speed=%s, voice=%s", self.speed, self.voice_id)
+            failed_slides: List[int] = []
             if slides_needing:
                 if audio_start is None:
                     audio_start = time.time()
                 logger.info("%s: Generating audio for %d slides...", label, len(slides_needing))
-                self._generate_audio_parallel(
+                failed_slides = self._generate_audio_parallel(
                     audio_gen, pm, slides_needing,
                     idx, total, label, progress,
                     step_start_ref=[audio_start],
@@ -1022,13 +1093,14 @@ class VideoProcessor:
                         style=self.style,
                     )
 
+            self.failed_slides = failed_slides
             slides_done += file_item.slide_count
             file_item.project_manager = pm
             file_item.has_project = True
             successes += 1
 
             if progress:
-                progress((idx + 1) / total, f"{label}: Audio ready")
+                progress((idx + 1) / total, f"{label}: Audio ready{narration_failure_note(failed_slides)}")
 
         return successes
 
@@ -1206,16 +1278,25 @@ class VideoProcessor:
         slides_done_ref: Optional[list] = None,
         total_slides: int = 0,
     ):
-        """Generate audio for multiple slides using a thread pool."""
+        """Generate audio for multiple slides using a thread pool.
+
+        Returns the indices of the slides whose narration failed every
+        attempt: each keeps the clip it had and is marked
+        ``needs_regeneration``. Its clip records the settings it was made
+        with, so a run at other settings would redo it on that alone; the
+        mark states the failure in the record whatever the settings, and
+        covers any setting not recorded per clip.
+        """
         completed = 0
         total_to_gen = len(slide_indices)
+        failed_slides: List[int] = []
 
         def generate_single(slide_idx: int):
             slide = pm.state.slides[slide_idx]
             text = slide.speaker_notes
             if not text.strip():
                 slide.needs_regeneration = False
-                return slide_idx, None
+                return slide_idx, None, False
 
             # Use per-slide voice override only when it matches this run's
             # provider; otherwise fall back to the provider-correct global voice
@@ -1228,7 +1309,7 @@ class VideoProcessor:
 
             audio_path = pm.audio_dir / f"slide_{slide_idx + 1:03d}_audio.mp3"
             result = None
-            for attempt in range(3):
+            for attempt in range(NARRATION_ATTEMPTS):
                 # Asked HERE, on the pool worker, before the sentence is
                 # synthesised and before each retry: this is the check that
                 # keeps a cancelled render from starting another slide (the
@@ -1237,7 +1318,7 @@ class VideoProcessor:
                 # is the job's callable, bound to the job in its own thread,
                 # so it answers the same on this thread.
                 if self._cancel_asked():
-                    return slide_idx, None
+                    return slide_idx, None, False
                 result = audio_gen.generate_audio(
                     text=text,
                     voice_id=voice,
@@ -1250,14 +1331,15 @@ class VideoProcessor:
                 )
                 if result:
                     break
-                if attempt < 2:
+                if attempt < NARRATION_ATTEMPTS - 1:
                     # The back-off before a retry (3 s, then 6 s), in short
                     # waits that look at the cancel, so a cancel does not
                     # sit out the wait.
                     deadline = time.monotonic() + 2 ** attempt * 3
                     while time.monotonic() < deadline and not self._cancel_asked():
                         time.sleep(min(RETRY_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-            return slide_idx, result
+            # No clip after every attempt is a failure (a cancel returned above).
+            return slide_idx, result, result is None
 
         max_workers = min(2, total_to_gen)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1274,14 +1356,35 @@ class VideoProcessor:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
-                slide_idx, result = future.result()
+                slide_idx, result, failed = future.result()
                 completed += 1
 
                 if result:
                     from core.audio_mixer import _load_audio_with_retry
                     audio = _load_audio_with_retry(result)
                     duration = len(audio) / 1000.0
-                    pm.update_slide_audio(slide_idx, result, duration, self.voice_id)
+                    # The clip records the settings it was made with, so a
+                    # later run at other settings knows to redo this slide.
+                    pm.update_slide_audio(
+                        slide_idx, result, duration, self.voice_id,
+                        speed=self.speed, stability=self.stability,
+                        similarity_boost=self.similarity_boost, style=self.style,
+                    )
+                elif failed:
+                    # The slide keeps the clip it had, which records the
+                    # settings it was made with, so the next render redoes it
+                    # on that alone when they differ from the run's
+                    # (``get_slides_needing_regeneration``). The mark is kept
+                    # as the record's plain statement that this run failed
+                    # the slide, and covers a setting not recorded per clip.
+                    # The failure is counted now, for the closing line.
+                    pm.mark_slide_for_regeneration(slide_idx)
+                    failed_slides.append(slide_idx)
+                    logger.warning(
+                        "%s: slide %d's narration failed after %d attempts; it keeps its "
+                        "previous clip and is marked to be redone by the next render",
+                        file_label, slide_idx + 1, NARRATION_ATTEMPTS,
+                    )
 
                 if progress:
                     frac = (file_idx + 0.3 + 0.4 * completed / total_to_gen) / total_files
@@ -1295,6 +1398,8 @@ class VideoProcessor:
                             remaining_audio = (total_slides - done_so_far) * per_slide
                             eta_str = f" | Audio ETA: ~{_fmt_eta(remaining_audio)}"
                     progress(frac, f"{file_label}: Audio {completed}/{total_to_gen}{eta_str}")
+
+        return sorted(failed_slides)
 
     def _calibrate_tts_baseline(
         self, segments: list, tts_gen, tmp_dir: Path,
@@ -2021,7 +2126,7 @@ def generate_extra_formats(
     video. ``progress(message)`` is told each format as it starts. Returns
     ``{"webm"|"gif"|"mp3": filename}`` for every file produced.
     """
-    from core.video_creator import _run_until_done
+    from core.video_creator import _probe_duration, _run_until_done
     from utils.config import FFMPEG_PATH
     from utils.helpers import replace_with_retry
 
@@ -2034,12 +2139,17 @@ def generate_extra_formats(
 
     # kind, the user's name, the final file, ffmpeg's output options, the timeout
     runs = []
+    if webm or gif:
+        # The WebM and the GIF may take 60 s plus twice the source's length
+        # (``extra_format_timeout``), the length read from ffmpeg's own
+        # header - asked only when one of them is wanted.
+        timeout = extra_format_timeout(_probe_duration(video_path))
     if webm:
         runs.append(("webm", "WebM", video_path.with_suffix(".webm"),
-                     ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-c:a", "libopus"], 600))
+                     [*WEBM_VP9_OPTIONS, "-c:a", "libopus"], timeout))
     if gif:
         runs.append(("gif", "GIF", video_path.with_suffix(".gif"),
-                     ["-t", "30", "-vf", "fps=5,scale=480:-1:flags=lanczos"], 300))
+                     ["-t", "30", "-vf", "fps=5,scale=480:-1:flags=lanczos"], timeout))
     if audio_only:
         runs.append(("mp3", "MP3", video_path.with_stem(video_path.stem + "_audio").with_suffix(".mp3"),
                      ["-vn", "-acodec", "libmp3lame", "-q:a", "2"], 300))

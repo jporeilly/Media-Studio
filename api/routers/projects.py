@@ -335,6 +335,17 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             export_audio_only=body.export_audio_only,
             **render,
         )
+        def _with_failed(result: dict) -> dict:
+            # The slides whose narration failed every attempt, numbered as the
+            # closing line names them (1-based), and only when there are any:
+            # the Generate card keeps a done render's closing line on their
+            # account (frontend/src/lib/jobs.ts ``lineToKeep``), as it keeps a
+            # cancel's. A result with nothing failed carries no such key.
+            failed = sorted(set(getattr(processor, "failed_slides", None) or []))
+            if failed:
+                result["failed_slides"] = [index + 1 for index in failed]
+            return result
+
         rendered = processor.process_files(
             [fi], output_dir=output_dir, progress=progress, preview_seconds=body.preview_seconds,
         )
@@ -372,7 +383,7 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             outputs["preview"] = video_path.with_stem(video_path.stem + "_preview").name
             current["outputs"] = outputs
             store.save_project(current)
-            return {"preview": outputs["preview"]}
+            return _with_failed({"preview": outputs["preview"]})
 
         # A full render replaces every sidecar with what it produced (an
         # earlier preview file is still there and stays listed, and so does
@@ -400,7 +411,7 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         if cancelled:
             line = processing.cancelled_render_line(stage, False, processor.outputs, wanted)
             return _cancelled(stage, line, video=video_path.name, outputs=current["outputs"])
-        return {"video": video_path.name, "outputs": current["outputs"]}
+        return _with_failed({"video": video_path.name, "outputs": current["outputs"]})
 
     # One job per project: a render over a running AI job would save its own
     # stale copy of the notes over everything the AI loop wrote (409 meanwhile).

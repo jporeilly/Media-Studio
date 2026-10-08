@@ -22,6 +22,14 @@ class ProjectStateError(RuntimeError):
     """
 
 
+# The narration settings a clip records (``SlideRenderState.audio_<name>``)
+# and the project stamps (``ProjectState.generation_<name>``).
+SETTING_NAMES = ("speed", "stability", "similarity_boost", "style")
+# How far a clip's recorded setting may sit from the run's before the slide
+# is redone (a float compared with a float).
+SETTINGS_TOLERANCE = 0.01
+
+
 @dataclass
 class SlideRenderState:
     """State of a single slide's render."""
@@ -32,6 +40,18 @@ class SlideRenderState:
     video_path: Optional[str] = None  # MP4 clip for animated slides
     audio_duration: float = 0.0
     voice_id: str = ""
+    # The narration settings this clip was made with, recorded by
+    # ``ProjectManager.update_slide_audio`` as ``voice_id`` is: a clip records
+    # its voice AND its speed (stability, similarity, style), so a slide whose
+    # clip was made at other settings is redone whatever became of the run
+    # that changed them - a preview that reached only its first slides, a
+    # cancel, a failed slide. None on a record from before 0.14.1 means "made
+    # at the project's stamped value", which was the oracle then
+    # (``ProjectManager.clip_setting``); the stamp writes it in before it moves.
+    audio_speed: Optional[float] = None
+    audio_stability: Optional[float] = None
+    audio_similarity_boost: Optional[float] = None
+    audio_style: Optional[float] = None
     needs_regeneration: bool = False
     ai_enhanced: bool = False
     pause_override: Optional[float] = None
@@ -232,9 +252,16 @@ class ProjectManager:
         slide_index: int,
         audio_path: Path,
         duration: float,
-        voice_id: str
+        voice_id: str,
+        speed: Optional[float] = None,
+        stability: Optional[float] = None,
+        similarity_boost: Optional[float] = None,
+        style: Optional[float] = None,
     ):
-        """Update audio for a specific slide."""
+        """Record a slide's new clip: its file, its length, its voice and the
+        narration settings it was made with. A setting not given is recorded
+        as the project's stamped one - what a caller that names none is
+        working at - so a clip always says what it was made with."""
         if self.state is None or slide_index >= len(self.state.slides):
             return
 
@@ -242,8 +269,20 @@ class ProjectManager:
         slide.audio_path = str(audio_path)
         slide.audio_duration = duration
         slide.voice_id = voice_id
+        given = {"speed": speed, "stability": stability, "similarity_boost": similarity_boost, "style": style}
+        for name in SETTING_NAMES:
+            value = given[name]
+            setattr(slide, f"audio_{name}", value if value is not None else getattr(self.state, f"generation_{name}"))
         slide.needs_regeneration = False
         self.save()
+
+    def clip_setting(self, slide: SlideRenderState, name: str) -> float:
+        """The value of narration setting ``name`` ("speed", "stability",
+        "similarity_boost", "style") that ``slide``'s clip was made with: the
+        one recorded on the clip, or - on a record from before per-clip
+        settings - the project's stamped one, which was the oracle then."""
+        recorded = getattr(slide, f"audio_{name}", None)
+        return recorded if recorded is not None else getattr(self.state, f"generation_{name}")
 
     def update_slide_image(self, slide_index: int, image_path: Path):
         """Update image for a specific slide."""
@@ -307,9 +346,22 @@ class ProjectManager:
         self, speed: float, voice_id: str = None,
         stability: float = None, similarity_boost: float = None, style: float = None,
     ):
-        """Update all voice/generation settings used for audio."""
+        """Stamp the project with the narration settings a completed stage
+        ran at. The stamp is kept as that record (and as the value a clip
+        made before per-clip settings counts as made at); it is no longer
+        what tells the next render which slides to redo - each clip's own
+        settings are (:meth:`get_slides_needing_regeneration`)."""
         if self.state is None:
             return
+        # A clip from before per-clip settings (None) was made under the
+        # stamp as it stands NOW - the stamp was the oracle then. Written in
+        # before the stamp moves, so a preview or a cancelled run that stamps
+        # new settings can never make an old clip pass as made at them.
+        for slide in self.state.slides:
+            if slide.audio_path:
+                for name in SETTING_NAMES:
+                    if getattr(slide, f"audio_{name}") is None:
+                        setattr(slide, f"audio_{name}", getattr(self.state, f"generation_{name}"))
         self.state.generation_speed = speed
         if voice_id is not None:
             self.state.voice_id = voice_id
@@ -330,36 +382,37 @@ class ProjectManager:
         current_stability: float = None, current_similarity_boost: float = None,
         current_style: float = None,
     ) -> List[int]:
-        """Get indices of slides that need audio regeneration.
-
-        If any voice setting differs from the saved value, all slides
-        with speaker notes are returned for regeneration.
+        """The slides whose narration must be (re)made for a run at the given
+        settings: those marked, those with no clip, and those whose CLIP
+        records another voice, or other settings than the run's (beyond
+        :data:`SETTINGS_TOLERANCE`) - judged clip by clip
+        (:meth:`clip_setting`), never by the project-level stamp, which says
+        what the last completed stage ran at and is kept for that. The stamp
+        used to be the oracle, and every run that stamped it without narrating
+        every slide - a preview inside its budget, a cancel, a slide whose
+        narration failed - left slides at the old speed that nothing redid,
+        because a clip recorded its voice but not its speed. A setting not
+        given (None) is not compared. A slide with a voice override keeps its
+        clip on a global voice change, as before.
         """
         if self.state is None:
             return []
 
-        # Check if any voice setting changed
-        all_notes_slides = [s.index for s in self.state.slides if s.speaker_notes.strip()]
-        checks = [
-            (current_speed, getattr(self.state, 'generation_speed', 1.0)),
-            (current_stability, getattr(self.state, 'generation_stability', 0.5)),
-            (current_similarity_boost, getattr(self.state, 'generation_similarity_boost', 0.75)),
-            (current_style, getattr(self.state, 'generation_style', 0.0)),
-        ]
-        for current, saved in checks:
-            if current is not None and abs(current - saved) > 0.01:
-                return all_notes_slides
-
-        # Check voice_id change
-        if current_voice_id is not None and current_voice_id != self.state.voice_id:
-            return all_notes_slides
-
-        return [
-            s.index for s in self.state.slides
-            if s.needs_regeneration or not s.audio_path
-            or (current_voice_id is not None and s.voice_id and s.voice_id != current_voice_id
-                and not getattr(s, 'voice_override', None))
-        ]
+        current = {"speed": current_speed, "stability": current_stability,
+                   "similarity_boost": current_similarity_boost, "style": current_style}
+        needing = []
+        for s in self.state.slides:
+            if s.needs_regeneration or not s.audio_path:
+                needing.append(s.index)
+            elif (current_voice_id is not None and s.voice_id and s.voice_id != current_voice_id
+                    and not getattr(s, 'voice_override', None)):
+                needing.append(s.index)
+            elif s.speaker_notes.strip() and any(
+                value is not None and abs(value - self.clip_setting(s, name)) > SETTINGS_TOLERANCE
+                for name, value in current.items()
+            ):
+                needing.append(s.index)
+        return needing
 
     def all_audio_ready(self) -> bool:
         """Check if all slides have audio generated."""

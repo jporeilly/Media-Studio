@@ -181,13 +181,17 @@ export function wasCancelled(result: unknown): boolean {
 
 /**
  * The line a done job leaves on its card once the page lets go of it, or null: a cancelled job's closing line
- * (a re-voice and a render say what they left on disk), and a transcription's when it dropped sentences'
- * adjustments ("…; the adjustments on 3 sentences were dropped") - the count the dialog warned about, now as
- * it happened.
+ * (a re-voice and a render say what they left on disk); a render's when a slide's narration failed every
+ * attempt and kept an older clip (the result names the slides, `failed_slides`, 1-based, as the line does:
+ * "…; 1 slide (2) kept an older clip: its narration failed after 3 attempts. Render again to redo it."); and
+ * a transcription's when it dropped sentences' adjustments ("…; the adjustments on 3 sentences were dropped")
+ * - the count the dialog warned about, now as it happened.
  */
 export function lineToKeep(job: { kind: string; status: string; message?: string | null; result?: unknown }): string | null {
   if (job.status !== "done") return null;
   if (wasCancelled(job.result)) return job.message || "Cancelled";
+  const failed = (job.result as { failed_slides?: unknown } | null | undefined)?.failed_slides;
+  if (job.kind === "generate" && Array.isArray(failed) && failed.length > 0) return job.message || null;
   const dropped = (job.result as { adjustments_dropped?: unknown } | null | undefined)?.adjustments_dropped;
   if (job.kind === "transcribe" && typeof dropped === "number" && dropped > 0) return job.message || null;
   return null;

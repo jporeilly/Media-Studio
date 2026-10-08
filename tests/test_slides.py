@@ -43,6 +43,8 @@ LEGACY_PROJECT_KEYS = {
 }
 LEGACY_SLIDE_KEYS = {
     "index", "speaker_notes", "audio_path", "image_path", "video_path", "audio_duration", "voice_id",
+    # the settings a clip was made with (0.14.1, #p1-speed): None on an older record
+    "audio_speed", "audio_stability", "audio_similarity_boost", "audio_style",
     "needs_regeneration", "ai_enhanced", "pause_override", "has_animation", "voice_override",
     "alt_text", "notes_history", "original_start_time", "original_end_time", "original_segments",
 }

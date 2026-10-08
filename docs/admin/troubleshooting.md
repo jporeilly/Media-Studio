@@ -18,6 +18,7 @@ The splash streams the backend's own log lines. After 45 seconds it says a first
 | "The backend stopped with an error" with a traceback | Python raised while starting; the last lines name the cause | Run the environment check below; reinstall if a package is missing |
 | "The port was already taken" | Another copy of the app is running | Close it, or sign out and back in |
 | "The backend produced no output at all" | An incomplete install (`main_py_found` or `vendored_python` false in the report) | Reinstall, or run from a checkout with `python main.py` |
+| A link that opens a new tab does nothing in the desktop app: an external link in the in-app docs, **Open the still** on the Captures card | The desktop app hands such links to the system's browser, and before 0.14.1 only its splash page was allowed to ask, so the request was refused silently once the window showed the app | Install 0.14.1 or later from its installer (the in-app updater never refreshes the shell); in a browser the links always worked |
 
 **Check what the machine is missing.** The installer ships a checker that prints one OK / WARN / FAIL row per dependency and, at the end, the fixes for the WARN and FAIL rows that have one:
 
@@ -62,6 +63,7 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 | Play answers "*provider* returned no audio for this sentence" | The voice service did not answer within 30 s, or the voice id is not one of its voices | Try again, or pick a voice from the list |
 | The **Details** card's **Transcribed on** reads CPU on a machine with an NVIDIA GPU; "GPU transcription failed … retrying on CPU" in the log | The CUDA runtime wheels are not installed | Install `requirements-gpu.txt` into the app's Python and **Restart backend** ([Transcription](../ai/transcription.md)) |
 | N sentences "could not be synthesised in the last re-voice" | The voice service failed on those sentences, or their offset pins them past the end of the picture | Re-voice again; pull the offset back |
+| "… kept an older clip: its narration failed after 3 attempts. Render again to redo it." at the end of a render's closing message, kept on the Generate card until dismissed, and a warning in `app.log` naming the slide | The voice service failed on that slide three times running (3 s, then 6 s apart); the render went on with the clip the slide had, which may carry older notes, voice or speed | Render again: only that slide is re-synthesised, the rest keep their clips; for Edge TTS, check the connection first |
 | The re-voice ignored a translation | Ollama was not reachable: a failed translation keeps the original text and logs "Translation failed for a note: …" (or "Translation HTTP *status* for a note") in `app.log` | Start Ollama and re-voice again ([Ollama](../ai/ollama.md)) |
 | A translated re-voice ignored the offsets and mutes | A translation is spread across the video by length; per-sentence adjustments do not apply to it | Expected; keep the original language to use them |
 

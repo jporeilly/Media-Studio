@@ -329,6 +329,39 @@ describe("the Generate card's Cancel (a deck)", () => {
     expect(buttons(generateCard()!, "Regenerate"), "the buttons wait while the job runs").toHaveLength(0);
   });
 
+  // #p1-speed: a render whose narration failed a slide ends done with a closing line that names it, and the
+  // result names the slides (`failed_slides`); the card keeps that line as its notice exactly as it keeps a
+  // cancel's - and nothing when nothing failed.
+  const NOTE = "[1/1] deck.pptx: Complete -> deck.mp4; 1 slide (2) kept an older clip: its narration failed after 3 attempts. Render again to redo it.";
+
+  it("keeps a finished render's closing line as its notice when a slide kept an older clip, dismissible", async () => {
+    deck();
+    const job = runningJob("G", "generate", "u1", "Generating audio…");
+    mount();
+    await until(() => (generateCard()?.textContent ?? "").includes("Generating audio…"), "the render's progress");
+    Object.assign(job, { status: "done", progress: 1, message: NOTE, result: { video: "deck.mp4", outputs: { srt: "deck.srt" }, failed_slides: [2] } });
+    server.active = null;
+    await until(() => (generateCard()?.textContent ?? "").includes(NOTE), "the closing line as the card's notice");
+    expect(findCard("Slides")!.textContent).not.toContain(NOTE);
+    await until(() => buttons(generateCard()!, "Regenerate").length === 1 && !buttons(generateCard()!, "Regenerate")[0].disabled, "Generate is enabled again");
+    const dismiss = generateCard()!.querySelector('button[aria-label="Dismiss"]') as HTMLButtonElement | null;
+    expect(dismiss, "the notice has its cross").toBeTruthy();
+    act(() => dismiss!.click());
+    await until(() => !(generateCard()?.textContent ?? "").includes(NOTE), "dismissed");
+  });
+
+  it("keeps nothing of a finished render when no slide failed", async () => {
+    deck();
+    const job = runningJob("G", "generate", "u1", "Generating audio…");
+    mount();
+    await until(() => (generateCard()?.textContent ?? "").includes("Generating audio…"), "the render's progress");
+    Object.assign(job, { status: "done", progress: 1, message: "[1/1] deck.pptx: Complete -> deck.mp4", result: { video: "deck.mp4", outputs: { srt: "deck.srt" } } });
+    server.active = null;
+    await until(() => buttons(generateCard()!, "Regenerate").length === 1 && !buttons(generateCard()!, "Regenerate")[0].disabled, "the job is over and Generate is enabled again");
+    expect(generateCard()!.textContent).not.toContain("Complete -> deck.mp4");
+    expect(generateCard()!.querySelector('button[aria-label="Dismiss"]')).toBeNull();
+  });
+
   it("shows a refused cancel's message under its own job, on the Generate card alone", async () => {
     deck();
     runningJob("G", "generate", "u1", "Encoding 40%");

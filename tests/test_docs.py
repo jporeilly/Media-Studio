@@ -772,3 +772,113 @@ def test_the_search_finds_each_guide(client, slug, term):
     assert slug in [hit["slug"] for hit in hits], f"{term!r} does not find {slug}"
     hit = next(hit for hit in hits if hit["slug"] == slug)
     assert hit["matches"] >= 1 and term.lower() in hit["snippet"].lower()
+
+
+# ── the Limits table's line references ────────────────────────────────────────
+#
+# docs/reference/limits.md promises, for every row, "the line of code it is
+# read from". Nothing held that promise: an insertion at the top of a module
+# shifted every reference below it, and the table went on pointing at
+# comments, blank lines and unrelated code (twelve such references in one
+# release, found in review). So every `path:line` or `path:a-b` reference
+# must point at a line (range) that, comment lines set aside, carries the
+# row's number - as written, with thousands separators dropped and a trailing
+# .0 ignored, or the same number in milliseconds, minutes, hours or days, or as
+# a share of one (80 % -> 0.8, +30 % -> 1.3) - or a token the row names in
+# backticks (an extension, a command, a constant). A failing reference names
+# its row and what the line holds, so the fix is one number away.
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LIMITS_MD = REPO_ROOT / "docs" / "reference" / "limits.md"
+_LIMIT_REFERENCE = re.compile(r"`([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|html|rs|json|toml)):(\d+)(?:-(\d+))?`")
+_ROW_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_ROW_CODE_SPAN = re.compile(r"`([^`]+)`")
+_COMMENT_LINE = re.compile(r"^\s*(#|//|rem\b|\*|/\*|<!--)", re.IGNORECASE)
+
+
+def _limits_rows(markdown: str) -> list[tuple[str, str, str]]:
+    """(what, limit, where) for every body row of the table."""
+    rows = []
+    for line in markdown.splitlines():
+        if not line.startswith("| ") or line.startswith("| What") or line.startswith("| ---"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 3:
+            rows.append((cells[0], cells[1], cells[2]))
+    return rows
+
+
+def _plain_number(value: float) -> str:
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _number_forms(token: str) -> set[str]:
+    """The spellings a row's number may take in code."""
+    plain = token.replace(",", "")
+    value = float(plain)
+    forms = {_plain_number(value)}
+    for scaled in (value * 1000, value * 60, value * 3600, value * 24, value / 100, 1 + value / 100):
+        forms.add(_plain_number(scaled))
+    return forms
+
+
+def _carries(code: str, forms: set[str], spans: list[str]) -> bool:
+    numeric = code.replace("_", "").replace(",", "")
+    if any(re.search(rf"(?<![\w.]){re.escape(form)}(?:\.0+)?(?![\w.])", numeric) for form in forms):
+        return True
+    return any(span in code for span in spans)
+
+
+def unmatched_limit_references(markdown: str, repo: Path) -> list[str]:
+    """Every reference in the table that points at no line carrying its row's
+    number or named token, each described: the row, the reference, the code."""
+    problems = []
+    for what, limit, where in _limits_rows(markdown):
+        forms: set[str] = set()
+        for token in _ROW_NUMBER.findall(limit):
+            forms |= _number_forms(token)
+        spans = _ROW_CODE_SPAN.findall(limit)
+        for match in _LIMIT_REFERENCE.finditer(where):
+            path, first, last = match.group(1), int(match.group(2)), int(match.group(3) or match.group(2))
+            target = repo / path
+            if not target.is_file():
+                problems.append(f"{what}: {match.group(0)} - no such file")
+                continue
+            lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            if first < 1 or last < first or last > len(lines):
+                problems.append(f"{what}: {match.group(0)} - outside the file ({len(lines)} lines)")
+                continue
+            code = "\n".join(line for line in lines[first - 1:last] if not _COMMENT_LINE.match(line))
+            if not _carries(code, forms, spans):
+                shown = " | ".join(line.strip() for line in code.splitlines())[:100]
+                problems.append(f"{what}: {match.group(0)} -> {shown!r} carries none of {sorted(forms)} {spans}")
+    return problems
+
+
+def test_every_limits_reference_points_at_the_line_that_carries_its_number():
+    problems = unmatched_limit_references(LIMITS_MD.read_text(encoding="utf-8"), REPO_ROOT)
+    assert problems == [], "\n".join(["", *problems])
+
+
+def test_the_limits_reference_check_sees_a_reference_that_slipped(tmp_path):
+    """The check can fail: a module with a limit on one line and a comment on
+    the next; the table pointing at the comment, past the file, or at a
+    number in other units is reported, the right line in any form is not."""
+    (tmp_path / "services").mkdir()
+    (tmp_path / "services" / "limits_fake.py").write_text(
+        "# the pause\nMAX_PAUSE_SECONDS = 30.0\nPOLL_MS = 1200\n# nothing here\nALLOWED = (\".mp3\", \".wav\")\n",
+        encoding="utf-8",
+    )
+    table = "\n".join([
+        "| What | Limit | Where |",
+        "| --- | --- | --- |",
+        "| Pause | 0–30 s | `services/limits_fake.py:2` |",
+        "| Poll | every 1.2 s | `services/limits_fake.py:3` |",
+        "| Music | mp3, wav; `.mp3` | `services/limits_fake.py:5` |",
+        "| Slipped onto the comment | 0–30 s | `services/limits_fake.py:1` |",
+        "| Slipped past the number | 0–30 s | `services/limits_fake.py:3-4` |",
+        "| Slipped out of the file | 0–30 s | `services/limits_fake.py:9` |",
+    ])
+    problems = unmatched_limit_references(table, tmp_path)
+    assert [p.split(":")[0] for p in problems] == ["Slipped onto the comment", "Slipped past the number", "Slipped out of the file"], problems

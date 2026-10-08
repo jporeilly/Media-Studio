@@ -471,6 +471,11 @@ def test_a_failed_slide_srt_leaves_the_video_and_the_other_outputs(tmp_path, mon
 
 def test_extra_formats_run_only_the_requested_ones(tmp_path, monkeypatch):
     calls = _fake_ffmpeg(monkeypatch)
+    # The WebM's and the GIF's timeout follows the source's length, read from
+    # ffmpeg's header when one of them is asked for (#p1-webm); answered here
+    # so ``calls`` is exactly the encodes (tests/test_extra_formats.py covers
+    # the probe: asked once for a WebM, never when nothing is asked for).
+    monkeypatch.setattr(video_creator, "_probe_duration", lambda path: 10.0)
     video = tmp_path / "deck.mp4"
     video.write_bytes(b"mp4")
 
@@ -508,6 +513,10 @@ def test_extra_formats_need_ffmpeg_and_the_video(tmp_path, monkeypatch):
 
 def test_a_failed_format_is_left_out_and_the_rest_still_run(tmp_path, monkeypatch):
     calls = _fake_ffmpeg(monkeypatch, fail_when=lambda cmd: "libvpx-vp9" in cmd)
+    # The WebM's timeout follows the source's length, read from ffmpeg's
+    # header before the formats run (#p1-webm); answered here so the calls
+    # counted are the two encodes (tests/test_extra_formats.py has the probe).
+    monkeypatch.setattr(video_creator, "_probe_duration", lambda path: 10.0)
     video = tmp_path / "deck.mp4"
     video.write_bytes(b"mp4")
     assert processing.generate_extra_formats(video, webm=True, audio_only=True) == {"mp3": "deck_audio.mp3"}
@@ -850,6 +859,11 @@ def _fake_cut(monkeypatch, path="ffmpeg-test", **script):
     # The source's frame rate is read from ffmpeg's header before the cut
     # runs; with Popen faked there is no header, so it is answered here.
     monkeypatch.setattr(video_creator, "source_frame_rate", lambda source: "30")
+    # The cut publishes its output only when ffmpeg's header shows a video
+    # stream with a length (#p1-cover); the fake writes no real picture, so
+    # that is answered here too - the real check runs on every real ffmpeg
+    # in tests/test_cover_art.py.
+    monkeypatch.setattr(video_creator, "_has_moving_picture", lambda part: True)
     return _FakeFfmpeg.instances
 
 

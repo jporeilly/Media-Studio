@@ -644,12 +644,14 @@ def test_a_cancel_during_the_narration_stops_before_the_next_slide(admin, cast, 
 def test_a_cancelled_narration_does_not_record_the_new_speed_so_the_next_render_redoes_every_slide(
     admin, cast, engine, monkeypatch, ffmpeg,
 ):
-    """A clip records its voice but not its speed; the next render tells a
-    speed change only by the project's saved ``generation_speed``. Render at
-    1.0, change the speed to 1.5, render again and cancel mid-narration:
-    the saved speed must stay 1.0, so the third render synthesises EVERY
-    slide at 1.5 - never a video with the unreached slides at the old
-    speed. The plant: the stamp back before the narration check."""
+    """Render at 1.0, change the speed to 1.5, render again and cancel
+    mid-narration: the project's stamp must stay 1.0 (a cancelled run never
+    claims settings it did not apply), and the third render synthesises at
+    1.5 exactly the slides whose clip still records 1.0 - never a video with
+    those at the old speed, and never again the clips the cancelled run did
+    make and record at 1.5, since each clip records its own speed
+    (#p1-speed). The plant: the per-clip comparison removed from
+    ``get_slides_needing_regeneration``."""
     monkeypatch.setattr(config_module, "FFMPEG_PATH", ffmpeg)
     pid = _import_deck(cast["admin_account"])
     pm = _deck_on_disk(ffmpeg, pid, slides=6, with_audio=False)
@@ -677,14 +679,25 @@ def test_a_cancelled_narration_does_not_record_the_new_speed_so_the_next_render_
     assert 0 < len(tts.speeds) < 6 and set(tts.speeds) == {1.5}, "some slides were re-synthesised at 1.5, not all"
     pm.load()
     assert pm.state.generation_speed == 1.0, "the cancelled run did not record the new speed"
+    # The clips the cancelled run made AND collected record 1.5 (one still in
+    # flight at the cancel is written to disk but never collected, so its
+    # slide still records 1.0 and is redone); the rest record 1.0.
+    at_new_speed = [s.index for s in pm.state.slides if s.audio_speed == 1.5]
+    assert 0 < len(at_new_speed) < 6 and all(
+        s.audio_speed == 1.0 for s in pm.state.slides if s.index not in at_new_speed)
 
     tts.speeds = []
+    tts.calls.clear()
     tts.on_call = None
     third = _wait_end(admin, _generate(admin, pid, speed=1.5))
     assert third["status"] == "done" and third["result"]["video"] == "deck.mp4", third
-    assert tts.speeds == [1.5] * 6, "every slide is synthesised at the new speed"
+    assert set(tts.speeds) == {1.5} and len(tts.speeds) == 6 - len(at_new_speed), "the rest, at the new speed"
+    assert sorted(c["text"] for c in tts.calls) == [
+        f"Slide {i + 1} notes." for i in range(6) if i not in at_new_speed
+    ], "exactly the slides whose clip still recorded the old speed"
     pm.load()
     assert pm.state.generation_speed == 1.5, "recorded once the narration stage completed"
+    assert all(s.audio_speed == 1.5 for s in pm.state.slides)
 
 
 @needs_ffmpeg
@@ -1022,7 +1035,11 @@ def test_a_cancel_while_a_format_is_written_kills_ffmpeg_and_removes_its_part_fi
     assert out == {} and seen["part"], "cancelled while the WebM was being written"
     assert not part.exists() and not (tmp_path / "deck.webm").exists()
     assert not (tmp_path / "deck.gif").exists(), "the GIF never started"
-    assert len(started) == 1 and started[0].poll() is not None and started[0].returncode != 0, "the WebM's ffmpeg was stopped"
+    # Two processes, and no third: the length probe (``ffmpeg -i``, for the
+    # timeout that follows the source's length, #p1-webm) and the WebM's encode.
+    assert len(started) == 2, [proc.args[:4] for proc in started]
+    (webm,) = [proc for proc in started if "libvpx-vp9" in proc.args]
+    assert webm.poll() is not None and webm.returncode != 0, "the WebM's ffmpeg was stopped"
     assert elapsed < STOP_WITHIN, f"a 4 s WebM at real time, stopped at the first poll after it opened its file: {elapsed:.2f} s"
     assert list((tmp_path / "temp").iterdir()) == []
 

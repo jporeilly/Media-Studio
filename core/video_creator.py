@@ -491,7 +491,13 @@ def _probe_duration(path: Path) -> Optional[float]:
     (:func:`usable_duration`) - the unchanged contract, so every caller
     behaves exactly as before.
     """
-    found = _DURATION_LINE.search(_ffmpeg_header(path))
+    return _header_duration(_ffmpeg_header(path))
+
+
+def _header_duration(header: str) -> Optional[float]:
+    """The ``Duration:`` line of an ffmpeg header as :func:`_probe_duration`
+    reads it: a usable number of seconds, or None (no line, ``N/A``, junk)."""
+    found = _DURATION_LINE.search(header)
     if not found:
         return None
     hours, minutes, seconds = found.groups()
@@ -978,6 +984,16 @@ def cut_picture(
             return False
         if not part.is_file() or part.stat().st_size == 0:
             logger.error("ffmpeg reported success but wrote no picture")
+            return False
+        if not _has_moving_picture(part):
+            # A source whose only picture is cover art - an audio file in a
+            # video container (refused at import since 0.14.1, but a project
+            # imported before that can still carry one): ffmpeg exits 0 and
+            # writes a one-frame video stream of no length, and a re-voice
+            # built on it would be a silent file with no picture. Never
+            # published; the cut fails like any other.
+            logger.error("ffmpeg reported success but the cut of %s carries no moving picture "
+                         "(a video stream with no length): the source has no picture to cut", source.name)
             return False
         replace_with_retry(part, dst)
         logger.info("Picture cut: %s (%.1fs)", dst.name, length)
@@ -1739,6 +1755,16 @@ def _progress_frame(path: Path) -> Optional[int]:
 def _has_video_stream(path) -> bool:
     """Whether ffmpeg finds a video stream in ``path`` (its own header)."""
     return bool(_VIDEO_STREAM.search(_ffmpeg_header(path)))
+
+
+def _has_moving_picture(path) -> bool:
+    """Whether ffmpeg finds in ``path`` a video stream WITH a length - a
+    moving picture, not cover art. The cut of a file whose only picture is an
+    attached picture is a one-frame video stream of no length (``Duration:
+    N/A``; measured on 8.0.1 and the bundled 7.1), which a bare stream check
+    passes. One header read answers both questions."""
+    header = _ffmpeg_header(path)
+    return bool(_VIDEO_STREAM.search(header)) and _header_duration(header) is not None
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

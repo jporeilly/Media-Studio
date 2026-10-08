@@ -14,7 +14,7 @@ In the Owner column a project imported before the app had owners shows **unassig
 
 ## What to do
 
-**Import.** Press **Import**, choose one file, wait for the status line. A file over 2 GB, an empty file, or a file whose extension is not in the list is refused before anything is stored; the refusal of a wrong type names the accepted extensions.
+**Import.** Press **Import**, choose one file, wait for the status line. A file over 2 GB, an empty file, or a file whose extension is not in the list is refused before anything is stored; the refusal of a wrong type names the accepted extensions. A video file must carry a moving picture: an audio file in a video container whose only picture is its cover art (a podcast or a music track saved as `.mp4` or `.m4v` with a jpg attached) is refused with "This file has no moving picture — an audio file with cover art. Import a video.", because there is nothing in it to re-voice, cut or chapter. Import a video; to lay that sound under a deck, render the deck, import the rendered video as a video project and place the sound on its [Music lane](music.md), which takes an mp3, wav, m4a, aac, ogg or flac file, so save the sound as one of those first.
 
 **Open.** Click the name. Every feature lives on the project page.
 

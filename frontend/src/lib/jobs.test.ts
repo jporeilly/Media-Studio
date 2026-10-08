@@ -262,6 +262,15 @@ describe("lineToKeep: the line a done job leaves on its card", () => {
     expect(lineToKeep({ kind: "transcribe", status: "done", message: "Transcribed 42 segments", result: {} })).toBeNull();
   });
 
+  it("keeps a render's line when a slide's narration failed and kept an older clip, and only then", () => {
+    const line = "[1/1] deck.pptx: Complete -> deck.mp4; 1 slide (2) kept an older clip: its narration failed after 3 attempts. Render again to redo it.";
+    expect(lineToKeep({ kind: "generate", status: "done", message: line, result: { video: "deck.mp4", outputs: {}, failed_slides: [2] } })).toBe(line);
+    expect(lineToKeep({ kind: "generate", status: "done", message: "Complete -> deck_preview.mp4; …", result: { preview: "deck_preview.mp4", failed_slides: [1] } })).toBe("Complete -> deck_preview.mp4; …");
+    expect(lineToKeep({ kind: "generate", status: "done", message: "[1/1] deck.pptx: Complete -> deck.mp4", result: { video: "deck.mp4", outputs: {} } })).toBeNull();
+    expect(lineToKeep({ kind: "generate", status: "done", message: "Complete", result: { video: "deck.mp4", failed_slides: [] } })).toBeNull();
+    expect(lineToKeep({ kind: "revoice", status: "done", message: "Complete", result: { video: "x.mp4", failed_slides: [2] } })).toBeNull();
+  });
+
   it("keeps nothing for a job that ran to its end, or one that failed (its error stays on the card)", () => {
     expect(lineToKeep({ kind: "revoice", status: "done", message: "Complete", result: { video: "clip_revoiced.mp4" } })).toBeNull();
     expect(lineToKeep({ kind: "revoice", status: "error", message: "Re-voice failed", result: null })).toBeNull();

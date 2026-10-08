@@ -38,6 +38,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -55,6 +56,44 @@ DECK_SUFFIXES = {".pptx"}
 PDF_SUFFIXES = {".pdf"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 ALLOWED_SUFFIXES = DECK_SUFFIXES | PDF_SUFFIXES | VIDEO_SUFFIXES
+
+# A file with a video suffix whose only picture is cover art - a podcast or a
+# tone in an .mp4 or .m4a-style container with a jpg attached - used to
+# import as a video project, and a re-voice with a cut then wrote a file
+# with a one-frame picture of no length (``core.video_creator.cut_picture``
+# refuses to publish one now). It is refused here instead, with the reason.
+NO_MOVING_PICTURE = "This file has no moving picture — an audio file with cover art. Import a video."
+# How long the probe of an import may take (ffprobe reads the header only).
+PROBE_TIMEOUT = 30.0
+
+
+def has_no_moving_picture(path: Path) -> bool:
+    """Whether ffprobe reads ``path`` and finds no moving picture in it: no
+    video stream at all, or none that is not an attached picture
+    (``disposition.attached_pic``, cover art). False when there is no ffprobe
+    or it cannot read the file - the old behaviour, where the step that needs
+    the picture is the one that says so."""
+    from utils import config as _config
+
+    ffprobe = _config._FFPROBE_PATH
+    if not ffprobe:
+        return False
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "stream=codec_type:stream_disposition=attached_pic",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if out.returncode != 0:
+        return False
+    try:
+        streams = json.loads(out.stdout or "{}").get("streams") or []
+    except (ValueError, AttributeError):
+        return False
+    video = [s for s in streams if isinstance(s, dict) and s.get("codec_type") == "video"]
+    return all((s.get("disposition") or {}).get("attached_pic") == 1 for s in video)
 
 # Project ids are minted as uuid4().hex[:12]. Validate any caller-supplied id
 # against that shape BEFORE joining it to a path, so a crafted id (e.g. ".." or
@@ -183,6 +222,12 @@ def import_upload(filename: str, data: bytes, *,
     pdir.mkdir(parents=True, exist_ok=True)
     dest = pdir / name
     dest.write_bytes(data)
+    if kind == "video" and has_no_moving_picture(dest):
+        # Nothing of it is kept: the directory is not yet a project (no
+        # project.json), and ``list_projects`` would skip it, but a refused
+        # file must not sit on disk either.
+        shutil.rmtree(pdir, ignore_errors=True)
+        raise ValueError(NO_MOVING_PICTURE)
 
     record = {
         "id": pid,
