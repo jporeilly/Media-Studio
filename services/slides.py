@@ -38,11 +38,12 @@ features must skip it), ``pdf`` (page renders), or None when unknown.
 
 import math
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.project_manager import ProjectManager, get_project_dir
+from core.project_manager import ProjectManager, SlideRenderState, get_project_dir
 from services import projects as store
 from services import studio_settings
 
@@ -577,6 +578,134 @@ def image_path(pid: str, index: int) -> Path | None:
         if base not in path.parents or not path.is_file():
             return None
         return path
+
+
+# -- a still becomes a slide (T3) ------------------------------------------------
+
+#: The size a new slide's image is rendered at when the deck has no rendered
+#: slide yet to match: what the PowerPoint export produces.
+DEFAULT_SLIDE_IMAGE_SIZE = (1920, 1080)
+#: The background a still is letterboxed onto when the deck has no rendered
+#: slide to take its background from - white, a new deck's own default.
+LETTERBOX_BACKGROUND = (255, 255, 255)
+#: How deep a band of the slide's edge is read for its background: this share
+#: of the shorter side, at least one pixel.
+BORDER_SHARE = 0.01
+
+
+def letterbox(image, size: tuple[int, int], background=LETTERBOX_BACKGROUND):
+    """``image`` fitted inside ``size`` with its aspect kept and the rest
+    filled with ``background`` (a transparent still is flattened onto it).
+    A still already of that aspect fills the frame; one wider or taller gets
+    bars - never a stretch, which is what the render would otherwise do to
+    an image whose aspect differs from the slide's."""
+    from PIL import Image
+
+    target_w, target_h = size
+    src = image.convert("RGBA")
+    scale = min(target_w / src.width, target_h / src.height)
+    w, h = max(1, round(src.width * scale)), max(1, round(src.height * scale))
+    fitted = src.resize((w, h), Image.LANCZOS) if (w, h) != src.size else src
+    canvas = Image.new("RGB", (target_w, target_h), background)
+    x, y = (target_w - w) // 2, (target_h - h) // 2
+    canvas.paste(fitted, (x, y), fitted)
+    return canvas
+
+
+def border_colour(image) -> tuple[int, int, int]:
+    """The colour of an image's edge: the per-channel MEDIAN of a band round
+    its border (``BORDER_SHARE`` of the shorter side, at least one pixel) -
+    a slide's background where its content does not reach, and the median so
+    a logo or a footer touching one edge does not tint it."""
+    import numpy as np
+
+    a = np.asarray(image.convert("RGB"))
+    h, w = a.shape[:2]
+    d = max(1, int(min(w, h) * BORDER_SHARE))
+    ring = np.concatenate([
+        a[:d].reshape(-1, 3), a[-d:].reshape(-1, 3),
+        a[d:-d, :d].reshape(-1, 3), a[d:-d, -d:].reshape(-1, 3),
+    ])
+    return tuple(int(v) for v in np.median(ring, axis=0))
+
+
+def _deck_look(record: dict, pm: ProjectManager) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    """The size and background a new slide's image takes from the deck: the
+    first rendered slide image's pixel size and its border colour
+    (``border_colour``); 1920x1080 on white when no slide is rendered."""
+    from PIL import Image
+
+    for slide in pm.state.slides:
+        p = _image_file(record, pm, slide.index)
+        if p.is_file():
+            try:
+                with Image.open(p) as img:
+                    return img.size, border_colour(img)
+            except Exception:
+                continue
+    return DEFAULT_SLIDE_IMAGE_SIZE, LETTERBOX_BACKGROUND
+
+
+def _append_picture_slide(pptx_path: Path, image: Path) -> None:
+    """Add a slide at the end of the deck holding ``image`` fitted to the
+    slide (aspect kept, centred), on the blank layout. The deck is rewritten
+    atomically: saved beside itself, then moved over."""
+    from pptx import Presentation
+
+    from utils.helpers import replace_with_retry
+
+    prs = Presentation(str(pptx_path))
+    layouts = list(prs.slide_layouts)
+    layout = layouts[6] if len(layouts) > 6 else layouts[-1]
+    slide = prs.slides.add_slide(layout)
+    # The blank layout can still carry placeholders; a picture slide wants none.
+    for shape in list(slide.placeholders):
+        shape._element.getparent().remove(shape._element)
+    from PIL import Image
+
+    with Image.open(image) as img:
+        iw, ih = img.size
+    sw, sh = prs.slide_width, prs.slide_height
+    scale = min(sw / iw, sh / ih)
+    w, h = int(iw * scale), int(ih * scale)
+    slide.shapes.add_picture(str(image), int((sw - w) / 2), int((sh - h) / 2), w, h)
+    tmp = pptx_path.with_name(f"{pptx_path.stem}.{uuid.uuid4().hex[:8]}.tmp.pptx")
+    prs.save(str(tmp))
+    replace_with_retry(tmp, pptx_path)
+
+
+def append_image_slide(pid: str, image: Path) -> dict:
+    """Make ``image`` (a capture's still) the deck's new LAST slide: the
+    slide's rendered image is the still letterboxed to the deck's rendered
+    size, on the deck's own background - both read from its first rendered
+    slide (``_deck_look``; 1920x1080 on white when none is rendered) - so the
+    render never stretches it; the deck's ``.pptx`` gains a picture slide so a later export from
+    PowerPoint agrees; the inner project gains the slide with empty notes.
+    Decks only - a PDF's pages are fixed. The caller holds the project idle
+    (``jobs.require_idle``); this takes the project lock. Returns
+    ``{"index", "slide_count"}``."""
+    from PIL import Image
+
+    with project_lock(pid):
+        record, pm = _open(pid)
+        if record["kind"] != "deck":
+            raise ValueError("Only a deck can take a new slide; a PDF's pages are fixed.")
+        image = Path(image)
+        if not image.is_file():
+            raise ValueError("The capture's image is missing.")
+        index = len(pm.state.slides)
+        size, background = _deck_look(record, pm)
+        target = _image_file(record, pm, index)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(image) as img:
+            letterbox(img, size, background).save(target)
+        _append_picture_slide(_source(pid, record), image)
+        pm.state.slides.append(SlideRenderState(index=index, speaker_notes=""))
+        if pm.state.slide_order is not None:
+            pm.state.slide_order.append(index)
+        pm.update_slide_image(index, target)
+        _reconcile(pid, record, pm)
+        return {"index": index, "slide_count": index + 1}
 
 
 # -- export -------------------------------------------------------------------

@@ -577,7 +577,7 @@ def test_the_real_sections_are_all_listed_in_order(client):
 EXPECTED_READING = {
     "Start here": ["README", "INSTALL"],
     "Using Media Studio": [f"docs/guides/{name}" for name in (
-        "getting-started", "projects", "slide-editor", "ai-assistant", "generate-video", "transcript",
+        "getting-started", "projects", "capture", "slide-editor", "ai-assistant", "generate-video", "transcript",
         "re-voice", "timeline", "music", "markers-and-chapters", "jobs")],
     "Administration": [f"docs/admin/{name}" for name in (
         "accounts-and-roles", "password-policy", "studio-settings", "updates", "audit-log",
@@ -735,6 +735,7 @@ def test_every_relative_link_in_the_real_documents_resolves_to_a_served_document
 GUIDE_TERMS = [
     ("docs/guides/getting-started", "Accent colour"),
     ("docs/guides/projects", "hexadecimal"),
+    ("docs/guides/capture", "Share with system audio"),
     ("docs/guides/slide-editor", "sparkle"),
     ("docs/guides/ai-assistant", "anticipated"),
     ("docs/guides/generate-video", "Regenerate"),

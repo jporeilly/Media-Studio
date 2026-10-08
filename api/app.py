@@ -38,6 +38,14 @@ async def lifespan(app: FastAPI):
     # Database + admin seed. Kept small for now; grows as features land.
     store.init_db()
     store.seed_admin()
+    # Screen capture (T3): the frozen frames an overlay left behind (a crash
+    # between the freeze and the overlay's answer keeps pictures of the
+    # desktop nobody asked to keep), and recording saves a restart cut short
+    # (no job survives one: each is offered again, never shown as saving).
+    from api.routers.capture import SCREEN_DIR
+    from services import capture, recordings
+    capture.clear_frozen(SCREEN_DIR)
+    recordings.reset_stale()
     # uvicorn's warnings and errors - the traceback of an unhandled 500 among
     # them - into app.log too. Here rather than at import: uvicorn.run applies
     # its own logging config after main.py has imported this module, and that

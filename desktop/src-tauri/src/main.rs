@@ -10,6 +10,7 @@
 // install root is not predictable and the app directory may be read-only.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
 mod server;
 
 use std::path::{Path, PathBuf};
@@ -199,6 +200,10 @@ fn restart_server(handle: tauri::AppHandle, state: State<'_, AppState>) -> bool 
 
     match Server::start(&resource_dir, &boot_py, &app_dir) {
         Ok(srv) => {
+            // A restart may land on a new port: the capture commands follow it.
+            if let Err(e) = capture::pin_capability(&handle, srv.port) {
+                eprintln!("{e}");
+            }
             *guard = Some(srv);
             true
         }
@@ -310,7 +315,20 @@ fn main() {
             diagnostics,
             save_report,
             restart_server,
-            open_state_dir
+            open_state_dir,
+            // Screen capture (T3): monitors and windows in physical pixels,
+            // and the region overlay. Declared in build.rs as well, so the
+            // ACL can grant them to the UI's http origin (capabilities/).
+            capture::capture_monitors,
+            capture::capture_windows,
+            capture::capture_overlay_open,
+            capture::capture_overlay_close,
+            capture::capture_overlay_done,
+            capture::capture_bar_open,
+            capture::capture_bar_close,
+            capture::capture_hotkeys_start,
+            capture::capture_hotkeys_stop,
+            capture::capture_guard
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -323,6 +341,11 @@ fn main() {
 
             match Server::start(&resource_dir, &boot_py, &app_dir) {
                 Ok(srv) => {
+                    // The capture commands, granted to this backend's origin
+                    // only (capture.rs, pin_capability).
+                    if let Err(e) = capture::pin_capability(&handle, srv.port) {
+                        eprintln!("{e}");
+                    }
                     *shared.lock().unwrap() = Some(srv);
                 }
                 Err(e) => {
@@ -334,9 +357,51 @@ fn main() {
             }
             Ok(())
         })
-        .on_window_event(move |_window, event| {
+        .on_window_event(move |window, event| {
             // Stop the server on close rather than waiting for process exit, so
             // the port is free immediately if the user relaunches.
+            //
+            // The MAIN window's close only: this handler fires for every window
+            // the shell owns, and since T3 the screen capture opens and closes
+            // windows of its own (the region overlay on each monitor, the
+            // recorder bar). Unscoped, the first overlay to close took the
+            // backend down with it, mid-recording, with nothing in the log but
+            // the request it had just served (measured on the first live run).
+            //
+            // An overlay closed before it answered - Alt+F4 - is a cancel, as
+            // Escape is: the page is told and the other monitors' overlays
+            // close (capture.rs, overlay generations).
+            if window.label() != "main" {
+                if let tauri::WindowEvent::Destroyed = event {
+                    capture::overlay_destroyed(window.app_handle(), window.label());
+                }
+                return;
+            }
+            // A recording in flight, or its save: the close is refused and the
+            // page says why (capture.rs, RECORDING_GUARD) - but only while the
+            // backend runs. Once it has exited the guard is ignored: nothing a
+            // close could lose is left, and the page that would lower the guard
+            // went with it (capture::close_refused).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let running = for_close
+                    .lock()
+                    .ok()
+                    .map(|mut guard| match guard.as_mut() {
+                        Some(srv) => capture::backend_running(true, srv.exited()),
+                        None => capture::backend_running(false, None),
+                    })
+                    .unwrap_or(true);
+                if capture::close_refused(capture::recording_in_flight(), running) {
+                    api.prevent_close();
+                    if let Some(main) = window.app_handle().get_webview_window("main") {
+                        let _ = main.unminimize();
+                        let _ = main.set_focus();
+                    }
+                    use tauri::Emitter;
+                    let _ = window.emit_to("main", capture::CLOSE_BLOCKED_EVENT, ());
+                }
+                return;
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Ok(mut guard) = for_close.lock() {
                     if let Some(srv) = guard.as_mut() {

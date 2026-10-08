@@ -66,6 +66,22 @@ PROJECT_REVOICE = "project.revoice"
 # the times, which would say where every cut is, and never any text.
 PROJECT_EDIT = "project.edit"
 
+# Screen capture (T3). A recording's start, its save (the finish job; the
+# project it makes is a ``project.import`` row of its own) and its discard;
+# a still taken, added to a deck as a slide, or deleted. The detail names
+# the kind and the size - never a title's text beyond the capture's name.
+RECORDING_START = "recording.start"
+RECORDING_FINISH = "recording.finish"
+RECORDING_DISCARD = "recording.discard"
+CAPTURE_STILL = "capture.still"
+CAPTURE_ADD_TO_DECK = "capture.add_to_deck"
+CAPTURE_DELETE = "capture.delete"
+# A request to grab, freeze or read the HOST's screen from anywhere but this
+# computer (``api.routers.capture.screen_user``), refused: on a team server it
+# would be an attempt to see the server's desktop. The detail names the route
+# and the client address.
+CAPTURE_REFUSED = "capture.refused"
+
 # The music library (``services.music``): studio-wide, so the row is what says
 # who put a file there or took it away. The detail carries the name and the
 # size, no more.
@@ -105,10 +121,14 @@ ACTIONS: tuple[str, ...] = (
     SLIDES_UPDATE, SLIDES_BULK_UPDATE, SLIDES_RENDER, SLIDES_UNDO, SLIDES_RESET,
     AI_NOTES, AI_ENHANCE, AI_QA, AI_TONE, AI_TRANSLATE, AI_PACING, AI_QA_DOC, AI_QA_FIX,
     JOB_CANCEL, SYSTEM_UPDATE, SYSTEM_RESTART, AUDIT_PURGE,
+    RECORDING_START, RECORDING_FINISH, RECORDING_DISCARD, CAPTURE_STILL, CAPTURE_ADD_TO_DECK, CAPTURE_DELETE,
+    CAPTURE_REFUSED,
 )
 
 # What the action was done to (the ``entity`` column).
-ENTITIES: tuple[str, ...] = ("auth", "user", "settings", "project", "music", "job", "system", "audit")
+ENTITIES: tuple[str, ...] = (
+    "auth", "user", "settings", "project", "music", "job", "system", "audit", "recording", "capture",
+)
 
 
 def audit(action: str, *, user: dict | None = None, username: str | None = None,

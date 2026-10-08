@@ -1,6 +1,6 @@
 # Keyboard shortcuts
 
-Every key the Timeline and the slide editor answer to.
+Every key the Timeline, the slide editor and the screen recorder answer to.
 
 The Timeline's keys are ignored while you are typing in a box and while the music library is open; the slide editor's arrows are ignored in a field and while a dialog is open.
 
@@ -45,8 +45,21 @@ Keys pressed with **Alt** held are left to the browser, except the nudge keys, w
 | **Enter** / **Escape** (in the marker name box) | Keep the name / put the old one back |
 | **Enter** (in the List's Offset, Speed or Voice box, or a clip's fade box) | Commit the value |
 
+## Screen recording (desktop app)
+
+While a recording runs these work from anywhere, whichever window has the focus, as in Snagit.
+
+| Key | What it does |
+| --- | --- |
+| **Shift+F9** | Pause, or resume |
+| **Shift+F10** | Stop and save; during the 3-2-1 countdown, call the recording off |
+| **Esc**, a right click or **Alt+F4** (on the region overlay) | Give up the region |
+
+The keys are taken from the countdown until the recording stops, and not otherwise. If another program holds them the app says "the recording keys are off", and the recorder bar's buttons still pause and stop.
+
 ## See also
 
 - [The Timeline](../guides/timeline.md)
 - [The slide editor](../guides/slide-editor.md)
 - [Markers and chapters](../guides/markers-and-chapters.md)
+- [Screen capture](../guides/capture.md)

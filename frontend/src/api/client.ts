@@ -69,9 +69,21 @@ async function requestBlob(path: string): Promise<Blob> {
   return resp.blob();
 }
 
+/**
+ * PUT a raw body - a recorder's WebM chunk - with its own content type, read back as JSON. Kept apart from
+ * `request` so the JSON and form paths never grow a third shape by accident.
+ */
+async function requestRaw<T>(method: string, path: string, body: Blob, contentType: string): Promise<T> {
+  const resp = await fetch(path, { method, headers: { "Content-Type": contentType }, body, credentials: "include" });
+  const text = await resp.text();
+  if (!resp.ok) throw failure(resp, text, path);
+  return (text ? JSON.parse(text) : null) as T;
+}
+
 export const api = {
   get: <T = any>(path: string) => request<T>("GET", path),
   blob: (path: string) => requestBlob(path),
+  putRaw: <T = any>(path: string, body: Blob, contentType: string) => requestRaw<T>("PUT", path, body, contentType),
   post: <T = any>(path: string, body?: unknown) => request<T>("POST", path, body),
   patch: <T = any>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   put: <T = any>(path: string, body?: unknown) => request<T>("PUT", path, body),

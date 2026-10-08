@@ -52,6 +52,33 @@ AUDIT_EXEMPT: dict[str, str] = {
         "materialise the engine project on first open, as the unaudited GET of "
         "the slide list does."
     ),
+    "api.routers.capture.freeze": (
+        "Takes throwaway pictures of each monitor for the region overlay to draw "
+        "over; nothing is kept (the page deletes them once they have served). What "
+        "the user then captures is audited where it is made: capture.still for a "
+        "still, recording.start for a recording."
+    ),
+    "api.routers.capture.forget_frozen": (
+        "Deletes those throwaway overlay pictures once they have served: "
+        "housekeeping of files no user made or named, with no record to change."
+    ),
+    "api.routers.recordings.put_chunk": (
+        "One chunk of a recording in progress, every five seconds - 720 rows an "
+        "hour of one recording. The recording's start, its save and its discard "
+        "are audited (recording.start / finish / discard), which is the event."
+    ),
+    "api.routers.recordings.heartbeat": (
+        "The recorder saying it is still recording (paused or between chunks), "
+        "every five seconds, so the Projects page cannot save or discard a "
+        "recording still being made. It changes nothing a user made or named; "
+        "the recording's start, save and discard are the audited events."
+    ),
+    "api.routers.recordings.release": (
+        "The recorder letting go of a recording it could not finish (a failure, "
+        "a full disk, the cap), so the Projects page offers it at once instead of "
+        "twenty seconds later. Nothing is made, named or removed; the recording's "
+        "start and its later save or discard are the audited events."
+    ),
 }
 
 # Deliberately NOT exempt, recorded here so the decision is visible next to the

@@ -6,6 +6,8 @@ The Projects page is where every deck, PDF and video enters the studio: import a
 
 **Import** in the page header opens a file picker that accepts `.pptx`, `.pdf`, `.mp4`, `.mov`, `.mkv`, `.avi`, `.webm` and `.m4v`. On a page with no projects the header button is replaced by **Import a file** in the centre, under "No projects yet". A status line reports the import ("Imported "name".") or the refusal, with a **Dismiss** cross.
 
+In the desktop app the header also has **Capture**, which records the screen or takes a still: see [Screen capture](capture.md). Below the projects, the **Captures** card lists the stills; above them, **Recordings not saved yet** appears only when a recording was stopped and never saved.
+
 The table has one row per project: **Name** (a link to the project, with the source file's name under it), **Type** (Deck, PDF or Video), **Slides** (the number of slides or pages; a dash for a video, and for a PDF until it has been opened), **Size**, **Owner** (administrators only), **Imported** (how long ago), and a **Delete project** button at the end of the row.
 
 In the Owner column a project imported before the app had owners shows **unassigned**, with a tooltip saying only administrators can see it.
@@ -33,5 +35,6 @@ The import and the delete are recorded in the audit log as `project.import` and 
 ## See also
 
 - [Jobs](jobs.md): one job per project, and what that refuses
+- [Screen capture](capture.md): a screen recording becomes a video project; stills can become slides
 - [Accounts and roles](../admin/accounts-and-roles.md): who sees which projects
 - [Data and backup](../admin/data-and-backup.md): the project directory in full

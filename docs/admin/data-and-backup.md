@@ -21,9 +21,12 @@ data\
     <stem>_project\            the slide editor's inner project: notes and history, slide images, per-slide audio
     revoice\                   the re-voice job's working project
     exports\                   <name>-notes.pptx and <name>-qa.txt
+  captures\<id>\               one screen still: still.png (the screen as captured) and capture.json
   logs\app.log                 the server log (rotating)
   cache\                       every synthesised sentence and slide, keyed by text, voice and speed; never swept
   temp\                        scratch files
+    recordings\<id>\           a screen recording's pieces until it is saved: meta.json and one chunk-NNNNNN.webm per piece
+    capture\                   the frozen screen pictures the region overlay draws over, deleted once it has served and at every start
 assets\
   music\                       the studio's music library: the files, index.json, and a .peaks.json per file
   models\kokoro\               Kokoro's model and voices, downloaded once (about 340 MB)
@@ -38,7 +41,7 @@ Renders belong to their project: a deck's MP4 and sidecars, a video's re-voice a
 There is no backup feature in the app.
 
 1. Stop the app: close the desktop window, or stop the server. Jobs live in memory, so a job in flight is lost: let it finish first.
-2. Copy `data\` and `assets\music\`. That is the accounts, the settings, every project with its transcript, edit and renders, and the music library. `data\cache\`, `data\temp\` and `assets\temp\` can be left out; `assets\models\kokoro\` downloads again on the first Kokoro narration if it is missing.
+2. Copy `data\` and `assets\music\`. That is the accounts, the settings, every project with its transcript, edit and renders, the screen stills, and the music library. `data\cache\`, `assets\temp\` and everything in `data\temp\` except `data\temp\recordings\` can be left out (that folder holds screen recordings not saved yet, the only copy of them); `assets\models\kokoro\` downloads again on the first Kokoro narration if it is missing.
 3. Start the app.
 
 A single project can be backed up on its own: its directory `data\projects\<id>\` is self-contained, and the music files its clips name are in `assets\music\` by name.

@@ -67,3 +67,17 @@ def routes() -> list[RouteInfo]:
     from api.app import app
 
     return api_routes(app)
+
+
+@pytest.fixture(autouse=True)
+def _capture_dirs(tmp_path_factory, monkeypatch):
+    """The app's startup clears the frozen screen frames and resets recording
+    saves a restart cut short (``api.app.lifespan``). Every test that starts
+    the app does that to folders of its own, never to the checkout's
+    ``data/temp`` - where a dev server's recordings may be."""
+    from api.routers import capture as capture_routes
+    from services import recordings
+
+    base = tmp_path_factory.mktemp("capture-dirs")
+    monkeypatch.setattr(capture_routes, "SCREEN_DIR", base / "capture")
+    monkeypatch.setattr(recordings, "RECORDINGS_DIR", base / "recordings")

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Capture</title>
+<!--
+  The region overlay of the screen capture (T3). The desktop shell opens one
+  window of this page per monitor (capture.rs: capture_overlay_open), each
+  covering its monitor exactly, with ?monitor=<index>&gen=<generation>; the
+  shell builds that URL on the backend's own origin (no page names it). The
+  page is served by the backend like the rest of the UI, so the session
+  cookie and the API are at hand, and the shell's capability grants this
+  origin the capture commands.
+
+  It shows a FROZEN screenshot of its monitor (taken by the main window just
+  before the overlay opened - POST /api/capture/freeze - and read from
+  /api/capture/frozen/<index>) and draws over it: crosshairs, the pointer's
+  position and the live size of a drag, a magnifier, and the outline of the
+  top-most window under the pointer (the shell's window list, DWM frame
+  bounds). A drag picks a region; a click picks the window under the pointer
+  (whole; the main window cuts it to this monitor - a region is cut from one
+  screen's picture - in CaptureContext's pickRegion, lib/capture.ts
+  clipToMonitor); Escape - or closing the window, Alt+F4 included (the shell
+  answers null for it) - cancels. The answer goes back
+  through capture_overlay_done, which tells the main window and closes every
+  overlay.
+
+  COORDINATES. Everything the shell and the backend take is in PHYSICAL
+  virtual-screen pixels. This window lies entirely on one monitor, so its
+  devicePixelRatio is that monitor's scale and the mapping is linear:
+      physical_x = monitor.x + css_x * devicePixelRatio
+      physical_y = monitor.y + css_y * devicePixelRatio
+  The screenshot is physical pixels too, drawn 1:1 onto a canvas whose backing
+  store is the monitor's size while its CSS size is the window's - so it is
+  crisp at any scale and the magnifier reads real pixels.
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; cursor: crosshair; user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hint {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    font: 500 13px/1.4 "Segoe UI", system-ui, sans-serif; color: #fff;
+    background: rgba(0,0,0,.62); border: 1px solid rgba(255,255,255,.2); border-radius: 8px;
+    padding: 7px 12px; pointer-events: none; white-space: nowrap;
+  }
+  #hint b { font-weight: 600; }
+  #err { position: fixed; bottom: 14px; left: 14px; color: #ffb4ae; font: 13px system-ui; display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint"><b>Drag</b> a region, <b>click</b> a window, <b>Esc</b> to cancel</div>
+<div id="err"></div>
+<script>
+(async () => {
+  const tauri = window.__TAURI__ && window.__TAURI__.core;
+  const invoke = (cmd, args) => tauri ? tauri.invoke(cmd, args) : Promise.reject(new Error("no Tauri bridge"));
+  const params = new URLSearchParams(location.search);
+  const index = Number(params.get("monitor") || 0);
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const err = document.getElementById("err");
+  const fail = (msg) => { err.textContent = msg; err.style.display = "block"; };
+
+  let monitor = { index, x: 0, y: 0, width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio || 1 };
+  let windows = [];
+  try {
+    const monitors = await invoke("capture_monitors");
+    monitor = monitors.find((m) => m.index === index) || monitors[0] || monitor;
+    windows = (await invoke("capture_windows")).filter((w) =>
+      w.x < monitor.x + monitor.width && w.x + w.width > monitor.x && w.y < monitor.y + monitor.height && w.y + w.height > monitor.y);
+  } catch (e) { fail("Shell unavailable: " + e); }
+  // Exposed for the harness (and for anyone debugging the mapping).
+  window.__overlay = { monitor, windows: windows.length, dpr: window.devicePixelRatio };
+
+  canvas.width = monitor.width;
+  canvas.height = monitor.height;
+  const dpr = () => window.devicePixelRatio || monitor.scale || 1;
+  const toPhysical = (cssX, cssY) => ({ x: Math.round(monitor.x + cssX * dpr()), y: Math.round(monitor.y + cssY * dpr()) });
+
+  // The frozen picture of this monitor, taken by the main page's
+  // POST /api/capture/freeze BEFORE this window opened - asked for from here
+  // it would be a picture of this window (measured: a black frame). The
+  // pointer is left out: the crosshair IS the pointer here, and a still that
+  // wants the pointer is taken by the backend when the region is chosen.
+  const shot = new Image();
+  let shotReady = false;
+  shot.onload = () => { shotReady = true; draw(); };
+  shot.onerror = () => fail("No frozen frame of this monitor (the screen was not frozen before the overlay opened).");
+  shot.src = `/api/capture/frozen/${monitor.index}?t=${Date.now()}`;
+
+  let pointer = null;          // physical
+  let dragStart = null;        // physical
+  let dragNow = null;          // physical
+  const DRAG_MIN = 4;          // physical px: less is a click
+
+  const windowUnder = (p) => windows.find((w) => p.x >= w.x && p.x < w.x + w.width && p.y >= w.y && p.y < w.y + w.height) || null;
+  const rectOf = (a, b) => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(a.x - b.x) + 1, height: Math.abs(a.y - b.y) + 1 });
+  const clamp = (p) => ({ x: Math.max(monitor.x, Math.min(monitor.x + monitor.width - 1, p.x)), y: Math.max(monitor.y, Math.min(monitor.y + monitor.height - 1, p.y)) });
+
+  function draw() {
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    if (shotReady) ctx.drawImage(shot, 0, 0, W, H); else { ctx.fillStyle = "#111"; ctx.fillRect(0, 0, W, H); }
+    // Local (canvas) coordinates are physical pixels relative to the monitor.
+    const L = (p) => ({ x: p.x - monitor.x, y: p.y - monitor.y });
+    const dragging = dragStart && dragNow && (Math.abs(dragNow.x - dragStart.x) >= DRAG_MIN || Math.abs(dragNow.y - dragStart.y) >= DRAG_MIN);
+    const sel = dragging ? rectOf(dragStart, dragNow) : (pointer ? windowUnder(pointer) : null);
+    // Dim everything but the selection.
+    ctx.fillStyle = "rgba(0,0,0,0.38)";
+    ctx.fillRect(0, 0, W, H);
+    if (sel) {
+      const l = L(sel);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(l.x, l.y, sel.width, sel.height); ctx.clip();
+      if (shotReady) ctx.drawImage(shot, 0, 0, W, H);
+      ctx.restore();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = dragging ? "#4cc2ff" : "#ff9a1f";
+      ctx.setLineDash(dragging ? [] : [8, 6]);
+      ctx.strokeRect(l.x + 1, l.y + 1, sel.width - 2, sel.height - 2);
+      ctx.setLineDash([]);
+      const label = dragging ? `${sel.width} × ${sel.height}` : `${sel.title}  —  ${sel.width} × ${sel.height}`;
+      ctx.font = "600 14px 'Segoe UI', system-ui, sans-serif";
+      const tw = ctx.measureText(label).width + 16;
+      const tx = Math.max(0, Math.min(W - tw, l.x)), ty = l.y > 28 ? l.y - 26 : l.y + sel.height + 4;
+      ctx.fillStyle = dragging ? "#1b6fa3" : "#9a5500"; ctx.fillRect(tx, ty, tw, 22);
+      ctx.fillStyle = "#fff"; ctx.fillText(label, tx + 8, ty + 16);
+    }
+    if (pointer) {
+      const p = L(pointer);
+      ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(p.x + 0.5, 0); ctx.lineTo(p.x + 0.5, H); ctx.moveTo(0, p.y + 0.5); ctx.lineTo(W, p.y + 0.5); ctx.stroke();
+      // Magnifier: 40 x 40 physical pixels at 4x, beside the pointer, with the
+      // position (and the drag size) under it.
+      const Z = 4, R = 20, S = R * 2 * Z;
+      let mx = p.x + 24, my = p.y + 24;
+      if (mx + S > W) mx = p.x - 24 - S;
+      if (my + S + 24 > H) my = p.y - 24 - S - 24;
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = "#000"; ctx.fillRect(mx - 2, my - 2, S + 4, S + 28);
+      if (shotReady) ctx.drawImage(shot, p.x - R, p.y - R, R * 2, R * 2, mx, my, S, S);
+      ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mx + S / 2 + 0.5, my); ctx.lineTo(mx + S / 2 + 0.5, my + S); ctx.moveTo(mx, my + S / 2 + 0.5); ctx.lineTo(mx + S, my + S / 2 + 0.5); ctx.stroke();
+      ctx.strokeStyle = "#4cc2ff"; ctx.strokeRect(mx + S / 2 - Z / 2 + 0.5, my + S / 2 - Z / 2 + 0.5, Z, Z);
+      ctx.fillStyle = "#fff"; ctx.font = "12px Consolas, monospace";
+      const info = dragging ? `${pointer.x}, ${pointer.y}   ${sel.width} × ${sel.height}` : `${pointer.x}, ${pointer.y}`;
+      ctx.fillText(info, mx + 4, my + S + 18);
+      ctx.restore();
+    }
+  }
+
+  const done = (region) => invoke("capture_overlay_done", { region }).catch((e) => fail("Could not hand back the region: " + e));
+
+  canvas.addEventListener("mousemove", (e) => { pointer = clamp(toPhysical(e.clientX, e.clientY)); if (dragStart) dragNow = pointer; draw(); });
+  canvas.addEventListener("mouseleave", () => { if (!dragStart) { pointer = null; draw(); } });
+  canvas.addEventListener("mousedown", (e) => { if (e.button !== 0) return; dragStart = dragNow = clamp(toPhysical(e.clientX, e.clientY)); draw(); });
+  canvas.addEventListener("mouseup", (e) => {
+    if (e.button !== 0 || !dragStart) return;
+    const end = clamp(toPhysical(e.clientX, e.clientY));
+    const moved = Math.abs(end.x - dragStart.x) >= DRAG_MIN || Math.abs(end.y - dragStart.y) >= DRAG_MIN;
+    let region;
+    if (moved) {
+      region = { ...rectOf(dragStart, end), monitor: monitor.index, window_title: null, hwnd: null };
+    } else {
+      const w = windowUnder(end);
+      if (!w) { dragStart = dragNow = null; draw(); return; }
+      region = { x: w.x, y: w.y, width: w.width, height: w.height, monitor: monitor.index, window_title: w.title, hwnd: w.hwnd };
+    }
+    dragStart = dragNow = null;
+    window.__overlay.last = region;
+    done(region);
+  });
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); done(null); } });
+  window.addEventListener("contextmenu", (e) => { e.preventDefault(); done(null); });
+  window.addEventListener("resize", draw);
+  draw();
+})();
+</script>
+</body>
+</html>

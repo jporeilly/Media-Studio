@@ -199,6 +199,44 @@ def import_upload(filename: str, data: bytes, *,
     return record
 
 
+def import_from_path(path: Path, display_name: str, *,
+                     owner_id: str | None = None, owner_name: str | None = None) -> dict:
+    """Create a project from a file already on disk, MOVING it into the new
+    project's directory - a finished screen recording (``services.recordings``),
+    which can be gigabytes and must never pass through memory the way an
+    upload's bytes do in :func:`import_upload`. The record is the same shape;
+    ``display_name`` is the project's name (a recording is named after the
+    window it captured, not after its file). Raises ``ValueError`` for an
+    unsupported suffix or a file that is not there."""
+    path = Path(path)
+    kind = kind_for_suffix(path.suffix)
+    if kind is None:
+        allowed = ", ".join(sorted(ALLOWED_SUFFIXES))
+        raise ValueError(f"Unsupported file type '{path.suffix or path.name}'. Allowed: {allowed}")
+    if not path.is_file():
+        raise ValueError(f"There is no file at {path.name} to import.")
+    name = path.name
+    pid = uuid.uuid4().hex[:12]
+    pdir = PROJECTS_DIR / pid
+    pdir.mkdir(parents=True, exist_ok=True)
+    dest = pdir / name
+    shutil.move(str(path), str(dest))
+
+    record = {
+        "id": pid,
+        "name": (display_name or "").strip() or path.stem,
+        "kind": kind,
+        "source_filename": name,
+        "size_bytes": dest.stat().st_size,
+        "slide_count": _slide_count(kind, dest),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "owner_id": owner_id,
+        "owner_name": owner_name,
+    }
+    _meta_path(pid).write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return record
+
+
 class ProjectDeleteError(RuntimeError):
     """A project could not be fully deleted. It is still listed, so it can be
     retried once whatever held the file has let go."""

@@ -88,6 +88,27 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 | "'*name*' has N channels; music must be mono or stereo" | A surround file | Convert it to stereo and upload again |
 | "This browser cannot show frames from this video file" | A container the browser cannot decode (`.mkv`, `.avi`) | The waveform and the blocks are still to scale; the render is unaffected |
 
+## Screen capture
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| No **Capture** button on the Projects page and no **Capture** tile on the Dashboard; the Projects page says "Screen capture is available in the desktop app only: it needs the app and the screen on one machine." | Media Studio is open in a browser, not in the desktop app | Open the desktop app on the machine whose screen you want ([Screen capture](../guides/capture.md)) |
+| No **Capture** button or tile in the desktop app, and no line about it either | The shell has not answered yet whether this page may use its capture commands, or it refused them (they are granted only to the page the shell itself started the backend on) | Wait a moment; if the button stays away, close the app and start it again |
+| "Screen capture works only in the desktop app on this computer." | The request reached the server from another machine, or through a proxy or tunnel; a team server never shows its own screen to anyone elsewhere | Capture from the desktop app on that computer. Stills already taken, and a recording's save, work from anywhere |
+| "Could not start the recording: Only *N* GB free on the disk Media Studio records to; at least 2 GB is needed to start a recording." | Under 2 GB free on the disk `data\` lives on | Free some space |
+| "Less than 1 GB is left on the disk Media Studio records to, so the recording was stopped; what arrived is kept. …", or "The recording reached 16 GB, the most one recording may take; it was stopped and what arrived is kept." | The disk filled while recording, or the recording hit the 16 GB cap | Free some space; the recording waits under **Recordings not saved yet**: **Save as a project** |
+| "The recording reached the two-hour limit and was stopped." | Two hours is the most one recording may be | The recording is saved as usual; start another for the rest |
+| "The screen shared is not the one the region was drawn on, so the region cannot be cut from it. …" | For a region, the share dialog's choice was a window, or another screen than the one the rectangle was drawn on | Start again; in the share dialog choose **Entire Screen** and the screen you drew on |
+| The recording has no system sound | **Share with system audio** was off in the share dialog; the app's **System sound** switch only asks for it | Record again, with the switch on in the share dialog before pressing **Share** |
+| The share dialog has no **Share with system audio** switch | The switch is WebView2's, not the app's: the app asks for the sound but cannot add the switch (it was on both tabs of the dialog in testing) | Keep the WebView2 runtime current (it updates with Windows); until then record with the microphone alone and lay the sound under the picture on the Timeline |
+| "The microphone was refused. Allow it when asked, or record without it." | The microphone prompt was answered with Block | Allow the microphone when the app asks, or turn **Microphone** off in the Capture dialog |
+| "Shift+F9 / Shift+F10 are taken by another program, so the recording keys are off." | Another program (Snagit, ShareX) holds those keys | Pause and stop from the recorder bar or the Projects page, or close that program before recording |
+| "This Windows cannot hide the recorder bar from the picture; keep it off the recorded area." | Windows 10 before version 2004 | Drag the bar off the recorded area |
+| "A recording is in progress: stop it first (Shift+F10, or Stop on the recorder bar), then close the window." or "The recording is being saved as a project: wait until it opens, then close the window." | The window's close was refused while a recording runs or its save runs: closing would stop the backend, and the save with it | Stop the recording, or wait for the project to open (**Cancel** on the saving card keeps the recording to save later) |
+| "The server stopped answering while the recording was being saved, so closing the window is allowed again. …" | The save's job could not be asked about three times running: the backend has stopped | Start the app again; if the save did not finish, the recording is under **Recordings not saved yet** |
+| "This recording is still being made; stop it in the recorder first." | **Save as a project** or **Discard** reached a recording whose recorder was heard from in the last 20 seconds (another window of the app, or a page reloaded mid-recording) | Stop it in the recorder; a recorder that is gone falls silent, and the recording is offered 20 seconds later |
+| A region still or recording comes out shifted or the wrong size on a monitor scaled above 100 % | Mixed or higher display scaling is not verified yet | Record the full screen or the window instead and cut it on the Timeline ([Screen capture](../guides/capture.md)) |
+
 ## Updates
 
 | Symptom | Cause | Fix |

@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Clapperboard, FileText, FolderOpen, LayoutDashboard, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { CaptureProvider } from "../context/CaptureContext";
 import { ACCENTS, useTheme } from "../context/ThemeContext";
 import { Avatar, Select } from "../components/ui";
 
@@ -28,6 +29,9 @@ export function Shell() {
   });
 
   return (
+    // The screen recorder lives above the pages (context/CaptureContext.tsx), so a recording in
+    // progress survives navigating within the app.
+    <CaptureProvider>
     <div className="os-shell">
       <aside className="os-sidebar">
         <div className="os-logo" onClick={() => navigate("/")}>
@@ -73,5 +77,6 @@ export function Shell() {
         </main>
       </div>
     </div>
+    </CaptureProvider>
   );
 }

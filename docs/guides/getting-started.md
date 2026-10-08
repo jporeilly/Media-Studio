@@ -18,7 +18,7 @@ Once you are in, the sidebar lists **Dashboard**, **Projects**, **Docs** and **S
 
 ### The dashboard
 
-The dashboard is four tiles, **Projects**, **Import Video**, **Generate Video** and **Translate**, and every tile's **Open** goes to the Projects page, because each of those things happens inside a project. An error box appears here only when the API does not answer.
+The dashboard is four tiles, **Projects**, **Import Video**, **Generate Video** and **Translate**, and every tile's **Open** goes to the Projects page, because each of those things happens inside a project. In the desktop app a fifth tile, **Capture**, opens the Projects page with the Capture dialog ready ([Screen capture](capture.md)). An error box appears here only when the API does not answer.
 
 ### The three kinds of project
 

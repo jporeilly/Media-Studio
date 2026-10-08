@@ -32,6 +32,9 @@ repository); running the app from a source checkout in
   `ollama pull gemma4:12b`). gemma4 needs a recent Ollama; it was tested on 0.34.4.
 - **Git** (optional): only needed to update the app from inside Settings — see
   [Updating](#updating).
+- **Screen capture** needs nothing extra: recordings use WebView2's own screen sharing and
+  stills the bundled ffmpeg. The first recording asks to use the microphone. On Windows 10
+  before version 2004 the recorder bar cannot be kept out of the picture, and the app says so.
 
 ### GPU transcription (optional)
 
@@ -118,6 +121,7 @@ Everything the app creates lives inside the install folder:
 | Settings | `...\app\data\config.json` |
 | Projects: the imported deck, PDF or video, its transcript and edit, and every video rendered or re-voiced from it | `...\app\data\projects\<id>\` |
 | Logs, cache, temporary files | `...\app\data\logs\`, `cache\`, `temp\` |
+| Screen stills; a screen recording's pieces until it is saved | `...\app\data\captures\<id>\`; `...\app\data\temp\recordings\<id>\` |
 | The music library the Timeline's Music lane uses | `...\app\assets\music\` (with its `index.json`) |
 
 Rendered videos are saved with their project, never in a separate folder: the Studio card's
