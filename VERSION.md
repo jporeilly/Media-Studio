@@ -1,6 +1,6 @@
 # Version
 
-**Current version:** 0.13.0
+**Current version:** 0.14.0
 
 Media Studio Enterprise is at 0.x: the studio is ported, and its version string is
 kept by hand in the eleven files listed below. What each release changed, and when, is in

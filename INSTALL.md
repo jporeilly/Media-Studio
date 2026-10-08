@@ -12,9 +12,9 @@ repository); running the app from a source checkout in
 - **Windows 10 or 11, 64-bit.** No administrator rights: the app installs per-user.
 - **WebView2 runtime.** Part of Windows 11. On a machine without it the installer
   downloads it, which needs an internet connection once.
-- **Disk space.** The 0.13.0 installer is **185,271,969 bytes (177 MB)**, about the same size as
-  0.12.0's 184,071,140 bytes (176 MB): the same vendored runtime and media binaries,
-  a rebuilt UI.
+- **Disk space.** The 0.14.0 installer is about the same size as 0.13.0's 185,271,969 bytes
+  (177 MB): the same vendored runtime and media binaries, a rebuilt UI; the exact size is
+  measured after the build.
   Installed it takes roughly 770 MB, plus your projects and rendered videos.
 - **Microsoft PowerPoint** (optional, for `.pptx` decks). With PowerPoint installed,
   slides render at full fidelity, animations included. Without it the engine's
