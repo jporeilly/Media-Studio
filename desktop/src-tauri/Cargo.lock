@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "media-studio-desktop"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "serde",
  "serde_json",
