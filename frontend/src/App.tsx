@@ -12,6 +12,7 @@ const ProjectsPage = lazy(() => import("./pages/Projects"));
 const ProjectDetailPage = lazy(() => import("./pages/ProjectDetail"));
 const DocsPage = lazy(() => import("./pages/Docs"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
+const AnnotatePage = lazy(() => import("./pages/Annotate"));
 
 function RequireAuth({ children }: { children: React.ReactElement }) {
   const { user, loading } = useAuth();
@@ -36,6 +37,8 @@ export default function App() {
         <Route index element={<DashboardPage />} />
         <Route path="/projects" element={<Lazy><ProjectsPage /></Lazy>} />
         <Route path="/projects/:id" element={<Lazy><ProjectDetailPage /></Lazy>} />
+        {/* Annotate a still (T3b): pure web, so not behind the capture hide rule - the browser edition too. */}
+        <Route path="/captures/:id/annotate" element={<Lazy><AnnotatePage /></Lazy>} />
         {/* The splat carries the document's own path (`docs/guides/timeline`),
             so every document is a link anyone can send. */}
         <Route path="/docs/*" element={<Lazy><DocsPage /></Lazy>} />

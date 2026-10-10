@@ -1,12 +1,16 @@
 """Pydantic request/response models for the API layer."""
 
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, StringConstraints, field_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, StringConstraints, ValidationError,
+    field_validator, model_validator,
+)
 
 from core.tone_adapter import get_available_tones
 from core.translator import get_available_languages
 from services.ai_slides import CUSTOM_TONE, MAX_ISSUE_CHARS, QA_CRITERIA
+from services.captures import DOCUMENT_VERSION, MAX_SHAPES, MAX_TEXT_CHARS, MIN_CROP_SIDE
 from services.narration import MAX_OFFSET_BATCH, MAX_OFFSET_SECONDS, MAX_SPEED, MAX_VOICE_CHARS, MIN_SPEED
 from services.slides import MAX_NOTES_CHARS, MAX_PAUSE_SECONDS
 
@@ -461,3 +465,193 @@ class AiQaFixRequest(BaseModel):
 
     criterion: QaCriterion
     issue: str = Field(max_length=MAX_ISSUE_CHARS)
+
+
+# ── Annotations on a still (T3b) ──────────────────────────────────────────────
+# The document the editor saves beside a still (``services.captures``): a
+# version, shapes in the still's own pixel coordinates, an optional crop. It is
+# validated HERE, with the still's size passed as the validation context
+# (``AnnotationDocument.model_validate(data, context={"width": W, "height": H})``),
+# so one model answers both "is this well formed" and "does it fit this still":
+# every number finite and within -size .. 2 x size of the still (a shape may
+# hang off the edge; the renderer clips it), a crop inside the still and at
+# least MIN_CROP_SIDE a side. The route answers a failure with 400 and the
+# first error as a plain line; nothing is written then. The frontend's pure
+# model (``frontend/src/lib/annotate.ts``) writes exactly this shape.
+
+Stroke = Literal["thin", "medium", "thick"]
+TextSize = Literal["small", "medium", "large"]
+#: A colour as the palette spells it.
+Colour = Annotated[str, StringConstraints(pattern=r"^#[0-9a-fA-F]{6}$")]
+ShapeId = Annotated[str, StringConstraints(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")]
+#: A coordinate or a length: a finite number (JSON's ``NaN`` and ``Infinity`` are refused).
+Coord = Annotated[float, Field(allow_inf_nan=False)]
+Length = Annotated[float, Field(ge=1, allow_inf_nan=False)]
+
+
+def _still_size(info) -> tuple[int, int] | None:
+    context = getattr(info, "context", None) or {}
+    width, height = context.get("width"), context.get("height")
+    if width is None or height is None:
+        return None
+    return int(width), int(height)
+
+
+class _Shape(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: ShapeId
+    colour: Colour
+    stroke: Stroke = "medium"
+
+    #: The fields measured along the still's width and its height. Mirrored field for field by the
+    #: page's pure model (``frontend/src/lib/annotate.ts`` X_FIELDS / Y_FIELDS, whose ``clampShape`` keeps
+    #: every one of them inside this range), so the page never hands the server a document it refuses.
+    X_FIELDS: ClassVar[tuple[str, ...]] = ()
+    Y_FIELDS: ClassVar[tuple[str, ...]] = ()
+
+    @model_validator(mode="after")
+    def _within_the_still(self, info):
+        size = _still_size(info)
+        if size is None:
+            return self
+        width, height = size
+        for names, extent in ((self.X_FIELDS, width), (self.Y_FIELDS, height)):
+            for name in names:
+                value = getattr(self, name)
+                if not -extent <= value <= 2 * extent:
+                    raise ValueError(f"{self.type} {name} is outside the still (-{extent} to {2 * extent}).")
+        return self
+
+
+class SegmentShape(_Shape):
+    """An arrow (its head at x2, y2) or a line."""
+
+    type: Literal["arrow", "line"]
+    x1: Coord
+    y1: Coord
+    x2: Coord
+    y2: Coord
+    X_FIELDS: ClassVar[tuple[str, ...]] = ("x1", "x2")
+    Y_FIELDS: ClassVar[tuple[str, ...]] = ("y1", "y2")
+
+
+class BoxShape(_Shape):
+    """A rectangle or an ellipse outline, a blur (a mosaic of the pixels under
+    it) or a highlight (translucent, multiply; the stroke is ignored)."""
+
+    type: Literal["rect", "ellipse", "blur", "highlight"]
+    x: Coord
+    y: Coord
+    width: Length
+    height: Length
+    X_FIELDS: ClassVar[tuple[str, ...]] = ("x", "width")
+    Y_FIELDS: ClassVar[tuple[str, ...]] = ("y", "height")
+
+
+class TextShape(_Shape):
+    """A text box: the text wraps to the box's width."""
+
+    type: Literal["text"]
+    x: Coord
+    y: Coord
+    width: Length
+    height: Length
+    text: str = Field(max_length=MAX_TEXT_CHARS)
+    text_size: TextSize = "medium"
+    X_FIELDS: ClassVar[tuple[str, ...]] = ("x", "width")
+    Y_FIELDS: ClassVar[tuple[str, ...]] = ("y", "height")
+
+
+class CalloutShape(_Shape):
+    """A filled, rounded text box with a tail to (tail_x, tail_y)."""
+
+    type: Literal["callout"]
+    x: Coord
+    y: Coord
+    width: Length
+    height: Length
+    tail_x: Coord
+    tail_y: Coord
+    text: str = Field(max_length=MAX_TEXT_CHARS)
+    text_size: TextSize = "medium"
+    X_FIELDS: ClassVar[tuple[str, ...]] = ("x", "width", "tail_x")
+    Y_FIELDS: ClassVar[tuple[str, ...]] = ("y", "height", "tail_y")
+
+
+class StepShape(_Shape):
+    """A numbered step: the number is not stored - it is the step's place
+    among the steps of its ``sequence`` in document order (Restart numbering
+    starts a new sequence), so deleting one renumbers the rest."""
+
+    type: Literal["step"]
+    x: Coord
+    y: Coord
+    sequence: int = Field(ge=0, le=10_000)
+    X_FIELDS: ClassVar[tuple[str, ...]] = ("x",)
+    Y_FIELDS: ClassVar[tuple[str, ...]] = ("y",)
+
+
+class MagnifyShape(_Shape):
+    """A lens: the source rectangle, and where its 2x or 3x copy sits."""
+
+    type: Literal["magnify"]
+    x: Coord
+    y: Coord
+    width: Length
+    height: Length
+    lens_x: Coord
+    lens_y: Coord
+    factor: Literal[2, 3] = 2
+    X_FIELDS: ClassVar[tuple[str, ...]] = ("x", "width", "lens_x")
+    Y_FIELDS: ClassVar[tuple[str, ...]] = ("y", "height", "lens_y")
+
+
+Shape = Annotated[
+    SegmentShape | BoxShape | TextShape | CalloutShape | StepShape | MagnifyShape,
+    Field(discriminator="type"),
+]
+
+
+class CropIn(BaseModel):
+    """The one crop of a still, applied at export: whole pixels, inside the
+    still, at least MIN_CROP_SIDE a side."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    width: int = Field(ge=MIN_CROP_SIDE)
+    height: int = Field(ge=MIN_CROP_SIDE)
+
+    @model_validator(mode="after")
+    def _inside_the_still(self, info):
+        size = _still_size(info)
+        if size is None:
+            return self
+        width, height = size
+        if self.x + self.width > width or self.y + self.height > height:
+            raise ValueError(f"The crop runs past the still's edge ({width}x{height}).")
+        return self
+
+
+class AnnotationDocument(BaseModel):
+    """PUT /captures/{cid}/annotations: the ``document`` field, as JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[DOCUMENT_VERSION]
+    shapes: list[Shape] = Field(default_factory=list, max_length=MAX_SHAPES)
+    crop: CropIn | None = None
+
+
+def plain_validation_error(exc: ValidationError) -> str:
+    """The first problem of a failed validation as one line a user can read:
+    the field's path and pydantic's message, without the "Value error, "
+    prefix a validator's own message gets."""
+    first = exc.errors()[0]
+    where = ".".join(str(part) for part in first.get("loc", ()))
+    message = first.get("msg", "invalid")
+    if message.startswith("Value error, "):
+        message = message[len("Value error, "):]
+    return f"{where}: {message}" if where else message

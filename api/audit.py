@@ -76,6 +76,10 @@ RECORDING_DISCARD = "recording.discard"
 CAPTURE_STILL = "capture.still"
 CAPTURE_ADD_TO_DECK = "capture.add_to_deck"
 CAPTURE_DELETE = "capture.delete"
+# A still annotated in the editor (the detail: the shape count and whether it
+# is cropped - never the text of a callout) and its annotations thrown away.
+CAPTURE_ANNOTATE = "capture.annotate"
+CAPTURE_REVERT = "capture.revert"
 # A request to grab, freeze or read the HOST's screen from anywhere but this
 # computer (``api.routers.capture.screen_user``), refused: on a team server it
 # would be an attempt to see the server's desktop. The detail names the route
@@ -122,7 +126,7 @@ ACTIONS: tuple[str, ...] = (
     AI_NOTES, AI_ENHANCE, AI_QA, AI_TONE, AI_TRANSLATE, AI_PACING, AI_QA_DOC, AI_QA_FIX,
     JOB_CANCEL, SYSTEM_UPDATE, SYSTEM_RESTART, AUDIT_PURGE,
     RECORDING_START, RECORDING_FINISH, RECORDING_DISCARD, CAPTURE_STILL, CAPTURE_ADD_TO_DECK, CAPTURE_DELETE,
-    CAPTURE_REFUSED,
+    CAPTURE_REFUSED, CAPTURE_ANNOTATE, CAPTURE_REVERT,
 )
 
 # What the action was done to (the ``entity`` column).

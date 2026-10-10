@@ -1,8 +1,8 @@
 # Keyboard shortcuts
 
-Every key the Timeline, the slide editor and the screen recorder answer to.
+Every key the Timeline, the slide editor, the annotation editor and the screen recorder answer to.
 
-The Timeline's keys are ignored while you are typing in a box and while the music library is open; the slide editor's arrows are ignored in a field and while a dialog is open.
+The Timeline's keys are ignored while you are typing in a box and while the music library is open; the slide editor's arrows are ignored in a field and while a dialog is open; the annotation editor's keys are ignored while you are typing in a text box, except Ctrl+S, which keeps the text and saves.
 
 ## The Timeline
 
@@ -45,6 +45,22 @@ Keys pressed with **Alt** held are left to the browser, except the nudge keys, w
 | **Enter** / **Escape** (in the marker name box) | Keep the name / put the old one back |
 | **Enter** (in the List's Offset, Speed or Voice box, or a clip's fade box) | Commit the value |
 
+## The annotation editor
+
+| Key | What it does |
+| --- | --- |
+| **V** | Select |
+| **A** / **C** / **T** | Arrow / Callout / Text |
+| **R** / **E** / **L** | Rectangle / Ellipse / Line |
+| **S** / **B** / **H** | Step / Blur / Highlighter |
+| **K** / **M** | Crop / Magnify |
+| **Delete**, **Backspace** | Remove the selected shape |
+| **Escape** | Deselect; give up the shape being drawn; in a text box, put the old text back (a box just placed is removed) |
+| **Ctrl+Enter** (in a text box) | Keep the text (clicking away does too) |
+| **Ctrl+Z** / **Ctrl+Y** | Undo / redo (Ctrl+Shift+Z redoes as well) |
+| **Ctrl+S** | Save (in a text box too: keeps the text, then saves) |
+| **+** / **−** / **0** | Zoom in / zoom out / fit the whole still (**=** and **_** work as **+** and **−**) |
+
 ## Screen recording (desktop app)
 
 While a recording runs these work from anywhere, whichever window has the focus, as in Snagit.
@@ -62,4 +78,4 @@ The keys are taken from the countdown until the recording stops, and not otherwi
 - [The Timeline](../guides/timeline.md)
 - [The slide editor](../guides/slide-editor.md)
 - [Markers and chapters](../guides/markers-and-chapters.md)
-- [Screen capture](../guides/capture.md)
+- [Screen capture](../guides/capture.md): taking and annotating a still

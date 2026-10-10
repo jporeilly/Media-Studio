@@ -128,6 +128,14 @@ export default function ProjectsPage() {
     if (canCapture) setCaptureOpen(true);
     navigate(location.pathname, { replace: true, state: null });
   }, [openFromRoute, canCapture, navigate, location.pathname]);
+  // The annotation editor sends the user back here with a notice when its still is gone (T3b): shown
+  // once in the status line, and the state dropped the same way.
+  const noticeFromRoute = (location.state as { notice?: string } | null)?.notice;
+  useEffect(() => {
+    if (!noticeFromRoute) return;
+    setNotice(noticeFromRoute);
+    navigate(location.pathname, { replace: true, state: null });
+  }, [noticeFromRoute, navigate, location.pathname]);
 
   // Recordings stopped but never saved: a crash, a closed window, a failed save.
   const unfinished = useQuery({
@@ -391,7 +399,9 @@ export default function ProjectsPage() {
         </Card>
       )}
 
-      {canCapture && <CapturesCard onNotice={setNotice} />}
+      {/* The Captures card shows wherever stills exist (T3b, ruling R4): listing, Annotate, Add to deck, Copy,
+          Save as and Delete touch no screen, so only TAKING a still stays behind the shell rule above. */}
+      <CapturesCard onNotice={setNotice} />
     </>
   );
 }

@@ -473,24 +473,44 @@ export function closestMonitor(candidates: { monitor: MonitorInfo; distance: num
 export const WRONG_SCREEN_MESSAGE =
   "The screen shared is not the one the region was drawn on, so the region cannot be cut from it. Start again and pick that screen in the share dialog.";
 
-/** A still in the Captures list, as GET /api/captures lists it. */
+/** A still in the Captures list, as GET /api/captures lists it; GET /api/captures/{id} adds the document. */
 export interface Capture {
   id: string;
   name: string;
   kind: CaptureKind;
   created_at: string;
+  /** The still's own size. */
   width: number;
   height: number;
   cursor: boolean;
   size_bytes: number;
   owner_name?: string | null;
+  /** Annotated in the editor (T3b): the picture shown everywhere is then the annotated export. */
+  annotated: boolean;
+  annotated_at?: string | null;
+  /** The size of the picture shown: the crop's when annotated with a crop, else the still's. */
+  output_width: number;
+  output_height: number;
+  /** The annotation document (the single-record route only); null when not annotated. */
+  annotations?: unknown;
 }
 
 export const capturesQueryKey = ["captures"] as const;
+/** One capture's record; under the list's key, so invalidating the list refreshes it too. */
+export const captureQueryKey = (id: string) => ["captures", id] as const;
 
-/** The still's URL, cache-busted by the capture's own timestamp. */
-export function captureImageUrl(c: Pick<Capture, "id" | "created_at">): string {
-  return `/api/captures/${c.id}/image?v=${encodeURIComponent(c.created_at)}`;
+/** The picture's URL (the annotated one when there is one), cache-busted by the capture's latest timestamp. */
+export function captureImageUrl(c: Pick<Capture, "id" | "created_at"> & { annotated_at?: string | null }): string {
+  return `/api/captures/${c.id}/image?v=${encodeURIComponent(c.annotated_at || c.created_at)}`;
+}
+
+/** The ORIGINAL still's URL: what the annotation editor draws over. */
+export function captureOriginalUrl(c: Pick<Capture, "id" | "created_at">): string {
+  return `/api/captures/${c.id}/image?original=1&v=${encodeURIComponent(c.created_at)}`;
+}
+
+export function annotateUrl(id: string): string {
+  return `/captures/${id}/annotate`;
 }
 
 /** A recording still on disk, as GET /api/recordings lists it. */

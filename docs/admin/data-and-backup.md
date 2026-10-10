@@ -21,7 +21,7 @@ data\
     <stem>_project\            the slide editor's inner project: notes and history, slide images, per-slide audio
     revoice\                   the re-voice job's working project
     exports\                   <name>-notes.pptx and <name>-qa.txt
-  captures\<id>\               one screen still: still.png (the screen as captured) and capture.json
+  captures\<id>\               one screen still: still.png (the screen as captured) and capture.json; annotated.png once annotated in the editor (capture.json then carries the document)
   logs\app.log                 the server log (rotating)
   cache\                       every synthesised sentence and slide, keyed by text, voice and speed; never swept
   temp\                        scratch files

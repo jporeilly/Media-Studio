@@ -28,7 +28,9 @@ the whole app suite looks and feels the same.
   the picture before anything is rendered.
 - **Screen capture, in the desktop app.** Record the screen, a window or a region with the
   microphone and the computer's own sound; the recording becomes a video project, ready to
-  transcribe, re-voice and cut. Or take a pixel-exact still and add it to a deck as a slide.
+  transcribe, re-voice and cut. Or take a pixel-exact still, annotate it - arrows, callouts,
+  text, shapes, numbered steps, a blur that is a mosaic, a highlighter, a crop and a magnifying
+  lens, in the browser edition too - and add it to a deck as a slide.
 - **An AI assistant on the slides.** A local Ollama model writes and rewrites speaker
   notes, reviews them for grammar, tone, flow and transitions and fixes what it finds,
   adapts them to an audience, translates them, paces them, scores the deck for video and
@@ -45,9 +47,8 @@ the whole app suite looks and feels the same.
 The app's **Docs** page has a guide for each of these. What changed in each release, and
 when, is in [CHANGELOG.md](CHANGELOG.md).
 
-**Still to come:** annotating screen captures (arrows, callouts, numbered steps, blur,
-highlight, crop), the transition-sound library, and the rest of the administration
-work: notifications, a branding lock, an administration page of its own, and per-kind job
+**Still to come:** the transition-sound library, and the rest of the administration work:
+notifications, a branding lock, an administration page of its own, and per-kind job
 limits. Until parity, the NiceGUI app remains the shipping product; its source lives at
 `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).
 

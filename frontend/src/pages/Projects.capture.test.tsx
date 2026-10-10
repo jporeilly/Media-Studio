@@ -123,34 +123,50 @@ afterEach(async () => {
 });
 
 describe("the Projects page's capture, by THE hide rule", () => {
-  it("offers nothing of it in a browser: no button, no Captures card, no recordings - the one line", async () => {
+  it("offers no Capture button and no recordings in a browser - the one line - but the Captures card is there (T3b R4)", async () => {
     fake.recordings = [rec({})];
     await mount();
     expect(button("Capture")).toBeNull();
-    expect(cardTitles()).not.toContain("Captures");
+    expect(cardTitles()).toContain("Captures");
     expect(cardTitles()).not.toContain("Recordings not saved yet");
     expect(asked("/api/recordings")).toBe(false);
-    expect(asked("/api/captures")).toBe(false);
+    expect(asked("/api/captures")).toBe(true);
     expect(document.body.textContent).toContain(SERVER_EDITION_LINE);
   });
 
-  it("offers nothing of it in a shell whose capability refuses the page, and says nothing either", async () => {
+  it("offers no Capture button in a shell whose capability refuses the page, says nothing either, and still lists the stills", async () => {
     inShell(false);
     fake.recordings = [rec({})];
     await mount();
     expect(button("Capture")).toBeNull();
-    expect(cardTitles()).not.toContain("Captures");
+    expect(cardTitles()).toContain("Captures");
     expect(asked("/api/recordings")).toBe(false);
     expect(document.body.textContent).not.toContain(SERVER_EDITION_LINE);
   });
 
-  it("offers nothing of it in a shell whose capability refuses the page, though the bridge is there", async () => {
+  it("offers no Capture button in a shell whose capability refuses the page, though the bridge is there; the stills are listed", async () => {
     inShell("refused");
     fake.recordings = [rec({})];
     await mount();
     expect(button("Capture")).toBeNull();
-    expect(cardTitles()).not.toContain("Captures");
+    expect(cardTitles()).toContain("Captures");
     expect(asked("/api/recordings")).toBe(false);
+  });
+
+  it("renders the Captures card without the shell's bridge: the stills, each with Annotate (nothing on the card touches the screen)", async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === "/api/projects") return { projects: [] } as never;
+      if (path === "/api/captures") {
+        return { captures: [{ id: "still0000001", name: "A browser-listed still", kind: "region", created_at: "2026-10-10T10:00:00Z", width: 40, height: 30, cursor: false, size_bytes: 10, annotated: false, output_width: 40, output_height: 30 }] } as never;
+      }
+      return {} as never;
+    });
+    await mount();
+    expect(button("Capture")).toBeNull();
+    expect(cardTitles()).toContain("Captures");
+    expect(document.body.textContent).toContain("A browser-listed still");
+    expect(button("Annotate")).not.toBeNull();
+    expect(button("Add to deck…")).not.toBeNull();
   });
 
   it("offers the button, the Captures card and the unfinished recordings in the shell", async () => {

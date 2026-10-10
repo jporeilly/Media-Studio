@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api.audit import RECORDING_DISCARD, RECORDING_FINISH, RECORDING_START, audit
+from api.body import capped_body
 from api.deps import current_user, may_access_project
 from api.routers.capture import is_local_client, screen_user
 from api.routers.projects import ACTIVE_JOB_FIELDS
@@ -117,18 +118,9 @@ def start(body: StartIn, user: dict = Depends(screen_user)):
 
 
 async def _capped_body(request: Request, limit: int) -> bytes:
-    """The request body, refused with 413 the moment it passes ``limit`` -
-    read in pieces, so an oversized or lying upload is never held whole."""
-    length = request.headers.get("content-length")
-    if length and length.isdigit() and int(length) > limit:
-        raise HTTPException(status_code=413, detail=f"A chunk may not exceed {limit // 1024 ** 2} MB.")
-    parts, size = [], 0
-    async for piece in request.stream():
-        size += len(piece)
-        if size > limit:
-            raise HTTPException(status_code=413, detail=f"A chunk may not exceed {limit // 1024 ** 2} MB.")
-        parts.append(piece)
-    return b"".join(parts)
+    """The request body, refused with 413 the moment it passes ``limit``
+    (``api.body.capped_body``: one reader for every large upload)."""
+    return await capped_body(request, limit, f"A chunk may not exceed {limit // 1024 ** 2} MB.")
 
 
 @router.put("/{rid}/chunks/{seq}")

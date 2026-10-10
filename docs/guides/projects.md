@@ -6,7 +6,7 @@ The Projects page is where every deck, PDF and video enters the studio: import a
 
 **Import** in the page header opens a file picker that accepts `.pptx`, `.pdf`, `.mp4`, `.mov`, `.mkv`, `.avi`, `.webm` and `.m4v`. On a page with no projects the header button is replaced by **Import a file** in the centre, under "No projects yet". A status line reports the import ("Imported "name".") or the refusal, with a **Dismiss** cross.
 
-In the desktop app the header also has **Capture**, which records the screen or takes a still: see [Screen capture](capture.md). Below the projects, the **Captures** card lists the stills; above them, **Recordings not saved yet** appears only when a recording was stopped and never saved.
+In the desktop app the header also has **Capture**, which records the screen or takes a still: see [Screen capture](capture.md). Below the projects, in the browser edition as in the desktop app, the **Captures** card lists the stills, each with **Annotate**, **Add to deck…**, **Copy**, **Save as…** and **Delete still**; above them, in the desktop app, **Recordings not saved yet** appears only when a recording was stopped and never saved.
 
 The table has one row per project: **Name** (a link to the project, with the source file's name under it), **Type** (Deck, PDF or Video), **Slides** (the number of slides or pages; a dash for a video, and for a PDF until it has been opened), **Size**, **Owner** (administrators only), **Imported** (how long ago), and a **Delete project** button at the end of the row.
 

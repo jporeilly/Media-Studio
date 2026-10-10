@@ -2,9 +2,9 @@
 
 Record the screen with the microphone and the computer's sound, or take a still of a region, a window or a screen. A recording becomes a video project; a still, a slide.
 
-Screen capture works in the **desktop app only**. It needs the app and the screen on one machine. When Media Studio is opened in a browser on another machine, the Capture button and the Dashboard's Capture tile are not there, and the Projects page says why in one line. Inside the desktop app, the page first asks the shell once whether it is allowed the capture commands; until the answer comes nothing is shown, and if the answer is no, the button and the tile stay hidden there too.
+Screen capture works in the **desktop app only**. It needs the app and the screen on one machine. When Media Studio is opened in a browser on another machine, the Capture button and the Dashboard's Capture tile are not there, and the Projects page says why in one line. Inside the desktop app, the page first asks the shell once whether it is allowed the capture commands; until the answer comes nothing is shown, and if the answer is no, the button and the tile stay hidden there too. The **Captures** list is not part of that rule: stills already taken are listed, annotated, added to decks, copied, downloaded and deleted from any client, the browser edition included; only taking one needs the desktop app.
 
-The server holds the same rule. A request to freeze or read the screen, to take a still, or to start or feed a recording, that does not come from this computer is refused with "Screen capture works only in the desktop app on this computer." and recorded in the audit log as `capture.refused`. Run as a team server, Media Studio therefore never shows its own desktop to anyone. A request through a proxy or a tunnel counts as not from this computer. Looking at, downloading, adding and deleting stills, and saving a recording, work from anywhere for the user who made them.
+The server holds the same rule. A request to freeze or read the screen, to take a still, or to start or feed a recording, that does not come from this computer is refused with "Screen capture works only in the desktop app on this computer." and recorded in the audit log as `capture.refused`. Run as a team server, Media Studio therefore never shows its own desktop to anyone. A request through a proxy or a tunnel counts as not from this computer. Looking at, downloading, annotating, adding and deleting stills, and saving a recording, work from anywhere for the user who made them.
 
 ## What you see
 
@@ -29,7 +29,7 @@ The **Capture** dialog has two tabs, **Record screen** and **Capture still**. Ea
 
 While a recording runs, a small **recorder bar** floats beside it. It shows the time, **Pause**/**Resume** and **Stop**; during the 3-2-1 countdown, **Cancel**. The Projects page shows the same controls. The bar is left out of the picture wherever it sits (on Windows 10 version 2004 or later; on an older Windows it is in the picture, and the app says so).
 
-**Captures**, at the foot of the Projects page, lists the stills, newest first. Each still has **Add to deck…**, **Copy**, **Save as…** and a bin, **Delete still**.
+**Captures**, at the foot of the Projects page, lists the stills, newest first, in the browser edition as in the desktop app. Each still has **Annotate**, **Add to deck…**, **Copy**, **Save as…** and a bin, **Delete still**. A still annotated in the editor shows the annotated picture, with a small **annotated** badge.
 
 **Recordings not saved yet** appears above the projects only when a recording was stopped and never saved, for example after a crash, a closed window, a full disk or a save that failed, and not while a save is running. Each one offers **Save as a project** and **Discard**. The recording being made right now is never listed there, so it cannot be saved or thrown away from under the recorder; the server refuses that too.
 
@@ -86,6 +86,32 @@ There is no share dialog for a still.
 - **Save as…** downloads it as a PNG named after the capture.
 - The bin, **Delete still**, asks first, then deletes it.
 
+Once a still has been annotated (below), all three use the annotated picture.
+
+### Annotate a still
+
+Press **Annotate** on a still. The editor opens the original still under a toolbar of twelve tools, each with a key:
+
+- **Select** (V), the default: click a shape to select it, drag it to move it, drag a handle to resize it (a line's ends, a callout's tail), press **Delete** or **Backspace** to remove it. Double-click a Text or a Callout to edit its words.
+- **Arrow** (A): drag from the tail to the tip.
+- **Callout** (C): click to place a filled, rounded box with a tail, type, click away. Drag the tail's handle to where it should point.
+- **Text** (T): click to place a text box, type, click away. The text wraps to the box; drag a handle to widen it. For a Text or a Callout, **Ctrl+Enter** keeps the words as clicking away does; **Esc** puts the old words back, or removes a box just placed; a box left empty is not kept.
+- **Rectangle** (R), **Ellipse** (E) and **Line** (L): drag.
+- **Step** (S): click to drop a numbered circle. The numbers run 1, 2, 3 … in the order placed; deleting one renumbers the rest; **Restart numbering** (on the style row, enabled while Step is the tool or a step is selected) starts the next step at 1 again, so one still can carry 1-2-3 and 1-2 for two sequences. The circle's size follows the stroke width.
+- **Blur** (B): drag over what must not be read, a password or a name. It is a mosaic, not a soft blur (see Under the hood).
+- **Highlighter** (H): drag. A translucent yellow that leaves the text under it legible; it has its own colour and ignores the stroke width.
+- **Crop** (K): drag the rectangle to keep; the rest is dimmed. One crop per still: the saved picture is the crop's size, and a shape outside the crop is clipped from the picture, never deleted. Drag the crop's handles to adjust it, or drag inside it to move it; a new drag outside it replaces it.
+- **Magnify** (M): drag the rectangle to enlarge. A 2× copy (3× from the **2×** / **3×** buttons on the style row, offered while Magnify is the tool or a lens is selected) appears beside it with a border and a thin connector, and can be dragged with Select to where it should sit. The lens shows the original pixels, not the annotations under them.
+
+The toolbar holds one shared style, remembered for the session: a **colour** (eight that read on light and dark screens, a red first, plus black and white; the Highlighter keeps its own, yellow by default), a **stroke width** (Thin, Medium, Thick) and a **text size** (Small, Medium, Large). Changing the style while a shape is selected changes that shape too. **Undo** and **Redo** (Ctrl+Z, Ctrl+Y) go back without limit within the visit; a click that moves nothing is no step. **Esc** deselects, or gives up the shape being drawn. **Fit**, **50 %**, **100 %** and **200 %** zoom; **+** and **−** step through 25, 50, 100, 200 and 400 %, and **0** fits; scroll to pan when the still is larger than the view. A still carries at most 500 shapes; past that the status line says "A still can carry at most 500 shapes."
+
+- **Save** (Ctrl+S) keeps the annotated picture. The status line reads "Unsaved changes" whenever the picture differs from what was saved, and **Save** is greyed out otherwise; Ctrl+S with nothing changed answers "Nothing to save." Once saved, the page stays open and the status line says "Saved". From then on **Add to deck…**, **Copy** and **Save as…** use the annotated picture, the Captures card shows it with an **annotated** badge, and opening the editor again shows the shapes, still editable. Saving with every annotation removed and no crop is a revert: the export is deleted and the audit log says `capture.revert`.
+- **Save and add to deck…** saves, then opens the same **Add to deck** dialog the Captures card has.
+- **Revert to original** asks first ("Throw away every annotation on *name*? The original still is kept as it is.", with **Revert**), then throws every annotation away. The original still was never changed.
+- Leaving the page with unsaved changes through the app's own links, or with Back and Forward, asks first, in the app's own dialog ("Leave without saving?", with **Leave** and **Cancel**). In a browser, a reload or a closed tab asks through the browser's prompt. **Closing the desktop app's window does not ask: save first.**
+
+Taking a still needs the desktop app; annotating one does not. The editor is pure web and touches no screen, so it works in the browser edition too: the Captures card lists the stills there as well, and **Annotate** opens the editor from it. A still of more than 100 million pixels is not opened by the editor, which says so ("This still is *W* × *H* pixels, more than the 100 million the editor can hold. Add it to a deck as it is, or take a smaller still."), and the server refuses a picture of that size at save as well: add such a still to a deck as it is.
+
 ## Under the hood
 
 **The recording** is made in the app's own window with the browser's screen capture (`getDisplayMedia`), the only way to the computer's sound without a driver.
@@ -116,7 +142,14 @@ The save's time limit comes from the pieces the server holds, five seconds each:
 - The region overlay is one window per monitor, over a picture of that monitor frozen just before it opened (held for that moment in `data\temp\capture\`). The frozen pictures are deleted once they have served, and any a crash left behind are deleted at the next start. A picture another program holds open is left for the next time; it never stops the app starting, and neither does a recording whose interrupted save cannot be reset.
 - A still is taken by the bundled ffmpeg (`gdigrab`). It copies the screen pixel for pixel, at physical pixels across every monitor, and draws the pointer only when asked.
 - The window outline and the monitor sizes come from Windows itself.
-- Stills are kept in `data\captures\<id>\` (`still.png` and `capture.json`). A recording not saved yet lives in `data\temp\recordings\<id>\`; back that folder up with the rest until it is saved.
+- Stills are kept in `data\captures\<id>\` (`still.png` and `capture.json`, and `annotated.png` once annotated). A recording not saved yet lives in `data\temp\recordings\<id>\`; back that folder up with the rest until it is saved.
+
+**The annotations.** The editor keeps a document, a list of shapes in the still's own pixel coordinates plus the crop, and draws what it shows with one renderer on a canvas. Save sends both in one request: the document, and the picture that same renderer exported at the crop's size (or the still's) as a PNG. The server checks the document against the still (every number finite and no further than the still's size beyond its edge, which is also as far as the editor lets a shape be dragged or a text box grow; the crop inside it and at least 16 × 16; at most 500 shapes, and 500 characters in a text), refuses a picture of more than 100 million pixels, reads the picture's own header for its size before anything else looks at it, checks that it is a real PNG of exactly that size that decodes, and keeps both: `capture.json` gains `annotations`, `annotated`, `annotated_at` and `output_width` / `output_height`, and `annotated.png` lands beside `still.png`. The server never re-renders: what the page showed is what is saved, pixel for pixel. A document that fails the check, or a picture that is not a PNG of the right size, or one that cannot be decoded, is refused with the reason and nothing is written; a picture over 64 MB is refused as it arrives. Should an export be damaged on disk afterwards, Add to deck says so ("The annotated picture cannot be read: revert the annotations and save them again.") rather than failing.
+
+- **Which picture.** One rule answers it. A still that says it is annotated is served as `annotated.png` by the image, the download and Add to deck alike; otherwise, and always on request (`?original=1`, what the editor draws over), `still.png`. A record that says it is annotated while the export is missing is served as the original, and the log says so.
+- **Blur is a mosaic**: square cells one hundredth of the still's shorter side (never under 8 px), each one colour taken from the original pixels under it. A soft (Gaussian) blur can be partly undone by sharpening; a mosaic at that size cannot be read back. The tool is still called Blur, because that is what people look for.
+- **Revert** deletes `annotated.png` and the document from the record. `still.png` stays as it was taken.
+- Text and callouts are rasterised with the app's own font stack, on the page and in the export alike, so the saved picture never differs from the preview in its lettering.
 
 **The shell's capture commands** (the monitor and window lists, the overlay, the bar, the keys) are granted only to the page the backend serves, at the port the desktop app started it on, together with the app's events and four window calls (minimise, restore, focus, drag the bar). Another local web page shown in the app's window gets none of them. The overlay and the bar are always opened on the backend's own address; no page chooses what they show.
 
@@ -126,6 +159,7 @@ Every capture is recorded in the audit log:
 
 - `recording.start`, `recording.finish` and `recording.discard` for a recording, plus `project.import` for the project it makes (the pieces, the heartbeat and the recorder letting go of a failed recording are not recorded);
 - `capture.still`, `capture.add_to_deck` and `capture.delete` for a still;
+- `capture.annotate` (the number of shapes and whether it is cropped, never a callout's words) and `capture.revert` for a still's annotations;
 - `capture.refused` for a request to touch the screen, or to start or feed a recording, from another machine.
 
 A still or a recording belongs to whoever made it, like a project: an editor sees their own, an administrator sees everyone's.

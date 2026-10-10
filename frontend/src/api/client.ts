@@ -89,6 +89,8 @@ export const api = {
   put: <T = any>(path: string, body?: unknown) => request<T>("PUT", path, body),
   delete: <T = any>(path: string) => request<T>("DELETE", path),
   upload: <T = any>(path: string, form: FormData) => request<T>("POST", path, form, true),
+  /** PUT a multipart form - the annotation editor's document and its exported PNG in one request (T3b). */
+  putForm: <T = any>(path: string, form: FormData) => request<T>("PUT", path, form, true),
 };
 
 /** Build a query string from an object, skipping empty values. */
