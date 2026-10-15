@@ -1,6 +1,6 @@
 # Keyboard shortcuts
 
-Every key the Timeline, the slide editor, the annotation editor, the walkthrough builder and player, and the screen recorder answer to.
+Every key the Timeline, the slide editor, the annotation editor, the walkthrough builder and player, the screen recorder and the guided capture of a walkthrough's steps answer to.
 
 The Timeline's keys are ignored while you are typing in a box and while the music library is open; the slide editor's arrows are ignored in a field and while a dialog is open; the annotation editor's keys are ignored while you are typing in a text box, except Ctrl+S, which keeps the text and saves; the walkthrough builder's Undo and Redo are ignored while you are typing in a box, and its Ctrl+S saves from anywhere.
 
@@ -94,6 +94,17 @@ While a recording runs these work from anywhere, whichever window has the focus,
 | **Esc**, a right click or **Alt+F4** (on the region overlay) | Give up the region |
 
 The keys are taken from the countdown until the recording stops, and not otherwise. If another program holds them the app says "the recording keys are off", and the recorder bar's buttons still pause and stop.
+
+## Capturing a walkthrough's steps (desktop app)
+
+While **Capture steps…** runs in the walkthrough builder, from anywhere, whichever window has the focus.
+
+| Key | What it does |
+| --- | --- |
+| **Shift+F8** | Take the still for the step the capture bar shows, attach it, and place the hotspot round the pointer as it was at the moment of the press |
+| **Esc**, a right click or **Alt+F4** (on the region overlay, when the kind is Region) | Give up the region; nothing starts |
+
+The key is taken from Start until Done, and not otherwise; it is never held together with the recording keys. If another program holds it the bar says so - a red line under the step - and its **Capture** button still works (a capture from the button places no hotspot: the pointer is on the bar). Closing the desktop app's window while the bar is up closes the bar and gives the key back with it.
 
 ## See also
 

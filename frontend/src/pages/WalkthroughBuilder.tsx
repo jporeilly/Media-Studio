@@ -24,27 +24,38 @@
  * ONE status derivation: "Saving…" while a save runs; else an event line ("Nothing to save.", the 409 line,
  * "Reloaded", a failure) until the next change; else "Unsaved changes" while the document differs from the
  * saved record; else "Saved" once a load or a save has happened.
+ *
+ * W2: a step without a picture yet (one imported from a course workshop) shows a placeholder on the stage and a
+ * mark in the list; **Capture steps…** (desktop app only, behind `useCaptureAvailable` like the Capture tile)
+ * saves first, then runs the guided capture (`useGuidedCapture`): the shell's capture bar follows the steps, each
+ * Shift+F8 takes a still, attaches it and places the hotspot round the pointer, and Done reloads the builder from
+ * the server - every record the server answers during the capture is the saved baseline, so nothing is "unsaved".
+ * A fresh import opens with a notice on the status line ("Imported …: 12 steps in 4 chapters; …").
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, FileText, GripVertical, Play, Plus, Redo2, Replace, Save, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Camera, Copy, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Trash2, Undo2, X } from "lucide-react";
 import { ApiError, api, errorMessage } from "../api/client";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Button, Card, EmptyState, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { useLeaveGuard } from "../components/annotate/useLeaveGuard";
+import { CaptureStepsDialog } from "../components/walkthrough/CaptureStepsDialog";
 import { HotspotSurface } from "../components/walkthrough/HotspotSurface";
 import { StillPicker } from "../components/walkthrough/StillPicker";
+import { useGuidedCapture } from "../components/walkthrough/useGuidedCapture";
 import { fitZoom } from "../lib/annotate";
 import type { Capture } from "../lib/capture";
 import { copyText, downloadText } from "../lib/files";
+import type { GuidedOptions } from "../lib/guided";
 import { type History, canRedo, canUndo, commit, history, prune, redo, undo } from "../lib/history";
+import { useCaptureAvailable } from "../lib/useCaptureAvailable";
 import {
   type Placement, type Step, type StepKind, type Walkthrough, type WalkthroughDocument, EMPTY_HOW, GONE_MESSAGE, MAX_CHAPTER_CHARS,
-  MAX_INSTRUCTION_CHARS, MAX_NAME_CHARS, MAX_STEP_TEXT, PLACEMENTS, PLACEMENT_LABELS, RELOAD_ASK, SAVE_BEFORE_PLAY, TOO_MANY_STEPS_MESSAGE,
-  UNSAVED_ASK, canAddStep, clampHotspot, deleteStep, documentOf, imagesOf, insertStep, moveStep, namesOnly, playUrl, putBody, reorderStep,
-  sameDocument, setHotspot, stepById, stepImageUrl, stepIndex, transcript, transcriptFileName, typingIn, updateStep, walkthroughQueryKey,
-  walkthroughsQueryKey,
+  MAX_INSTRUCTION_CHARS, MAX_NAME_CHARS, MAX_STEP_TEXT, NO_PICTURE_HOW, NO_PICTURE_TITLE, PLACEMENTS, PLACEMENT_LABELS, RELOAD_ASK,
+  SAVE_BEFORE_PLAY, TOO_MANY_STEPS_MESSAGE, UNSAVED_ASK, canAddStep, clampHotspot, deleteStep, documentOf, hasPicture, imagesOf, insertStep,
+  moveStep, namesOnly, playUrl, putBody, reorderStep, sameDocument, setHotspot, stepById, stepImageUrl, stepIndex, stepsToCapture, transcript,
+  transcriptFileName, typingIn, updateStep, walkthroughQueryKey, walkthroughsQueryKey,
 } from "../lib/walkthrough";
 
 /** What the status line says until the next change: an event, or a failure (drawn in the warning colour). */
@@ -53,9 +64,11 @@ interface Event { text: string; bad: boolean }
 export default function WalkthroughBuilderPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const qc = useQueryClient();
   const { confirm, dialog } = useConfirm();
   const viewportRef = useRef<HTMLDivElement>(null);
+  const canCapture = useCaptureAvailable();
 
   const record = useQuery({ queryKey: walkthroughQueryKey(id), queryFn: () => api.get<Walkthrough>(`/api/walkthroughs/${id}`), retry: false });
   const rec = record.data ?? null;
@@ -76,6 +89,7 @@ export default function WalkthroughBuilderPage() {
   const [zoom, setZoom] = useState(1);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [captureOpen, setCaptureOpen] = useState(false);
 
   // The document and its history from the record once (and again on Reload); the saved baseline beside it.
   const load = useCallback((r: Walkthrough) => {
@@ -90,10 +104,34 @@ export default function WalkthroughBuilderPage() {
   }, []);
   useEffect(() => { if (rec && !hist) load(rec); }, [rec, hist, load]);
 
+  // A notice carried in by the route (a fresh import): on the status line until the next change, said once.
+  const noticeFromRoute = (location.state as { notice?: string } | null)?.notice;
+  useEffect(() => {
+    if (!noticeFromRoute) return;
+    setEvent({ text: noticeFromRoute, bad: false });
+    navigate(location.pathname, { replace: true, state: null });
+  }, [noticeFromRoute, navigate, location.pathname]);
+
   const doc = preview ?? hist?.present ?? null;
   const dirty = !!doc && !!saved && !sameDocument(doc, saved);
   const selected = doc ? stepById(doc, selectedId) : null;
   const selectedIndex = doc ? stepIndex(doc, selectedId) : -1;
+  const docRef = useRef<WalkthroughDocument | null>(null);
+  docRef.current = doc;
+
+  // The guided capture (W2): each attached picture makes the server's record the saved baseline; Done reloads.
+  const guided = useGuidedCapture({
+    wid: id,
+    document: () => docRef.current,
+    onAttached: (r) => { qc.setQueryData(walkthroughQueryKey(id), r); load(r); },
+    onFinished: (s) => {
+      void record.refetch().then((res) => {
+        if (res.data) load(res.data);
+        setEvent({ text: `Captured ${s.captured} step${s.captured === 1 ? "" : "s"}${s.skipped ? `, skipped ${s.skipped}` : ""}.`, bad: false });
+      });
+      void qc.invalidateQueries({ queryKey: walkthroughsQueryKey, exact: true });
+    },
+  });
 
   // Every change of the document ends the event line.
   const change = useCallback((next: WalkthroughDocument, commitIt: boolean) => {
@@ -252,6 +290,15 @@ export default function WalkthroughBuilderPage() {
     navigate(playUrl(id, at), { state: { from: "builder", step: at } });
   }, [doc, selectedIndex, dirty, confirm, save, release, navigate, id]);
 
+  /** Capture steps: the builder saves first (as Play does), then the guided capture starts. */
+  const startCapture = useCallback(async (options: GuidedOptions) => {
+    setCaptureOpen(false);
+    if (!doc) return;
+    if (dirty && !(await save())) return;
+    setEvent(null);
+    await guided.start(options);
+  }, [doc, dirty, save, guided]);
+
   // The keys: Ctrl+S saves from anywhere (a text being typed included); undo / redo not while typing in a box.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -266,6 +313,8 @@ export default function WalkthroughBuilderPage() {
   }, [save, undoOne, redoOne]);
 
   const statusText = saving ? "Saving…" : event?.text ?? (dirty ? "Unsaved changes" : settled ? "Saved" : "");
+  const capturing = guided.phase !== "idle";
+  const missingCount = doc ? stepsToCapture(doc, false).length : 0;
 
   if (record.isLoading) return <Spinner label="Loading the walkthrough…" />;
   if (record.isError) {
@@ -298,9 +347,31 @@ export default function WalkthroughBuilderPage() {
           <Button size="sm" variant="primary" icon={<Save size={14} />} onClick={() => void save()} disabled={!dirty || saving} title="Save (Ctrl+S)">Save</Button>
           <Button size="sm" icon={<Play size={14} />} onClick={() => void play()} disabled={doc.steps.length === 0} title="Play from the selected step">Play</Button>
           <Button size="sm" icon={<FileText size={14} />} onClick={() => setTranscriptOpen((o) => !o)} aria-expanded={transcriptOpen} title="The walkthrough as a transcript: what is said at each step" data-transcript-toggle="">Transcript</Button>
+          {canCapture && (
+            <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={doc.steps.length === 0 || capturing || saving} title={missingCount ? `${missingCount} step${missingCount === 1 ? " has" : "s have"} no picture yet: capture them in order` : "Capture every step again, in order"} data-capture-steps="">Capture steps…</Button>
+          )}
           <span role="status" aria-live="polite" style={{ color: event?.bad ? "var(--bad)" : "var(--muted)", fontSize: 12.5 }} data-builder-status="">{statusText}</span>
           {stale && <Button size="sm" onClick={() => void reload()} data-builder-reload="">Reload</Button>}
         </div>
+        {(capturing || guided.message) && (
+          <div className="ms-capture-line" role="status" aria-live="polite" data-capture-line="">
+            {capturing && guided.bar && (
+              <>
+                <Camera size={14} />
+                <strong data-capture-label="">{guided.bar.label}</strong>
+                <span className="os-truncate" style={{ flex: 1 }}>{guided.bar.text}</span>
+                <span className="os-muted">{guided.phase === "finished" ? "All steps visited." : "Shift+F8 captures; the bar has Capture, Skip, Back and Done."}</span>
+                <Button size="sm" onClick={() => void guided.done()} disabled={guided.phase === "capturing"} data-capture-done="">Done</Button>
+              </>
+            )}
+            {guided.message && (
+              <>
+                <span style={{ color: "var(--bad)" }} data-capture-message="">{guided.message}</span>
+                <button className="os-icon-btn" onClick={guided.dismiss} title="Dismiss" aria-label="Dismiss">×</button>
+              </>
+            )}
+          </div>
+        )}
         {transcriptOpen && (
           <div className="ms-transcript-panel" role="region" aria-label="Transcript" data-builder-transcript="">
             <div className="os-row" style={{ justifyContent: "space-between", gap: 8 }}>
@@ -335,7 +406,9 @@ export default function WalkthroughBuilderPage() {
               >
                 <div className="ms-step-num"><GripVertical size={12} />{i + 1}</div>
                 <div style={{ display: "grid", gap: 4, minWidth: 0 }}>
-                  <img src={stepImageUrl(id, s.id, revision)} alt="" />
+                  {hasPicture(s)
+                    ? <img src={stepImageUrl(id, s.id, revision)} alt="" />
+                    : <div className="ms-step-noimg" title={NO_PICTURE_TITLE} data-step-no-picture=""><ImageOff size={12} /> No picture</div>}
                   {s.chapter.trim() && <span className="os-chip os-chip-dense os-truncate" style={{ background: "var(--brand)", maxWidth: "100%" }} data-step-chapter="">{s.chapter}</span>}
                   <div className="os-row" style={{ gap: 2 }}>
                     <button className="os-icon-btn" aria-label={`Move step ${i + 1} up`} disabled={i === 0} onClick={(e) => { e.stopPropagation(); change(moveStep(doc, s.id, -1), true); }}><ArrowUp size={13} /></button>
@@ -349,7 +422,7 @@ export default function WalkthroughBuilderPage() {
             {doc.steps.length === 0 && <p className="os-muted os-small" style={{ margin: 0 }}>{EMPTY_HOW}</p>}
           </aside>
           <div ref={viewportRef} className="ms-builder-stage" data-builder-stage="">
-            {selected ? (
+            {selected && hasPicture(selected) ? (
               <HotspotSurface
                 src={stepImageUrl(id, selected.id, revision)}
                 size={{ width: selected.width, height: selected.height }}
@@ -357,6 +430,16 @@ export default function WalkthroughBuilderPage() {
                 hotspot={hotspot}
                 onChange={(h, commitIt) => change(setHotspot(doc, selected.id, h), commitIt)}
               />
+            ) : selected ? (
+              <div className="ms-placeholder" data-step-placeholder="">
+                <ImageOff size={28} />
+                <strong>{NO_PICTURE_TITLE}</strong>
+                <p>{NO_PICTURE_HOW}</p>
+                <div className="os-row" style={{ gap: 6 }}>
+                  {canCapture && <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={capturing || saving}>Capture steps…</Button>}
+                  <Button size="sm" icon={<Replace size={14} />} onClick={() => setPicker("replace")}>Replace picture…</Button>
+                </div>
+              </div>
             ) : (
               <EmptyState title="No step selected" sub="Add a step from a still, or pick one on the left." />
             )}
@@ -389,11 +472,18 @@ export default function WalkthroughBuilderPage() {
                   <Button size="sm" onClick={() => edit({ hotspot: null })} disabled={!hotspot} data-remove-hotspot="">Remove hotspot</Button>
                 </div>
                 <p className="os-muted os-small" style={{ margin: 0 }} data-hotspot-line="">
-                  {hotspot
-                    ? `Hotspot ${hotspot.width} × ${hotspot.height} at ${hotspot.x}, ${hotspot.y}. Drag inside it to move it, a handle to resize it.`
-                    : "No hotspot: drag on the picture to draw one. A tooltip step without a hotspot is shown as a modal card."}
+                  {!hasPicture(selected)
+                    ? "No picture yet, so no hotspot: the hotspot comes with the capture (round the pointer when you press Shift+F8)."
+                    : hotspot
+                      ? `Hotspot ${hotspot.width} × ${hotspot.height} at ${hotspot.x}, ${hotspot.y}. Drag inside it to move it, a handle to resize it.`
+                      : "No hotspot: drag on the picture to draw one. A tooltip step without a hotspot is shown as a modal card."}
                 </p>
-                <p className="os-muted os-xs" style={{ margin: 0 }}>{selected.width} × {selected.height}{selected.source?.annotated ? " · from an annotated still" : ""}</p>
+                <p className="os-muted os-xs" style={{ margin: 0 }} data-step-size="">
+                  {hasPicture(selected) ? `${selected.width} × ${selected.height}` : NO_PICTURE_TITLE}
+                  {selected.source && "annotated" in selected.source && selected.source.annotated ? " · from an annotated still" : ""}
+                  {selected.source && "slug" in selected.source ? ` · from ${selected.source.course}/${selected.source.slug}` : ""}
+                  {selected.note ? ` · a note from the guide (${selected.note.length} characters, kept for the narrated video)` : ""}
+                </p>
               </>
             ) : (
               <p className="os-muted" style={{ margin: 0 }}>Select a step to edit it.</p>
@@ -401,6 +491,9 @@ export default function WalkthroughBuilderPage() {
           </aside>
         </div>
       </Card>
+      {canCapture && (
+        <CaptureStepsDialog open={captureOpen} missing={missingCount} total={doc.steps.length} onClose={() => setCaptureOpen(false)} onStart={(o) => void startCapture(o)} />
+      )}
       <StillPicker
         open={picker !== null}
         title={picker === "replace" ? "Replace picture" : "Add step"}

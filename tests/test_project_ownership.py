@@ -89,7 +89,16 @@ PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
 # caller's slug onto a directory, because ``docs/porting/`` is internal design
 # material that must not be reachable through it; that is a DECISION, not an
 # oversight, and tests/test_docs.py proves no spelling reaches it.
+#
+# The courses (api/routers/courses.py, W2) are studio-wide and read-only too:
+# the files an administrator pointed the app at (Settings > Studio, the
+# courses folder), shared by every account, read and never written. The
+# walkthrough an import makes belongs to whoever imported it, as a project
+# does (tests/test_workshops.py holds that, and that nothing outside the folder
+# is ever read).
 STUDIO_WIDE_ROUTES: set[tuple[str, str]] = {
+    ("GET", "/api/courses"),
+    ("GET", "/api/courses/{course}/workshops/{slug}/preview"),
     ("GET", "/api/music"),
     ("POST", "/api/music"),
     ("GET", "/api/music/{name}"),

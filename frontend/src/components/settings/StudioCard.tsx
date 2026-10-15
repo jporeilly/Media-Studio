@@ -109,6 +109,9 @@ export function StudioCard() {
             <Field label="Output folder" hint="Not used by this edition yet — renders are saved with their project. An absolute path on the server; it is created if missing and must be writable.">
               <Input value={form.output_folder} disabled={readOnly} onChange={(e) => update({ output_folder: e.target.value })} aria-invalid={!form.output_folder.trim()} />
             </Field>
+            <Field label="Courses folder" hint="The folder Walkthroughs › Import workshop… reads: one folder per course, each with a course.json. An existing folder on the server, read and never written; leave it empty to turn the import off.">
+              <Input value={form.courses_folder ?? ""} disabled={readOnly} placeholder="(not set)" onChange={(e) => update({ courses_folder: e.target.value })} data-courses-folder="" />
+            </Field>
 
             <Field label="Transition pause" hint={`Seconds of silence between slides (${pause.min} to ${pause.max}).`}>
               <Input

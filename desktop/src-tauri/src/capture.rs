@@ -165,9 +165,73 @@ pub fn overlay_url(origin: &str, monitor: usize, generation: u64) -> String {
     format!("{origin}/capture-overlay.html?monitor={monitor}&gen={generation}")
 }
 
-/// The recorder bar's page, on `origin`.
-pub fn bar_url(origin: &str) -> String {
-    format!("{origin}/capture-bar.html")
+/// The recorder bar's page, on `origin`; in its second mode (the guided
+/// capture of a walkthrough's steps, W2) the page is asked for `?mode=steps`.
+pub fn bar_url(origin: &str, mode: BarMode) -> String {
+    match mode {
+        BarMode::Recording => format!("{origin}/capture-bar.html"),
+        BarMode::Steps => format!("{origin}/capture-bar.html?mode=steps"),
+    }
+}
+
+/// The capture bar's two modes: the recorder's (pause / stop, the clock) and
+/// the guided capture's (the walkthrough's step, Capture / Skip / Back /
+/// Done). The same window and page; the page lays itself out by the mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarMode {
+    Recording,
+    Steps,
+}
+
+impl BarMode {
+    /// The page's `mode` argument: `None` or `"recording"` is the recorder's
+    /// bar, `"steps"` the guided capture's; anything else is refused.
+    pub fn parse(mode: Option<&str>) -> Result<Self, String> {
+        match mode {
+            None | Some("") | Some("recording") => Ok(BarMode::Recording),
+            Some("steps") => Ok(BarMode::Steps),
+            Some(other) => Err(format!("Unknown capture bar mode '{other}'.")),
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            BarMode::Recording => "Recording",
+            BarMode::Steps => "Capture steps",
+        }
+    }
+}
+
+/// The two sets of global keys the shell takes for the page: the recorder's
+/// (Shift+F9 pause / resume, Shift+F10 stop) and the guided capture's
+/// (Shift+F8 capture, raised WITH the pointer's position). One set at a time:
+/// the keys are taken only while the recording or the capture runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySet {
+    Recording,
+    Steps,
+}
+
+impl KeySet {
+    /// The page's `keys` argument: `None` or `"recording"` is the recorder's
+    /// set, `"steps"` the guided capture's; anything else is refused.
+    pub fn parse(keys: Option<&str>) -> Result<Self, String> {
+        match keys {
+            None | Some("") | Some("recording") => Ok(KeySet::Recording),
+            Some("steps") => Ok(KeySet::Steps),
+            Some(other) => Err(format!("Unknown key set '{other}'.")),
+        }
+    }
+}
+
+/// The pointer at the moment the capture key was pressed, in PHYSICAL
+/// virtual-screen pixels - the space the overlay's regions, the monitors and
+/// the windows are reported in (this process is per-monitor DPI aware, so
+/// `GetCursorPos` answers physical pixels). The payload of `capture:step-key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Pointer {
+    pub x: i32,
+    pub y: i32,
 }
 
 /// Overlay generations: each `capture_overlay_open` is a new one, and its
@@ -215,6 +279,21 @@ fn close_overlays(app: &AppHandle) {
             let _ = window.close();
         }
     }
+}
+
+/// The main window going (its `Destroyed` event, `main.rs`): whatever the
+/// screen capture still has open goes with it - the region overlays, the bar
+/// in either mode - and the global keys are given back, so a guided capture's
+/// Shift+F8 (or a recording's Shift+F9 / Shift+F10) is never left registered
+/// to a process on its way out, and no orphaned always-on-top bar keeps the
+/// process alive once the main window is gone. Each part is idempotent: the
+/// page usually released them first (Done, Stop), and nothing held is nothing
+/// done. Called before the backend is stopped, from the one line `main.rs`
+/// adds to that branch.
+pub fn shutdown(app: &AppHandle) {
+    close_overlays(app);
+    capture_bar_close(app.clone());
+    hotkeys::stop();
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,6 +344,9 @@ pub const REGION_EVENT: &str = "capture:region";
 /// hotkeys raise in the main window (payload `"pause"` or `"stop"`).
 pub const BAR_LABEL: &str = "capture-bar";
 pub const HOTKEY_EVENT: &str = "capture:hotkey";
+/// The event the guided capture's key (Shift+F8) raises in the main window,
+/// with the pointer's position as its payload (`Pointer`).
+pub const STEP_KEY_EVENT: &str = "capture:step-key";
 
 #[cfg(windows)]
 mod win {
@@ -406,62 +488,105 @@ mod affinity {
 #[cfg(windows)]
 mod hotkeys {
     //! Snagit's recording keys, system-wide: Shift+F9 pause/resume, Shift+F10
-    //! stop. `RegisterHotKey` binds a key to the THREAD that registers it and
-    //! delivers `WM_HOTKEY` to that thread's message queue, so a thread of our
-    //! own runs the queue while a recording lasts and raises the event in the
-    //! main window; `stop` posts it `WM_QUIT`. The keys are taken only while
-    //! recording, so the rest of the time they stay with whatever else wants
-    //! them (ShareX, Snagit itself).
+    //! stop - and, for the guided capture of a walkthrough's steps (W2),
+    //! Shift+F8 capture. `RegisterHotKey` binds a key to the THREAD that
+    //! registers it and delivers `WM_HOTKEY` to that thread's message queue,
+    //! so a thread of our own runs the queue while a recording (or a guided
+    //! capture) lasts and raises the event in the main window; `stop` posts it
+    //! `WM_QUIT`. The keys are taken only while recording or capturing, so the
+    //! rest of the time they stay with whatever else wants them (ShareX,
+    //! Snagit itself). One set at a time.
+    //!
+    //! The capture key's event carries the POINTER's position, read with
+    //! `GetCursorPos` on this thread the moment `WM_HOTKEY` arrives - before
+    //! the page is told, so before any still is taken - in physical
+    //! virtual-screen pixels (this process is per-monitor DPI aware), the
+    //! space the overlay's regions and the window list are already in. Read
+    //! here rather than by a command the page calls back: the page learns of
+    //! the press through an event anyway, and a round trip after it would
+    //! read where the pointer went next.
     use std::sync::{mpsc, Mutex};
 
     use tauri::{AppHandle, Emitter};
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, MOD_SHIFT, VK_F10, VK_F9,
+        RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, MOD_SHIFT, VK_F10, VK_F8, VK_F9,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, PostThreadMessageW, MSG, WM_HOTKEY, WM_QUIT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetMessageW, PostThreadMessageW, MSG, WM_HOTKEY, WM_QUIT};
+
+    use super::{KeySet, Pointer};
 
     const ID_PAUSE: i32 = 1;
     const ID_STOP: i32 = 2;
-    static THREAD: Mutex<Option<u32>> = Mutex::new(None);
+    const ID_CAPTURE: i32 = 3;
+    static THREAD: Mutex<Option<(u32, KeySet)>> = Mutex::new(None);
 
-    pub fn start(app: AppHandle) -> Result<(), String> {
+    /// The pointer now, physical virtual-screen pixels; None when Windows
+    /// cannot say (the page then captures without a hotspot).
+    fn pointer() -> Option<Pointer> {
+        let mut point = POINT::default();
+        unsafe { GetCursorPos(&mut point).ok()? };
+        Some(Pointer { x: point.x, y: point.y })
+    }
+
+    pub fn start(app: AppHandle, set: KeySet) -> Result<(), String> {
         let mut guard = THREAD.lock().map_err(|_| "hotkey state poisoned".to_string())?;
-        if guard.is_some() {
-            return Ok(());
+        if let Some((_, held)) = *guard {
+            if held == set {
+                return Ok(());
+            }
+            return Err(match held {
+                KeySet::Recording => "The recording keys are in use: stop the recording first.".into(),
+                KeySet::Steps => "The capture key is in use: finish the guided capture first.".into(),
+            });
         }
         let (tx, rx) = mpsc::channel::<Result<u32, String>>();
         std::thread::spawn(move || unsafe {
             let tid = GetCurrentThreadId();
-            let pause = RegisterHotKey(None, ID_PAUSE, MOD_SHIFT | MOD_NOREPEAT, VK_F9.0 as u32);
-            let stop = RegisterHotKey(None, ID_STOP, MOD_SHIFT | MOD_NOREPEAT, VK_F10.0 as u32);
-            if pause.is_err() || stop.is_err() {
-                let _ = UnregisterHotKey(None, ID_PAUSE);
-                let _ = UnregisterHotKey(None, ID_STOP);
-                let _ = tx.send(Err(
-                    "Shift+F9 / Shift+F10 are taken by another program, so the recording keys are off.".into(),
-                ));
+            let ids: &[(i32, u32)] = match set {
+                KeySet::Recording => &[(ID_PAUSE, VK_F9.0 as u32), (ID_STOP, VK_F10.0 as u32)],
+                KeySet::Steps => &[(ID_CAPTURE, VK_F8.0 as u32)],
+            };
+            let registered = ids
+                .iter()
+                .all(|(id, key)| RegisterHotKey(None, *id, MOD_SHIFT | MOD_NOREPEAT, *key).is_ok());
+            if !registered {
+                for (id, _) in ids {
+                    let _ = UnregisterHotKey(None, *id);
+                }
+                let _ = tx.send(Err(match set {
+                    KeySet::Recording => "Shift+F9 / Shift+F10 are taken by another program, so the recording keys are off.".into(),
+                    KeySet::Steps => "Shift+F8 is taken by another program, so the capture key is off; use Capture on the bar.".into(),
+                }));
                 return;
             }
             let _ = tx.send(Ok(tid));
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message == WM_HOTKEY {
-                    let action = match msg.wParam.0 as i32 {
-                        ID_PAUSE => "pause",
-                        ID_STOP => "stop",
+                    match msg.wParam.0 as i32 {
+                        ID_PAUSE => {
+                            let _ = app.emit_to("main", super::HOTKEY_EVENT, "pause");
+                        }
+                        ID_STOP => {
+                            let _ = app.emit_to("main", super::HOTKEY_EVENT, "stop");
+                        }
+                        ID_CAPTURE => {
+                            // The pointer first, then the page: nothing has moved yet.
+                            let _ = app.emit_to("main", super::STEP_KEY_EVENT, pointer());
+                        }
                         _ => continue,
-                    };
-                    let _ = app.emit_to("main", super::HOTKEY_EVENT, action);
+                    }
                 }
             }
-            let _ = UnregisterHotKey(None, ID_PAUSE);
-            let _ = UnregisterHotKey(None, ID_STOP);
+            for (id, _) in ids {
+                let _ = UnregisterHotKey(None, *id);
+            }
         });
         match rx.recv() {
             Ok(Ok(tid)) => {
-                *guard = Some(tid);
+                *guard = Some((tid, set));
                 Ok(())
             }
             Ok(Err(e)) => Err(e),
@@ -469,14 +594,23 @@ mod hotkeys {
         }
     }
 
+    /// Give the keys back: the thread told to quit, which unregisters them.
+    /// Nothing held is nothing done - safe from the page's own release and
+    /// from the main window's shutdown after it, in either order.
     pub fn stop() {
         if let Ok(mut guard) = THREAD.lock() {
-            if let Some(tid) = guard.take() {
+            if let Some((tid, _)) = guard.take() {
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
                 }
             }
         }
+    }
+
+    /// The set held now, if any (the tests' view of `stop`).
+    #[cfg(test)]
+    pub fn held() -> Option<KeySet> {
+        THREAD.lock().ok().and_then(|guard| guard.as_ref().map(|(_, set)| *set))
     }
 }
 
@@ -501,10 +635,14 @@ mod affinity {
 #[cfg(not(windows))]
 mod hotkeys {
     use tauri::AppHandle;
-    pub fn start(_app: AppHandle) -> Result<(), String> {
+    pub fn start(_app: AppHandle, _set: super::KeySet) -> Result<(), String> {
         Err("Recording hotkeys are available on Windows only.".into())
     }
     pub fn stop() {}
+    #[cfg(test)]
+    pub fn held() -> Option<super::KeySet> {
+        None
+    }
 }
 
 /// The monitors, physical virtual-screen pixels, primary first.
@@ -607,19 +745,22 @@ pub fn capture_overlay_done(app: AppHandle, region: Option<Region>) -> Result<()
     Ok(())
 }
 
-/// Open the floating recorder bar: a small undecorated always-on-top window
+/// Open the floating capture bar: a small undecorated always-on-top window
 /// at the backend's `capture-bar.html` (built here from the backend's
 /// origin, like the overlay's), placed at physical `x`,`y`
 /// with the given physical size, and excluded from screen capture so it
-/// never appears in a recording wherever it sits (`affinity`). Returns
-/// whether the exclusion took: false on a Windows older than 10 2004, where
-/// the bar is in the picture and the UI should say so.
+/// never appears in a recording wherever it sits (`affinity`). `mode` picks
+/// the bar's page mode (`BarMode`): the recorder's by default, the guided
+/// capture's with `"steps"` (W2). Returns whether the exclusion took: false
+/// on a Windows older than 10 2004, where the bar is in the picture and the
+/// UI should say so.
 #[tauri::command(async)]
-pub fn capture_bar_open(app: AppHandle, x: i32, y: i32, width: u32, height: u32) -> Result<bool, String> {
-    let url: tauri::Url = bar_url(&current_origin()?).parse().map_err(|e| format!("Bad bar URL: {e}"))?;
+pub fn capture_bar_open(app: AppHandle, x: i32, y: i32, width: u32, height: u32, mode: Option<String>) -> Result<bool, String> {
+    let mode = BarMode::parse(mode.as_deref())?;
+    let url: tauri::Url = bar_url(&current_origin()?, mode).parse().map_err(|e| format!("Bad bar URL: {e}"))?;
     capture_bar_close(app.clone());
     let window = WebviewWindowBuilder::new(&app, BAR_LABEL, WebviewUrl::External(url))
-        .title("Recording")
+        .title(mode.title())
         .decorations(false)
         .shadow(false)
         .always_on_top(true)
@@ -654,15 +795,18 @@ pub fn capture_bar_close(app: AppHandle) {
     }
 }
 
-/// Take the recording keys (Shift+F9 pause/resume, Shift+F10 stop) for the
-/// length of a recording; `capture:hotkey` is raised in the main window with
-/// `"pause"` or `"stop"`. Err when another program holds them.
+/// Take the global keys for the length of a recording or a guided capture:
+/// the recording keys by default (Shift+F9 pause/resume, Shift+F10 stop;
+/// `capture:hotkey` raised in the main window with `"pause"` or `"stop"`), or
+/// with `keys: "steps"` the capture key (Shift+F8; `capture:step-key` raised
+/// with the pointer's position, read as the key is pressed). Err when another
+/// program holds them, or the other set is in use.
 #[tauri::command(async)]
-pub fn capture_hotkeys_start(app: AppHandle) -> Result<(), String> {
-    hotkeys::start(app)
+pub fn capture_hotkeys_start(app: AppHandle, keys: Option<String>) -> Result<(), String> {
+    hotkeys::start(app, KeySet::parse(keys.as_deref())?)
 }
 
-/// Give the recording keys back.
+/// Give the keys back.
 #[tauri::command(async)]
 pub fn capture_hotkeys_stop() {
     hotkeys::stop();
@@ -706,9 +850,44 @@ mod tests {
     fn the_overlay_and_the_bar_open_on_the_backends_origin() {
         let origin = backend_origin(51234);
         assert_eq!(overlay_url(&origin, 2, 7), "http://127.0.0.1:51234/capture-overlay.html?monitor=2&gen=7");
-        assert_eq!(bar_url(&origin), "http://127.0.0.1:51234/capture-bar.html");
+        assert_eq!(bar_url(&origin, BarMode::Recording), "http://127.0.0.1:51234/capture-bar.html");
+        assert_eq!(bar_url(&origin, BarMode::Steps), "http://127.0.0.1:51234/capture-bar.html?mode=steps");
         let parsed: tauri::Url = overlay_url(&origin, 0, 1).parse().unwrap();
         assert_eq!((parsed.host_str(), parsed.port()), (Some("127.0.0.1"), Some(51234)));
+        let steps: tauri::Url = bar_url(&origin, BarMode::Steps).parse().unwrap();
+        assert_eq!((steps.host_str(), steps.port(), steps.query()), (Some("127.0.0.1"), Some(51234), Some("mode=steps")));
+    }
+
+    #[test]
+    fn the_bars_second_mode_and_the_capture_key_set_are_named_by_the_page() {
+        // The bar: the recorder's by default, the guided capture's with "steps"; anything else refused.
+        assert_eq!(BarMode::parse(None), Ok(BarMode::Recording));
+        assert_eq!(BarMode::parse(Some("")), Ok(BarMode::Recording));
+        assert_eq!(BarMode::parse(Some("recording")), Ok(BarMode::Recording));
+        assert_eq!(BarMode::parse(Some("steps")), Ok(BarMode::Steps));
+        assert!(BarMode::parse(Some("other")).is_err());
+        assert_eq!((BarMode::Recording.title(), BarMode::Steps.title()), ("Recording", "Capture steps"));
+        // The keys: the recorder's two by default, the capture key with "steps".
+        assert_eq!(KeySet::parse(None), Ok(KeySet::Recording));
+        assert_eq!(KeySet::parse(Some("recording")), Ok(KeySet::Recording));
+        assert_eq!(KeySet::parse(Some("steps")), Ok(KeySet::Steps));
+        assert!(KeySet::parse(Some("f8")).is_err());
+        // The key's event carries the pointer as {x, y}, in physical pixels, as the page reads it (lib/guided.ts pointerOf).
+        assert_eq!(STEP_KEY_EVENT, "capture:step-key");
+        assert_eq!(serde_json::to_value(Pointer { x: -1920, y: 42 }).unwrap(), serde_json::json!({ "x": -1920, "y": 42 }));
+        assert_eq!(serde_json::to_value(Option::<Pointer>::None).unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn giving_the_keys_back_with_nothing_held_is_a_no_op_twice_over() {
+        // The main window's Destroyed branch runs `shutdown` after the page may already have given the keys back
+        // (Done, Stop), or when nothing was ever taken: `hotkeys::stop` must be safe with nothing held, and again
+        // after that. (The bar's close and the overlays' are the window's own close, idempotent by Tauri.)
+        assert_eq!(hotkeys::held(), None);
+        hotkeys::stop();
+        assert_eq!(hotkeys::held(), None);
+        hotkeys::stop();
+        assert_eq!(hotkeys::held(), None);
     }
 
     #[test]

@@ -154,7 +154,7 @@ The save's time limit comes from the pieces the server holds, five seconds each:
 
 **The shell's capture commands** (the monitor and window lists, the overlay, the bar, the keys) are granted only to the page the backend serves, at the port the desktop app started it on, together with the app's events and four window calls (minimise, restore, focus, drag the bar). Another local web page shown in the app's window gets none of them. The overlay and the bar are always opened on the backend's own address; no page chooses what they show.
 
-**The recorder bar** is excluded from screen capture by Windows. That needs Windows 10 version 2004 or later. On an older Windows the bar is in the picture, and the app says so.
+**The recorder bar** is excluded from screen capture by Windows. That needs Windows 10 version 2004 or later. On an older Windows the bar is in the picture, and the app says so. The same window serves as the **capture bar** of a walkthrough's guided capture, in a second mode with a key of its own, Shift+F8, never held together with the recording keys ([Walkthroughs](walkthroughs.md)).
 
 Every capture is recorded in the audit log:
 

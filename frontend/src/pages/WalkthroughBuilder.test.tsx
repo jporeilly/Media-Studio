@@ -28,7 +28,7 @@ vi.mock("../api/client", async (importOriginal) => {
 const WID = "abc123abc123";
 const A = "aaaaaaaaaaaa", B = "bbbbbbbbbbbb", N = "cccccccccccc";
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
 });
 /** What the server stores of a sent document: the name and the chapters stripped, the texts with LF line breaks. */
 const asStored = (sent: { name: string; steps: Step[] }) => ({
@@ -59,7 +59,7 @@ function PlayStub() {
   return createElement("div", { "data-play": id, "data-search": location.search, "data-state": JSON.stringify(location.state) }, "play");
 }
 
-async function mount() {
+async function mount(state: unknown = null) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -67,7 +67,7 @@ async function mount() {
   await act(async () => {
     root!.render(
       createElement(QueryClientProvider, { client: qc },
-        createElement(MemoryRouter, { initialEntries: [`/walkthroughs/${WID}`] },
+        createElement(MemoryRouter, { initialEntries: [{ pathname: `/walkthroughs/${WID}`, state }] },
           createElement(Routes, null,
             createElement(Route, { path: "/walkthroughs/:id", element: createElement(WalkthroughBuilderPage) }),
             createElement(Route, { path: "/walkthroughs/:id/play", element: createElement(PlayStub) }),
@@ -553,6 +553,72 @@ describe("the transcript's Copy when the clipboard refuses", () => {
     } finally {
       delete (navigator as unknown as { clipboard?: unknown }).clipboard;
     }
+  });
+});
+
+describe("W2: a step without a picture, and the import's notice", () => {
+  const bare = (id: string, over: Partial<Step> = {}) => step(id, { image: null, width: 0, height: 0, hotspot: null, text: "Open the dialog", ...over });
+
+  it("shows a placeholder on the stage and a mark in the list, no hotspot line of its own, and offers Replace picture; the notice reads once", async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === `/api/walkthroughs/${WID}`) return record({ steps: [bare(A, { note: "Under the hood", source: { course: "demo", slug: "01-first", image: null, alt: "", launcher: null } }), step(B)] }) as never;
+      if (path === "/api/captures") return { captures: [capture] } as never;
+      return {} as never;
+    });
+    await mount({ notice: 'Imported "Tour": 2 steps in 1 chapter; 1 picture from the guide, 1 to capture.' });
+    expect(status()).toBe('Imported "Tour": 2 steps in 1 chapter; 1 picture from the guide, 1 to capture.');
+    expect(q("[data-step-placeholder]")).not.toBeNull();
+    expect(q("[data-step-placeholder]")!.textContent).toContain("No picture yet");
+    expect(q("[data-step-placeholder]")!.textContent).toContain("Replace picture");
+    expect(q("[data-walkthrough-surface]")).toBeNull();
+    expect(document.querySelector("[data-step-placeholder] img")).toBeNull();
+    expect(q(`[data-step="${A}"] [data-step-no-picture]`)).not.toBeNull();
+    expect(q(`[data-step="${B}"] [data-step-no-picture]`)).toBeNull();
+    expect(q(`[data-step="${A}"] img`)).toBeNull();
+    expect(hotspotLine()).toContain("No picture yet, so no hotspot");
+    expect(q("[data-step-size]")!.textContent).toContain("No picture yet");
+    expect(q("[data-step-size]")!.textContent).toContain("from demo/01-first");
+    expect(q("[data-step-size]")!.textContent).toContain("a note from the guide (14 characters");
+    expect(labelled("Remove hotspot") ?? button("Remove hotspot")).not.toBeNull();
+    expect(button("Remove hotspot")!.disabled).toBe(true);
+    // No Capture steps… outside the desktop app.
+    expect(button("Capture steps…")).toBeNull();
+    // The notice is an event line: the next change ends it, and the document is not dirty for it.
+    expect(button("Save")!.disabled).toBe(true);
+    const text = document.querySelector("[data-step-text]") as HTMLTextAreaElement;
+    await act(async () => { setValue(text, "Typed"); });
+    expect(status()).toBe("Unsaved changes");
+    // Replace picture… from the placeholder: the first picture of the step, sent without a hotspot field.
+    vi.mocked(api.post).mockImplementation(async () => record({ revision: 3, steps: [step(A, { width: 200, height: 100, text: "Open the dialog", source: { capture_id: capture.id, annotated: true } }), step(B)] }) as never);
+    const replace = [...q("[data-step-placeholder]")!.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Replace picture"))!;
+    await act(async () => { replace.click(); });
+    await settle();
+    await act(async () => { (document.querySelector(`[data-pick-capture="${capture.id}"]`) as HTMLButtonElement).click(); });
+    await settle();
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith(`/api/walkthroughs/${WID}/steps/${A}/picture`, { capture_id: capture.id });
+    expect(q("[data-step-placeholder]")).toBeNull();
+    expect((q("[data-walkthrough-surface] img") as HTMLImageElement).getAttribute("src")).toBe(`/api/walkthroughs/${WID}/steps/${A}/image?v=3`);
+    expect(q(`[data-step="${A}"] [data-step-no-picture]`)).toBeNull();
+    // The typed text survives the replace (the local document is kept) and the note travels in the save.
+    await key("s", { ctrlKey: true });
+    await settle();
+    const sent = puts()[0][1] as { revision: number; steps: Step[] };
+    expect(sent.steps[0]).toMatchObject({ text: "Typed", note: "Under the hood", image: `step-${A}.png`, width: 200, height: 100 });
+  });
+
+  it("a saved document with a pictureless step round-trips: image null, size 0 x 0, no hotspot, the note kept", async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === `/api/walkthroughs/${WID}`) return record({ steps: [bare(A, { note: "n" }), step(B)] }) as never;
+      return {} as never;
+    });
+    await mount();
+    const text = document.querySelector("[data-step-text]") as HTMLTextAreaElement;
+    await act(async () => { setValue(text, "Changed"); });
+    await key("s", { ctrlKey: true });
+    await settle();
+    const sent = puts()[0][1] as { steps: Step[] };
+    expect(sent.steps[0]).toEqual({ ...bare(A, { note: "n", text: "Changed" }) });
+    expect(status()).toBe("Saved");
   });
 });
 

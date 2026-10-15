@@ -95,6 +95,13 @@ WALKTHROUGH_ADD_STEP = "walkthrough.add_step"
 WALKTHROUGH_REPLACE_PICTURE = "walkthrough.replace_picture"
 WALKTHROUGH_DUPLICATE = "walkthrough.duplicate"
 WALKTHROUGH_DELETE = "walkthrough.delete"
+# W2: a walkthrough made from a course workshop (the detail: the course and the
+# slug with the step, chapter and picture counts - never a step's text), and a
+# guided capture of its steps in the desktop app (start: the kind; done: how
+# many were captured and skipped; the stills themselves are capture.still rows
+# and each picture attached a walkthrough.replace_picture row).
+WALKTHROUGH_IMPORT = "walkthrough.import"
+WALKTHROUGH_GUIDED_CAPTURE = "walkthrough.guided_capture"
 
 # The music library (``services.music``): studio-wide, so the row is what says
 # who put a file there or took it away. The detail carries the name and the
@@ -138,7 +145,7 @@ ACTIONS: tuple[str, ...] = (
     RECORDING_START, RECORDING_FINISH, RECORDING_DISCARD, CAPTURE_STILL, CAPTURE_ADD_TO_DECK, CAPTURE_DELETE,
     CAPTURE_REFUSED, CAPTURE_ANNOTATE, CAPTURE_REVERT,
     WALKTHROUGH_CREATE, WALKTHROUGH_UPDATE, WALKTHROUGH_ADD_STEP, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_DUPLICATE,
-    WALKTHROUGH_DELETE,
+    WALKTHROUGH_DELETE, WALKTHROUGH_IMPORT, WALKTHROUGH_GUIDED_CAPTURE,
 )
 
 # What the action was done to (the ``entity`` column).

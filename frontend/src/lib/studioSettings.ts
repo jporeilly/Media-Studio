@@ -21,6 +21,8 @@ export interface StudioSettings {
   watermark_text: string;
   watermark_position: string;
   watermark_opacity: number;
+  /** The folder of courses the Walkthroughs page imports workshops from (W2); "" when not set. */
+  courses_folder: string;
 }
 
 /** One selectable value, with the note the form shows as its hint. */

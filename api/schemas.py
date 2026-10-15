@@ -62,6 +62,7 @@ class StudioSettingsIn(BaseModel):
     watermark_text: str | None = None
     watermark_position: str | None = None
     watermark_opacity: StrictFloat | None = None
+    courses_folder: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -666,8 +667,9 @@ WalkthroughPlacement = Literal[walkthrough_rules.PLACEMENTS]
 Hex12 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
 #: A step's picture, by its file name in the walkthrough's folder.
 StepImageName = Annotated[str, StringConstraints(pattern=r"^step-[0-9a-f]{12}\.png$")]
-#: A control character a text may not carry (a step's text keeps its line breaks and tabs; a name keeps none).
-_TEXT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+#: A control character a text may not carry (a step's text keeps its line breaks and tabs; a name keeps none). The
+#: step's rule is ``services.walkthroughs.TEXT_CONTROL_RE`` - the one place; the workshop parser strips by it.
+_TEXT_CONTROL_RE = walkthrough_rules.TEXT_CONTROL_RE
 _NAME_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -707,7 +709,7 @@ class HotspotIn(BaseModel):
 
 
 class StepSourceIn(BaseModel):
-    """Where a step's picture came from: informational only, never read back."""
+    """Where a step's picture came from - a still: informational only, never read back."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -715,22 +717,37 @@ class StepSourceIn(BaseModel):
     annotated: bool = False
 
 
+class WorkshopSourceIn(BaseModel):
+    """Where an imported step came from (W2) - a course workshop: the course, the slug, the guide image
+    (None when the guide showed none), its alt text and the launcher's file. Informational only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    course: str = Field(max_length=200)
+    slug: str = Field(max_length=200)
+    image: str | None = Field(None, max_length=walkthrough_rules.MAX_SOURCE_PATH_CHARS)
+    alt: str = Field("", max_length=walkthrough_rules.MAX_ALT_CHARS)
+    launcher: str | None = Field(None, max_length=walkthrough_rules.MAX_SOURCE_PATH_CHARS)
+
+
 class StepIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: Hex12
-    image: StepImageName
-    width: StrictInt = Field(ge=1)
-    height: StrictInt = Field(ge=1)
+    #: None for a step without a picture yet (W2): then the size is 0 x 0 and there is no hotspot.
+    image: StepImageName | None
+    width: StrictInt = Field(ge=0)
+    height: StrictInt = Field(ge=0)
     hotspot: HotspotIn | None = None
     kind: WalkthroughKind = "tooltip"
     text: str = Field("", max_length=walkthrough_rules.MAX_STEP_TEXT)
     instruction: str = Field("", max_length=walkthrough_rules.MAX_INSTRUCTION_CHARS)
     placement: WalkthroughPlacement = "auto"
     chapter: ChapterName = ""
-    source: StepSourceIn | None = None
+    note: str = Field("", max_length=walkthrough_rules.MAX_NOTE_CHARS)
+    source: StepSourceIn | WorkshopSourceIn | None = None
 
-    @field_validator("text", "instruction")
+    @field_validator("text", "instruction", "note")
     @classmethod
     def _plain_text(cls, value: str) -> str:
         """Plain text with line breaks: CRLF normalised to LF, no other control character (a tab is allowed)."""
@@ -742,7 +759,16 @@ class StepIn(BaseModel):
     @model_validator(mode="after")
     def _image_named_by_id(self):
         """A step's picture is ``step-<id>.png`` and nothing else: ``replace_picture`` writes by the step's id,
-        so a document that names another step's file would leave two steps on one file and an orphan."""
+        so a document that names another step's file would leave two steps on one file and an orphan. A step
+        without a picture has no size and no hotspot: the hotspot comes with the capture."""
+        if self.image is None:
+            if self.width or self.height:
+                raise ValueError(f"step {self.id} has no picture, so its size must be 0 x 0.")
+            if self.hotspot is not None:
+                raise ValueError(f"step {self.id} has no picture, so it cannot have a hotspot.")
+            return self
+        if self.width < 1 or self.height < 1:
+            raise ValueError(f"step {self.id}: a picture's size is at least 1 x 1.")
         expected = walkthrough_rules.step_image_name(self.id)
         if self.image != expected:
             raise ValueError(f"step {self.id}'s picture must be {expected}, not {self.image}.")
@@ -751,7 +777,7 @@ class StepIn(BaseModel):
     @model_validator(mode="after")
     def _against_the_pictures(self, info):
         pictures = _pictures(info)
-        if pictures is None:
+        if pictures is None or self.image is None:
             return self
         size = pictures.get(self.image)
         if size is None:

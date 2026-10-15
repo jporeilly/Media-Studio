@@ -1,17 +1,19 @@
 /**
  * The Walkthroughs list (W1): `/walkthroughs`. A card per walkthrough - the first step's picture, the name,
  * "12 steps · 3 chapters", when it was last saved - with Open (the builder), Play, Duplicate and Delete
- * (asked first); New walkthrough asks for a name and opens the builder. The empty state says how one is made:
- * take a still with Capture (desktop app), annotate it if you like, then add it as a step. Nothing here
- * touches the screen, so the page is the browser edition's too.
+ * (asked first); New walkthrough asks for a name and opens the builder; Import workshop… (W2) makes one from a
+ * course workshop through its dialog. The empty state says how one is made: take a still with Capture (desktop
+ * app), annotate it if you like, then add it as a step - or import a workshop. Nothing here touches the screen,
+ * so the page is the browser edition's too.
  */
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Footprints, Play, Plus, Trash2 } from "lucide-react";
+import { Copy, Download, Footprints, Play, Plus, Trash2 } from "lucide-react";
 import { api, errorMessage } from "../api/client";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Button, Card, EmptyState, ErrorBox, Field, Input, Modal, PageHeader, Spinner } from "../components/ui";
+import { ImportWorkshopDialog } from "../components/walkthrough/ImportWorkshopDialog";
 import { relativeTime } from "../lib/format";
 import {
   type Walkthrough, type WalkthroughSummary, EMPTY_HOW, MAX_NAME_CHARS, builderUrl, countsLine, playUrl, stepImageUrl, walkthroughsQueryKey,
@@ -25,6 +27,7 @@ export default function WalkthroughsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
+  const [importing, setImporting] = useState(false);
 
   // The builder and the player send the user back here with a notice when their walkthrough is gone.
   const noticeFromRoute = (location.state as { notice?: string } | null)?.notice;
@@ -69,10 +72,15 @@ export default function WalkthroughsPage() {
   const newButton = (
     <Button variant="primary" icon={<Plus size={14} />} onClick={() => { setName(""); setNaming(true); }} data-new-walkthrough="">New walkthrough</Button>
   );
+  const importButton = (
+    <Button icon={<Download size={14} />} onClick={() => setImporting(true)} title="Make a walkthrough from a course workshop" data-import-workshop="">Import workshop…</Button>
+  );
+  const actions = <div className="os-row" style={{ gap: 8 }}>{importButton}{newButton}</div>;
 
   return (
     <>
-      <PageHeader title="Walkthroughs" subtitle="Click-through product tours made of stills: a hotspot, a tooltip or a card, and chapters on each step." actions={newButton} />
+      <PageHeader title="Walkthroughs" subtitle="Click-through product tours made of stills: a hotspot, a tooltip or a card, and chapters on each step." actions={actions} />
+      <ImportWorkshopDialog open={importing} onClose={() => setImporting(false)} />
       {dialog}
       {notice && (
         <div className="os-card" role="status" aria-live="polite" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }} data-walkthroughs-notice="">
@@ -86,7 +94,7 @@ export default function WalkthroughsPage() {
         <ErrorBox message={errorMessage(list.error)} />
       ) : items.length === 0 ? (
         <Card>
-          <EmptyState icon={<Footprints size={30} />} title="No walkthroughs yet" sub={EMPTY_HOW} action={newButton} />
+          <EmptyState icon={<Footprints size={30} />} title="No walkthroughs yet" sub={EMPTY_HOW} action={actions} />
         </Card>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>

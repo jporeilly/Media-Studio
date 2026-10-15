@@ -17,11 +17,40 @@
   button is Cancel: nothing has been recorded, and nothing is kept. The bar
   can be dragged by its grip (Tauri's drag region). The shell opens this page
   on the backend's own origin (capture.rs builds the URL; no page names it).
+
+  THE SECOND MODE (W2, the guided capture of a walkthrough's steps): opened
+  with ?mode=steps, the same window shows the walkthrough's name, "Step 3 of
+  12", the step's text and, smaller, its instruction, with Capture (also the
+  global key Shift+F8, which the shell raises WITH the pointer's position),
+  Skip, Back and Done:
+    main -> bar   capture:state   { mode: "steps", phase, name, label, text, instruction, remaining, canBack, canCapture, message }
+    bar  -> main  capture:control { action: "hello" | "capture" | "skip" | "back" | "done" }
+  The main window sends the state on every change, so this page asks for the
+  current one with "hello" as soon as its listener is up (the first state was
+  sent before the page had loaded, and missed, without it). A refusal the
+  capture goes on under - the key taken by another program, a Windows that
+  cannot hide the bar from the picture - comes as `message` and is shown in
+  red under the step. A capture from the button carries no pointer, so it
+  places no hotspot; the bar says so in Capture's title.
 -->
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; font: 13px/1.3 "Segoe UI", system-ui, sans-serif; color: #f1f5f9; user-select: none; }
   .bar { height: 100%; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 10px 0 6px; background: #0f172a; border: 1px solid rgba(255,255,255,.14); border-radius: 10px; }
+  .steps { display: none; height: 100%; box-sizing: border-box; align-items: stretch; gap: 10px; padding: 0 10px 0 6px; background: #0f172a; border: 1px solid rgba(255,255,255,.14); border-radius: 10px; }
+  body.mode-steps .bar { display: none; }
+  body.mode-steps .steps { display: flex; }
+  .steps .text { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+  .steps .head { display: flex; gap: 8px; align-items: baseline; color: #94a3b8; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .steps .head b { color: #f1f5f9; font-size: 12px; }
+  .steps .line { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .steps .text { overflow: hidden; }
+  .steps .instruction { color: #cbd5e1; font-size: 11.5px; line-height: 1.3; max-height: 2.6em; overflow: hidden; white-space: pre-line; }
+  .steps .message { color: #fca5a5; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .steps .message:empty { display: none; }
+  .steps .buttons { display: flex; align-items: center; gap: 6px; }
+  button.capture { background: #0d9488; border-color: #0d9488; color: #fff; }
+  button.capture:hover { background: #0f766e; }
   .grip { width: 14px; height: 100%; display: flex; align-items: center; justify-content: center; cursor: grab; color: #64748b; font-size: 14px; letter-spacing: -2px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 10px rgba(239,68,68,.6); animation: blink 1.2s ease-in-out infinite; }
   .paused .dot { background: #f59e0b; animation: none; box-shadow: none; }
@@ -47,10 +76,45 @@
   <button id="pause" title="Pause (Shift+F9)">Pause</button>
   <button id="stop" class="stop" title="Stop (Shift+F10)">Stop</button>
 </div>
+<div class="steps" id="steps">
+  <div class="grip" data-tauri-drag-region title="Drag">&#8942;&#8942;</div>
+  <div class="text">
+    <div class="head"><b id="s-label">Step 1 of 1</b><span id="s-name"></span><span id="s-remaining"></span></div>
+    <div class="line" id="s-text"></div>
+    <div class="instruction" id="s-instruction"></div>
+    <div class="message" id="s-message" role="status"></div>
+  </div>
+  <div class="buttons">
+    <button id="s-capture" class="capture" title="Capture this step (Shift+F8 with the pointer on the control places the hotspot; from this button there is no hotspot)">Capture</button>
+    <button id="s-skip" title="Leave this step for later">Skip</button>
+    <button id="s-back" title="Back to the step before">Back</button>
+    <button id="s-done" class="stop" title="Close the bar and go back to the builder">Done</button>
+  </div>
+</div>
 <script>
 (async () => {
   const t = window.__TAURI__;
   const bar = document.getElementById("bar");
+  // The second mode (W2): the page is opened with ?mode=steps and the state payloads say mode "steps".
+  const stepsMode = new URLSearchParams(location.search).get("mode") === "steps";
+  if (stepsMode) { document.body.classList.add("mode-steps"); document.title = "Capture steps"; }
+  const sLabel = document.getElementById("s-label"), sName = document.getElementById("s-name"), sRemaining = document.getElementById("s-remaining");
+  const sText = document.getElementById("s-text"), sInstruction = document.getElementById("s-instruction"), sMessage = document.getElementById("s-message");
+  const sCapture = document.getElementById("s-capture"), sSkip = document.getElementById("s-skip"), sBack = document.getElementById("s-back"), sDone = document.getElementById("s-done");
+  const showSteps = (p) => {
+    document.body.classList.add("mode-steps");
+    sLabel.textContent = p.label || "";
+    sName.textContent = p.name || "";
+    sRemaining.textContent = p.remaining ? `${p.remaining} to go` : "";
+    sText.textContent = p.text || "";
+    sInstruction.textContent = p.instruction || "";
+    sMessage.textContent = p.message || "";
+    sCapture.disabled = !p.canCapture;
+    sCapture.textContent = p.phase === "capturing" ? "Capturing…" : "Capture";
+    sSkip.disabled = !(p.phase === "ready");
+    sBack.disabled = !p.canBack || p.phase === "capturing";
+    sDone.disabled = p.phase === "capturing";
+  };
   const time = document.getElementById("time");
   const label = document.getElementById("label");
   const count = document.getElementById("count");
@@ -62,7 +126,12 @@
   const send = (action) => { if (t && t.event) t.event.emitTo("main", "capture:control", { action }).catch(() => {}); };
   pauseBtn.onclick = () => send(state === "paused" ? "resume" : "pause");
   stopBtn.onclick = () => send(state === "countdown" ? "cancel" : "stop");
+  sCapture.onclick = () => send("capture");
+  sSkip.onclick = () => send("skip");
+  sBack.onclick = () => send("back");
+  sDone.onclick = () => send("done");
   const show = (p) => {
+    if (p.mode === "steps" || (stepsMode && !p.state)) { showSteps(p); return; }
     state = p.state || state;
     bar.className = "bar " + state;
     time.textContent = fmt(p.elapsedMs || 0);
@@ -79,8 +148,11 @@
       label.textContent = state === "paused" ? "Paused  (Shift+F9 resumes)" : state === "saving" ? "Saving…" : state === "recording" ? "Recording  (Shift+F10 stops)" : state;
     }
   };
-  show({ state: "countdown", elapsedMs: 0, countdown: "" });
+  if (stepsMode) showSteps({ label: "Starting…", name: "", text: "", instruction: "", message: "", phase: "starting", remaining: 0, canBack: false, canCapture: false });
+  else show({ state: "countdown", elapsedMs: 0, countdown: "" });
   if (t && t.event) await t.event.listen("capture:state", (e) => show(e.payload || {}));
+  // The listener is up: ask for the state as it stands (the main window sends it on change only).
+  if (stepsMode) send("hello");
 })();
 </script>
 </body>

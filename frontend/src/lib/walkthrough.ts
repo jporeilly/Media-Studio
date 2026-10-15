@@ -25,6 +25,8 @@ export const MAX_STEP_TEXT = 1000;
 export const MAX_INSTRUCTION_CHARS = 2000;
 /** Characters of a chapter's name (the server: MAX_CHAPTER_CHARS). */
 export const MAX_CHAPTER_CHARS = 80;
+/** Characters of a step's note - the guide's "Under the hood" hint an import keeps for the narrated video to come (the server: MAX_NOTE_CHARS). */
+export const MAX_NOTE_CHARS = 4000;
 /** Characters of the walkthrough's name (the server: MAX_NAME_CHARS). */
 export const MAX_NAME_CHARS = 120;
 /** A hotspot's sides, at least (the server: MIN_HOTSPOT_SIDE). */
@@ -41,8 +43,12 @@ export const RELOAD_ASK = { title: "Reload the walkthrough?", message: "Your uns
 export const TOO_MANY_STEPS_MESSAGE = `A walkthrough can hold at most ${MAX_STEPS} steps.`;
 /** The empty list says how a walkthrough is made - and where a still comes from. */
 export const EMPTY_HOW =
-  "Take a still with Capture (in the desktop app), annotate it if you like, then add it as a step. Building and playing a walkthrough work in the browser edition too; only taking a still needs the desktop app.";
+  "Take a still with Capture (in the desktop app), annotate it if you like, then add it as a step - or import a course workshop and capture its steps. Building and playing a walkthrough work in the browser edition too; only taking a still needs the desktop app.";
 export const END_TITLE = "That is the end";
+/** What the builder's placeholder and the player's card say of a step that has no picture yet (an imported one). */
+export const NO_PICTURE_TITLE = "No picture yet";
+export const NO_PICTURE_HOW = "Capture it in the desktop app (Capture steps…), or Replace picture… with a still.";
+export const NO_PICTURE_CARD = "This step has no picture yet.";
 
 // ---- the document -------------------------------------------------------------------------------------
 
@@ -53,13 +59,18 @@ export const PLACEMENTS: Placement[] = ["auto", "top", "bottom", "left", "right"
 export const PLACEMENT_LABELS: Record<Placement, string> = { auto: "Auto", top: "Above", bottom: "Below", left: "Left", right: "Right" };
 
 export interface Hotspot { x: number; y: number; width: number; height: number }
-export interface StepSource { capture_id: string; annotated: boolean }
+/** Where a step's picture came from (informational): a still, or a course workshop's guide (W2). */
+export interface CaptureSource { capture_id: string; annotated: boolean }
+export interface WorkshopSource { course: string; slug: string; image: string | null; alt: string; launcher: string | null }
+export type StepSource = CaptureSource | WorkshopSource;
+/** The workshop a walkthrough was imported from (W2), on the record. */
+export interface WalkthroughSource { course: string; slug: string; title: string; version: string }
 
 export interface Step {
   id: string;
-  /** The picture's file name in the walkthrough's folder (the server names it). */
-  image: string;
-  /** The picture's own size, in pixels. */
+  /** The picture's file name in the walkthrough's folder (the server names it); null for a step without a picture yet (an imported one). */
+  image: string | null;
+  /** The picture's own size, in pixels (0 x 0 without a picture). */
   width: number;
   height: number;
   /** In the picture's pixels, inside it, at least MIN_HOTSPOT_SIDE a side; null for a step without one. */
@@ -75,6 +86,8 @@ export interface Step {
   placement: Placement;
   /** The name of the chapter this step starts, or "". */
   chapter: string;
+  /** The guide's "Under the hood" hint an import kept (W2): for the narrated video to come; the player does not show it. */
+  note: string;
   /** Where the picture came from: informational only. */
   source: StepSource | null;
 }
@@ -91,6 +104,13 @@ export interface Walkthrough extends WalkthroughDocument {
   updated_at: string;
   revision: number;
   version: number;
+  /** The workshop it was imported from (W2), when it was. */
+  source?: WalkthroughSource | null;
+}
+
+/** Whether the step has a picture at all (W2: an imported step may not, yet). */
+export function hasPicture(step: Pick<Step, "image">): boolean {
+  return !!step.image;
 }
 
 /** One row of GET /api/walkthroughs: the counts and the first step's id for a thumbnail, never the steps. */
@@ -110,24 +130,26 @@ export interface WalkthroughSummary {
 /** The body of a save: the document with the revision it was loaded at. */
 export interface WalkthroughPut { version: typeof DOCUMENT_VERSION; name: string; revision: number; steps: Step[] }
 
-const STEP_KEYS: (keyof Step)[] = ["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "source"];
+const STEP_KEYS: (keyof Step)[] = ["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "note", "source"];
 
 /** A text as the server stores it: CRLF and a lone CR become LF. */
 const plainText = (value: unknown): string => String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
 /**
  * A step with exactly the fields the server writes and reads, in one order, AS THE SERVER STORES THEM - the one
- * normalisation rule: the chapter trimmed, the text and the instruction with LF line breaks, the hotspot in whole
- * pixels, a missing instruction "". `serialiseDocument` compares documents through it, so a document with
- * `" Intro "` typed is the same document as the server's stripped answer, and "Unsaved changes" clears after a save.
+ * normalisation rule: the chapter trimmed, the text, the instruction and the note with LF line breaks, the hotspot
+ * in whole pixels, a missing instruction or note "", a missing picture null. `serialiseDocument` compares documents
+ * through it, so a document with `" Intro "` typed is the same document as the server's stripped answer, and
+ * "Unsaved changes" clears after a save.
  */
 export function normaliseStep(s: Step): Step {
   const out = {} as Record<string, unknown>;
-  for (const key of STEP_KEYS) out[key] = s[key] ?? (key === "hotspot" || key === "source" ? null : key === "kind" ? "tooltip" : key === "placement" ? "auto" : "");
+  for (const key of STEP_KEYS) out[key] = s[key] ?? (key === "hotspot" || key === "source" || key === "image" ? null : key === "kind" ? "tooltip" : key === "placement" ? "auto" : "");
   const h = s.hotspot;
   out.hotspot = h ? { x: Math.round(h.x), y: Math.round(h.y), width: Math.round(h.width), height: Math.round(h.height) } : null;
   out.text = plainText(s.text);
   out.instruction = plainText(s.instruction);
+  out.note = plainText(s.note);
   out.chapter = String(s.chapter ?? "").trim();
   return out as unknown as Step;
 }
@@ -154,12 +176,17 @@ export function putBody(doc: WalkthroughDocument, revision: number): Walkthrough
 
 /** The pictures a document names: what a saved record still holds (the builder prunes its history by it). */
 export function imagesOf(doc: Pick<WalkthroughDocument, "steps">): Set<string> {
-  return new Set(doc.steps.map((s) => s.image));
+  return new Set(doc.steps.flatMap((s) => (s.image ? [s.image] : [])));
 }
 
-/** Whether every step of `doc` names a picture in `held` - a document that does not can never be saved again. */
+/** Whether every step of `doc` names a picture in `held` (a step without one names nothing) - a document that does not can never be saved again. */
 export function namesOnly(doc: Pick<WalkthroughDocument, "steps">, held: Set<string>): boolean {
-  return doc.steps.every((s) => held.has(s.image));
+  return doc.steps.every((s) => !s.image || held.has(s.image));
+}
+
+/** The ids of the steps a guided capture visits: every step, or those without a picture yet. */
+export function stepsToCapture(doc: Pick<WalkthroughDocument, "steps">, every: boolean): string[] {
+  return doc.steps.filter((s) => every || !hasPicture(s)).map((s) => s.id);
 }
 
 // ---- the narration and the transcript ---------------------------------------------------------------------

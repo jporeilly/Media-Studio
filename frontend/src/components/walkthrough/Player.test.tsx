@@ -17,7 +17,7 @@ import { Player, type PlayerProps } from "./Player";
 
 const S = (id: string, over: Partial<Step> = {}): Step => ({
   id, image: `step-${id}.png`, width: 400, height: 200, hotspot: { x: 100, y: 50, width: 40, height: 20 }, kind: "tooltip", text: `Text ${id}`,
-  instruction: "", placement: "auto", chapter: "", source: null, ...over,
+  instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
 });
 const THREE: Step[] = [S("one", { chapter: "Start" }), S("two", { kind: "modal", text: "A card" }), S("three", { chapter: "End", text: "Last words" })];
 
@@ -153,6 +153,30 @@ describe("the player", () => {
     expect(document.activeElement).toBe(next);
     await act(async () => { next.click(); });
     expect(progress()).toBe("Step 3 of 3");
+  });
+
+  it("W2: a step without a picture yet is a card on the backdrop - no image, no hotspot, never a broken picture - and Next goes on", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("the player must not fetch"); });
+    try {
+      await mount({ walkthrough: { name: "Tour", steps: [S("one", { image: null, width: 0, height: 0, hotspot: null, text: "Open the dialog" }), S("two")] } });
+      expect(q("[data-player-stage] img")).toBeNull();
+      expect(hotspot()).toBeNull();
+      expect(q("[data-player-tooltip]")).toBeNull();
+      const card = q("[data-player-modal]")!;
+      expect(card.textContent).toContain("Open the dialog");
+      expect(q("[data-player-no-picture]")!.textContent).toBe("This step has no picture yet.");
+      expect(q(".ms-dim")).not.toBeNull();
+      await act(async () => { button("Next")!.click(); });
+      expect(progress()).toBe("Step 2 of 3".replace("3", "2"));
+      expect((q("[data-player-stage] img") as HTMLImageElement).getAttribute("src")).toBe("/pic/two.png");
+      expect(q("[data-player-no-picture]")).toBeNull();
+      // Without a text either: the card still stands, with the line alone.
+      await rerender({ walkthrough: { name: "Tour", steps: [S("one", { image: null, width: 0, height: 0, hotspot: null, text: "" }), S("two")] }, initialStep: 0 });
+      await act(async () => { key("Home"); });
+      expect(q("[data-player-no-picture]")).not.toBeNull();
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("a tooltip step without a hotspot is shown as a modal", async () => {

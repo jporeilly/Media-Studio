@@ -40,7 +40,7 @@
  * - **Leftovers.** On mount the bar, the keys and any overlay a previous page left behind (a reload or a
  *   crashed renderer mid-recording) are released.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, api, errorMessage } from "../api/client";
 import {
@@ -57,7 +57,6 @@ import {
   VIDEO_BITS_PER_SECOND,
   barPlacement,
   chunkRefusalStops,
-  clipToMonitor,
   closeBlockedMessage,
   closeGuardUp,
   closestMonitor,
@@ -92,75 +91,18 @@ import {
   type StillOptions,
   type WindowInfo,
 } from "../lib/capture";
+import { type CaptureApi, CaptureContext, forgetFrozen, pickRegion } from "../lib/captureShared";
 import { JOB_POLL_MS, MAX_POLL_FAILURES, isActiveStatus } from "../lib/jobs";
 import { useAuth } from "./AuthContext";
 
-export interface CaptureApi {
-  state: RecorderState;
-  /** Milliseconds recorded so far (paused time excluded). */
-  elapsedMs: number;
-  /** The message of the last failure, or a notice (the two-hour stop). */
-  message: string | null;
-  /** The finish job's id once Stop has been pressed, until the Projects page takes it over. */
-  savingJobId: string | null;
-  /** The Projects page has taken the finish job over (it follows it from here). */
-  clearSavingJob: () => void;
-  /** The recording this recorder is making (from its start until it is saved, let go or thrown away). */
-  liveRecordingId: string | null;
-  /** Whether this recorder's save job is still running (the shell's close guard stays up for it). */
-  saveRunning: boolean;
-  /** Whether the recording keys are live system-wide (false when another program holds them). */
-  hotkeysLive: boolean;
-  startRecording: (options: RecordOptions) => Promise<void>;
-  takeStill: (options: StillOptions) => Promise<{ id: string } | null>;
-  pause: () => void;
-  resume: () => void;
-  stop: () => void;
-  /** Called off during the countdown: nothing was recorded, nothing is kept. */
-  cancelCountdown: () => void;
-  dismiss: () => void;
-  /** When the last still was taken, for the Captures card to refresh on. */
-  lastStillAt: number;
-}
-
-const CaptureContext = createContext<CaptureApi | null>(null);
+// The context object, `CaptureApi`, `useRecorderState`, `Bridge`, `forgetFrozen` and `pickRegion` live in
+// `lib/captureShared.ts` (shared with the guided capture, W2), so this module exports components only.
+export type { CaptureApi };
 
 export function useCapture(): CaptureApi {
   const ctx = useContext(CaptureContext);
   if (!ctx) throw new Error("useCapture outside CaptureProvider");
   return ctx;
-}
-
-type Bridge = NonNullable<ReturnType<typeof shellBridge>>;
-
-/** Delete the frozen pictures of every monitor once they have served; nothing waits on it. */
-function forgetFrozen(): void {
-  void api.delete("/api/capture/frozen").catch(() => {});
-}
-
-/**
- * Ask the overlay for a region: freeze, open, await the event. Null when the user pressed Escape or closed
- * the overlay. The shell builds the overlay's URL itself (on the backend's origin); the answer is cut to
- * the monitor it was drawn on.
- */
-async function pickRegion(bridge: Bridge, monitors: MonitorInfo[]): Promise<Region | null> {
-  await api.post("/api/capture/freeze", { monitors: monitors.map((m) => ({ index: m.index, x: m.x, y: m.y, width: m.width, height: m.height })) });
-  const picked = await new Promise<Region | null>((resolve, reject) => {
-    let unlisten: (() => void) | null = null;
-    bridge.event!.listen!("capture:region", (e) => {
-      unlisten?.();
-      resolve((e.payload as Region | null) ?? null);
-    })
-      .then((off) => {
-        unlisten = off;
-        return bridge.core!.invoke!("capture_overlay_open");
-      })
-      .catch((err) => {
-        unlisten?.();
-        reject(err);
-      });
-  });
-  return picked ? clipToMonitor(picked, monitors) : null;
 }
 
 const THUMB_WIDTH = 48;

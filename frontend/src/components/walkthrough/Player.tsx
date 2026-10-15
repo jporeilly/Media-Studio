@@ -24,8 +24,8 @@ import { ChevronLeft, ChevronRight, Copy, Download, FileText, List, RotateCcw, X
 import type { Size } from "../../lib/annotate";
 import { copyText, downloadText } from "../../lib/files";
 import {
-  type Step, END_TITLE, backIndex, chapterAt, chapters, clampIndex, displayedRect, endIndex, fitRect, homeIndex, nextIndex,
-  shownAsModal, stepLabel, tooltipPlacement, transcript, transcriptFileName, typingIn,
+  type Step, END_TITLE, NO_PICTURE_CARD, backIndex, chapterAt, chapters, clampIndex, displayedRect, endIndex, fitRect, hasPicture, homeIndex,
+  nextIndex, shownAsModal, stepLabel, tooltipPlacement, transcript, transcriptFileName, typingIn,
 } from "../../lib/walkthrough";
 
 export interface PlayerProps {
@@ -92,7 +92,9 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
   const current = clampIndex(index, count);
   const step = count > 0 ? steps[current] : null;
   const last = current >= count - 1;
-  const modal = !!step && shownAsModal(step);
+  // A step without a picture yet (an imported one, W2) has no hotspot either: a card on the neutral backdrop, never a broken image.
+  const pictured = !!step && hasPicture(step);
+  const modal = !!step && (shownAsModal(step) || !pictured);
   const label = stepLabel(current, count);
 
   // The tooltip's own size, measured once it is drawn for this step, so it can be placed beside the hotspot.
@@ -174,7 +176,7 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
     (items.find((item) => item.getAttribute("aria-current") === "true") ?? items[0])?.focus();
   }, [chaptersOpen]);
 
-  const fit = useMemo(() => (step ? fitRect({ width: step.width, height: step.height }, stage) : null), [step, stage]);
+  const fit = useMemo(() => (step && pictured ? fitRect({ width: step.width, height: step.height }, stage) : null), [step, pictured, stage]);
   const spot = step && step.hotspot && fit ? displayedRect(step.hotspot, fit) : null;
   const tip = step && spot && !modal && step.text ? tooltipPlacement(spot, tipSize, stage, step.placement) : null;
   const chapterList = useMemo(() => chapters(walkthrough), [walkthrough]);
@@ -226,7 +228,7 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
         <button className="os-icon-btn" onClick={onExit} title="Close (Esc)" aria-label="Close"><X size={18} /></button>
       </header>
       <div ref={stageRef} className="ms-stage" onClick={onStageClick} data-player-stage="">
-        {step && fit && <img src={imageUrl(step)} alt="" draggable={false} style={rectStyle(fit)} />}
+        {step && fit && pictured && <img src={imageUrl(step)} alt="" draggable={false} style={rectStyle(fit)} />}
         {(modal || ended) && step && <div className="ms-dim" />}
         {spot && !ended && (
           <button
@@ -248,6 +250,7 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
         {step && modal && !ended && (
           <div className="ms-modal" role="dialog" aria-modal="true" aria-label={label} aria-live="polite" data-player-modal="" onClick={(e) => e.stopPropagation()}>
             {step.text && <p style={{ margin: 0 }}>{step.text}</p>}
+            {!pictured && <p className="os-muted os-small" style={{ margin: 0 }} data-player-no-picture="">{NO_PICTURE_CARD}</p>}
             <div className="os-row" style={{ justifyContent: "flex-end" }}>
               <button ref={primaryRef} className="os-btn os-btn-primary" onClick={next}>{nextLabel} <ChevronRight size={14} /></button>
             </div>

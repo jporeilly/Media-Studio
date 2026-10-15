@@ -403,6 +403,7 @@ fn main() {
                 return;
             }
             if let tauri::WindowEvent::Destroyed = event {
+                capture::shutdown(window.app_handle()); // the capture bar, the overlays and the global keys go with the main window
                 if let Ok(mut guard) = for_close.lock() {
                     if let Some(srv) = guard.as_mut() {
                         srv.stop();

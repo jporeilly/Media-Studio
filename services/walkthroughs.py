@@ -12,22 +12,39 @@ pixels, inside it, at least ``MIN_HOTSPOT_SIDE`` a side, or null), ``kind``
 (``tooltip`` or ``modal``), ``text`` (what the viewer READS on the picture),
 ``instruction`` (what the learner DOES there, as it would be spoken - the
 walkthrough's transcript, and later its narration; "" when not written),
-``placement``, ``chapter`` (the name of the chapter this step starts, or "")
-and ``source`` (``{capture_id, annotated}``: where the picture came from,
-informational only). A record from before ``instruction`` existed reads as
-``""`` for every step (:func:`get_walkthrough` fills it in).
+``placement``, ``chapter`` (the name of the chapter this step starts, or ""),
+``note`` (W2: the guide's "Under the hood" hint that followed the step, plain
+text, for the narrated video to come - the player does not show it) and
+``source`` (where the picture came from, informational only: ``{capture_id,
+annotated}`` for a still, ``{course, slug, image, alt, launcher}`` for a step
+imported from a course workshop). A record from before ``instruction`` or
+``note`` existed reads as ``""`` for every step (:func:`get_walkthrough` fills
+them in).
+
+**A step may have no picture yet** (W2): a workshop step the guide showed no
+screenshot for imports with ``image`` null and ``width`` / ``height`` 0 and no
+hotspot; the builder shows a placeholder and the player a card, and the first
+picture it gets - a guided capture in the desktop app, or Replace picture -
+goes through :func:`replace_picture` like any other.
 
 **The narration of a step** is ONE rule, :func:`narration_of`: the
 instruction when it is not blank, else the text; :func:`transcript_markdown`
 writes the whole walkthrough as Markdown from it, byte for byte what the
 page's ``transcript`` (``lib/walkthrough.ts``) writes.
 
-**A step's picture is a COPY, taken through the oracle.** :func:`add_step`
-copies ``services.captures.image_path(cid)`` - the annotated picture when
-there is one - into the walkthrough's folder. Deleting or re-annotating the
-capture later never changes the walkthrough; :func:`replace_picture` copies
-the capture's current picture again, keeping the hotspot clamped to the new
-size. No other path here reads a capture's files.
+**A step's picture is a COPY, taken through ONE copy routine.**
+:func:`_copy_file` is the only thing that writes a step's picture: a copy to
+a temporary file beside the step's, the PNG header read, the file published
+atomically as ``step-<sid>.png``. Two resolvers hand it a source:
+:func:`_copy_picture` asks the captures' oracle (``services.captures
+.image_path(cid)`` - the annotated picture when there is one), and
+:func:`create_from_workshop` takes a guide image already proven under the
+courses folder by ``services.workshops``. :func:`add_step` and
+:func:`replace_picture` go through the first; the import through the second.
+Deleting or re-annotating the capture later never changes the walkthrough;
+:func:`replace_picture` copies the capture's current picture again, keeping
+the hotspot clamped to the new size (or setting the one it is given). No other
+path here reads a capture's files or a course's.
 
 **Writes are whole-document and versioned.** :func:`save` takes the whole
 document and the ``revision`` the caller loaded: a stale revision is refused
@@ -69,6 +86,20 @@ MAX_NAME_CHARS = 120
 MIN_HOTSPOT_SIDE = 8
 #: Characters of a step's instruction: what the learner DOES at the step, as it would be spoken; the transcript reads it.
 MAX_INSTRUCTION_CHARS = 2000
+#: Characters of a step's note (W2): the guide's "Under the hood" hint kept for the narrated video to come.
+MAX_NOTE_CHARS = 4000
+#: Characters of a step's informational source fields (W2): a guide image's or a launcher's path, and an image's alt text.
+MAX_SOURCE_PATH_CHARS = 400
+MAX_ALT_CHARS = 2000
+#: A control character a step's text, instruction or note may not carry - a tab and a line break are allowed, a
+#: CR is normalised away: THE one rule, read by ``api.schemas.StepIn`` (the refusal) and by the workshop parser
+#: (``services.workshops.plain_text`` and its code lines strip them), so an import never writes what a save refuses.
+TEXT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def strip_control_characters(text: str) -> str:
+    """``text`` without the characters ``TEXT_CONTROL_RE`` names."""
+    return TEXT_CONTROL_RE.sub("", text or "")
 #: The JSON body of a save, refused with 413 as it passes (``api.body``): the
 #: pictures never travel in it, so 200 steps of 1000 characters are well inside.
 MAX_PUT_BYTES = 2 * 1024 * 1024
@@ -133,11 +164,17 @@ def get_walkthrough(wid: str) -> dict | None:
         rec = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    # A record from before the instruction existed reads as "" for every step.
+    # A record from before the instruction or the note existed reads as "" for every step.
     for step in rec.get("steps") or []:
         if isinstance(step, dict):
             step.setdefault("instruction", "")
+            step.setdefault("note", "")
     return rec
+
+
+def has_picture(step: dict) -> bool:
+    """Whether the step has a picture at all (W2: an imported step may not, yet)."""
+    return bool(step.get("image"))
 
 
 def list_walkthroughs() -> list[dict]:
@@ -196,15 +233,16 @@ def transcript_markdown(record: dict) -> str:
 
 
 def summary(rec: dict) -> dict:
-    """The record as the list answers it: counts and the first step's id for a
-    thumbnail, never the steps themselves (no texts and no instructions
-    travel in a list)."""
+    """The record as the list answers it: counts and the id of the first step
+    WITH a picture for a thumbnail (an imported step may have none yet), never
+    the steps themselves (no texts and no instructions travel in a list)."""
     steps = rec.get("steps") or []
+    first = next((s for s in steps if has_picture(s)), None)
     return {
         "id": rec["id"], "name": rec.get("name") or "", "owner_id": rec.get("owner_id"), "owner_name": rec.get("owner_name"),
         "created_at": rec.get("created_at"), "updated_at": rec.get("updated_at"), "revision": int(rec.get("revision") or 1),
         "step_count": len(steps), "chapter_count": chapter_count(steps),
-        "first_step_id": steps[0]["id"] if steps else None,
+        "first_step_id": first["id"] if first else None,
     }
 
 
@@ -263,7 +301,7 @@ def step_image_path(wid: str, sid: str) -> Path | None:
     if rec is None or not is_hex12(sid):
         return None
     found = find_step(rec, sid)
-    if found is None:
+    if found is None or not has_picture(found[1]):
         return None
     return file_under(_dir(wid), str(found[1].get("image") or ""))
 
@@ -280,16 +318,14 @@ def create(name: str, owner_id: str | None, owner_name: str | None) -> dict:
     return record
 
 
-def _copy_picture(wid: str, sid: str, cid: str) -> tuple[str, int, int, bool]:
-    """Copy the capture's CURRENT picture - the oracle's answer, the annotated
-    one when there is one - to ``step-<sid>.png``, atomically. Returns the
-    file's name, its size and whether the capture was annotated. ``LookupError``
-    when the capture or its picture is not there; ``ValueError`` when the
-    picture is not a PNG (the copy is removed again)."""
-    rec = captures.get_capture(cid)
-    src = captures.image_path(cid)
-    if rec is None or src is None:
-        raise LookupError("The capture's image is missing.")
+def _copy_file(wid: str, sid: str, src: Path, what: str) -> tuple[str, int, int]:
+    """THE one copy routine for a step's picture: ``src`` copied to a
+    temporary file beside the step's, its PNG header read, the file published
+    atomically as ``step-<sid>.png``. Returns the file's name and its size.
+    ``ValueError`` (naming ``what``: "The capture's picture", "The guide's
+    picture x.png") when the file is not a PNG - the copy is removed again
+    and nothing is left behind. The caller has already proven ``src`` under
+    the folder it belongs to; this reads it and nothing else."""
     d = _dir(wid)
     d.mkdir(parents=True, exist_ok=True)
     name = step_image_name(sid)
@@ -298,15 +334,29 @@ def _copy_picture(wid: str, sid: str, cid: str) -> tuple[str, int, int, bool]:
     size = png_size(tmp)
     if size is None:
         tmp.unlink(missing_ok=True)
-        raise ValueError("The capture's picture is not a PNG; it cannot be a step.")
+        raise ValueError(f"{what} is not a PNG; it cannot be a step.")
     replace_with_retry(tmp, d / name)
-    return name, size[0], size[1], bool(rec.get("annotated"))
+    return name, size[0], size[1]
+
+
+def _copy_picture(wid: str, sid: str, cid: str) -> tuple[str, int, int, bool]:
+    """Copy the capture's CURRENT picture - the oracle's answer, the annotated
+    one when there is one - to ``step-<sid>.png`` through :func:`_copy_file`.
+    Returns the file's name, its size and whether the capture was annotated.
+    ``LookupError`` when the capture or its picture is not there; ``ValueError``
+    when the picture is not a PNG (the copy is removed again)."""
+    rec = captures.get_capture(cid)
+    src = captures.image_path(cid)
+    if rec is None or src is None:
+        raise LookupError("The capture's image is missing.")
+    name, width, height = _copy_file(wid, sid, src, "The capture's picture")
+    return name, width, height, bool(rec.get("annotated"))
 
 
 def _new_step(sid: str, image: str, width: int, height: int, cid: str, annotated: bool) -> dict:
     return {
         "id": sid, "image": image, "width": width, "height": height, "hotspot": None,
-        "kind": "tooltip", "text": "", "instruction": "", "placement": "auto", "chapter": "",
+        "kind": "tooltip", "text": "", "instruction": "", "placement": "auto", "chapter": "", "note": "",
         "source": {"capture_id": cid, "annotated": annotated},
     }
 
@@ -356,11 +406,17 @@ def clamp_hotspot(hotspot: dict | None, width: int, height: int) -> dict | None:
     return {"x": x, "y": y, "width": w, "height": h}
 
 
-def replace_picture(wid: str, sid: str, capture_id: str) -> dict:
+#: ``replace_picture``'s "keep the step's own hotspot" (the default): a value no caller's hotspot can be.
+KEEP_HOTSPOT = object()
+
+
+def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT) -> dict:
     """Replace a step's picture with the capture's current one (copied again
-    through the oracle); the hotspot is kept, clamped to the new size; the
-    revision +1. ``LookupError`` for no such walkthrough or picture,
-    :class:`NoSuchStep` for no such step."""
+    through the oracle) - the FIRST picture of a step that had none; the
+    hotspot is kept, clamped to the new size, unless ``hotspot`` is given (a
+    rectangle, clamped into the new picture, or None for none - the guided
+    capture's pointer rule); the revision +1. ``LookupError`` for no such
+    walkthrough or picture, :class:`NoSuchStep` for no such step."""
     with _lock(wid):
         rec = get_walkthrough(wid)
         if rec is None:
@@ -370,8 +426,9 @@ def replace_picture(wid: str, sid: str, capture_id: str) -> dict:
             raise NoSuchStep("No such step.")
         index, step = found
         image, width, height, annotated = _copy_picture(wid, sid, capture_id)
+        wanted = step.get("hotspot") if hotspot is KEEP_HOTSPOT else hotspot
         step = {**step, "image": image, "width": width, "height": height,
-                "hotspot": clamp_hotspot(step.get("hotspot"), width, height),
+                "hotspot": clamp_hotspot(wanted, width, height),
                 "source": {"capture_id": capture_id, "annotated": annotated}}
         rec["steps"][index] = step
         rec["revision"] = int(rec.get("revision") or 1) + 1
@@ -449,6 +506,10 @@ def duplicate(wid: str, owner_id: str | None, owner_name: str | None) -> dict | 
         now = _now()
         steps = []
         for step in rec.get("steps") or []:
+            if not has_picture(step):
+                # A step without a picture yet (an imported one): copied as it is, there is no file.
+                steps.append(dict(step))
+                continue
             src = file_under(_dir(wid), str(step.get("image") or ""))
             if src is None:
                 log.warning("Walkthrough %s: step %s has no picture on disk; it is left out of the copy.", wid, step.get("id"))
@@ -464,5 +525,74 @@ def duplicate(wid: str, owner_id: str | None, owner_name: str | None) -> dict | 
             "id": new, "name": name, "owner_id": owner_id, "owner_name": owner_name,
             "created_at": now, "updated_at": now, "revision": 1, "version": DOCUMENT_VERSION, "steps": steps,
         }
+        if rec.get("source"):
+            record["source"] = dict(rec["source"])
         _write_record(new, record)
         return record
+
+
+# -- the import of a course workshop (W2) ------------------------------------------------------------
+
+def create_from_workshop(name: str, owner_id: str | None, owner_name: str | None, source: dict, steps: list[dict]) -> dict:
+    """A new walkthrough built from a parsed workshop (``services.workshops``):
+    ``source`` is ``{course, slug, title, version}`` and each of ``steps`` carries
+    ``chapter``, ``instruction``, ``text``, ``note``, ``source`` (``{course, slug,
+    image, alt, launcher}``) and ``picture`` - the guide image as a ``Path`` already
+    proven under the courses folder, or None. Every picture goes through the ONE
+    copy routine (:func:`_copy_file`); a step whose picture is missing or not a PNG
+    imports WITHOUT a picture (logged, never an error - the desktop app captures
+    it later). ``ValueError`` past ``MAX_STEPS`` before anything is written; the
+    planned record is validated with the save's own model (``api.schemas
+    .WalkthroughIn``, the belt under the parser's rules) before it is written, and
+    an invalid plan is a ``ValueError`` naming the field with nothing left behind;
+    a failure while copying removes the folder again, so no half-made walkthrough
+    is left behind. Revision 1; returns the record."""
+    # Lazy: ``api.schemas`` imports this module for its constants, so the import cannot sit at the top.
+    from pydantic import ValidationError
+
+    from api.schemas import WalkthroughIn, plain_validation_error
+
+    if len(steps) > MAX_STEPS:
+        raise ValueError(f"The workshop has {len(steps)} steps; a walkthrough can hold at most {MAX_STEPS}.")
+    wid = new_id()
+    now = _now()
+    out: list[dict] = []
+    try:
+        for parsed in steps:
+            sid = new_id()
+            image, width, height = None, 0, 0
+            step_source = dict(parsed.get("source") or {})
+            picture = parsed.get("picture")
+            if picture is not None:
+                try:
+                    image, width, height = _copy_file(wid, sid, Path(picture), f"The guide's picture {Path(picture).name}")
+                except (OSError, ValueError) as exc:
+                    log.warning("Workshop import %s: step %d imports without its picture: %s", source.get("slug"), len(out) + 1, exc)
+                    image, width, height = None, 0, 0
+            if image is None and "image" in step_source:
+                step_source["image"] = None
+            out.append({
+                "id": sid, "image": image, "width": width, "height": height, "hotspot": None,
+                "kind": "tooltip", "text": parsed.get("text") or "", "instruction": parsed.get("instruction") or "",
+                "placement": "auto", "chapter": parsed.get("chapter") or "", "note": parsed.get("note") or "",
+                "source": step_source,
+            })
+        record = {
+            "id": wid, "name": (name or "").strip()[:MAX_NAME_CHARS] or "Walkthrough",
+            "owner_id": owner_id, "owner_name": owner_name,
+            "created_at": now, "updated_at": now, "revision": 1, "version": DOCUMENT_VERSION,
+            "source": dict(source), "steps": out,
+        }
+        # The belt: what the builder's save would refuse, the import refuses first - against the pictures just copied.
+        try:
+            WalkthroughIn.model_validate(
+                {"version": DOCUMENT_VERSION, "name": record["name"], "revision": 1, "steps": out},
+                context={"pictures": held_pictures(wid)},
+            )
+        except ValidationError as exc:
+            raise ValueError(f"The imported walkthrough is not valid: {plain_validation_error(exc)}") from None
+        _write_record(wid, record)
+    except Exception:
+        shutil.rmtree(_dir(wid), ignore_errors=True)
+        raise
+    return record

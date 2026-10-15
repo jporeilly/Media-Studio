@@ -114,6 +114,18 @@ Only the WebView2 runtime, a usable Python with its core packages, and an unwrit
 | "This recording is still being made; stop it in the recorder first." | **Save as a project** or **Discard** reached a recording whose recorder was heard from in the last 20 seconds (another window of the app, or a page reloaded mid-recording) | Stop it in the recorder; a recorder that is gone falls silent, and the recording is offered 20 seconds later |
 | A region still or recording comes out shifted or the wrong size on a monitor scaled above 100 % | Mixed or higher display scaling is not verified yet | Record the full screen or the window instead and cut it on the Timeline ([Screen capture](../guides/capture.md)) |
 
+## Walkthroughs
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| **Import workshop…** offers no course: "Set the Courses folder on the Settings page (Studio settings, an administrator) first." | The courses folder is not set, or is no longer a folder on the server | An administrator sets **Courses folder** on the Settings page's Studio card to the folder holding the courses ([Studio settings](studio-settings.md)) |
+| A course, or one of its workshops, is missing from **Import workshop…**; `app.log` says "Course *x* is left out of the list: …" or "Course *x*: workshop *y* is left out of the list: …" | Its `course.json` or `SUMMARY.md` - for a workshop, its `manifest.json` or `guide.md` - is over 2 MB, not UTF-8 text or not JSON; a preview or import of that one answers the same reason | Fix the file in the course (the app never writes there); the other courses and workshops are listed and import as usual ([Walkthroughs](../guides/walkthroughs.md)) |
+| "Shift+F8 is taken by another program: use Capture on the bar (a capture from the bar has no hotspot)." in red on the capture bar and on the builder's capture line | Another program (Snagit, ShareX) holds Shift+F8; the capture goes on without the key | Press **Capture** on the bar for each step and draw the hotspots in the builder afterwards, or press **Done**, close that program and start the capture again |
+| "This Windows cannot hide the capture bar from the picture; keep it off the captured area." on the bar and on the builder's capture line | Windows 10 before version 2004 | Drag the bar off the window or region being captured |
+| "The capture bar could not be opened: …" on the builder's capture line | The shell could not open the bar's window (the reason follows the colon); nothing started: no key was taken, no audit row was written, the window stays | Press **Capture steps…** again; if the bar still cannot be opened, close the desktop app and start it again |
+| "No window is under the pointer: point at the window and press Shift+F8." on the builder's capture line (the window is minimised during the capture: restore it to read the line) | The kind is **Window** and, at the key press, the pointer was over no window the shell lists - the desktop, or one of the app's own windows such as the capture bar | Put the pointer on the window to capture and press Shift+F8 again |
+| "The capture key is in use: finish the guided capture first." when a recording starts, and the recording keys are off | A guided capture still holds Shift+F8; the shell takes one key set at a time, so the recording's keys were refused and the recording went on without them | Pause and stop from the recorder bar or the Projects page; next time press **Done** on the capture bar before recording |
+
 ## Updates
 
 | Symptom | Cause | Fix |

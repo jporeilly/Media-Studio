@@ -22,6 +22,11 @@ Each setting maps to ONE config key - the key the engine reads:
 - ``slide_transition`` / ``transition_duration``  ``config.slide_transition`` / ``config.transition_duration``
 - ``watermark_text`` / ``watermark_position`` / ``watermark_opacity``  ``config.watermark_*``
   (the text watermark; the image watermark has no upload path here and is not offered)
+- ``courses_folder``   ``config._config["courses_folder"]`` - the folder of courses the
+  Walkthroughs page imports workshops from (``services.workshops``): one folder per
+  course, each with a ``course.json``. "" = not set, and the import says where to set it;
+  anything else must be an existing folder on the server (:func:`courses_folder` answers
+  the folder as a path, or None).
 
 The transition, pause and watermark values are the *defaults* of a generate
 job: the Generate card prefills them and every generate request may override
@@ -102,6 +107,7 @@ FIELDS = (
     "ollama_model", "output_folder", "transition_pause", "music_volume",
     "slide_transition", "transition_duration",
     "watermark_text", "watermark_position", "watermark_opacity",
+    "courses_folder",
 )
 
 # The settings a generate request may override per job (GenerateRequest sends
@@ -124,6 +130,17 @@ def ollama_model() -> str:
     return config._config.get("ollama_model") or OLLAMA_FALLBACK_MODEL
 
 
+def courses_folder() -> Path | None:
+    """The courses folder as a path - the one place the workshop import reads
+    it from - or None when it is not set or is no longer a folder (the import
+    then says where to set it rather than reading anything)."""
+    text = config._config.get("courses_folder") or ""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    path = Path(text.strip())
+    return path if path.is_absolute() and path.is_dir() else None
+
+
 # -- read ------------------------------------------------------------------
 
 def get_settings() -> dict:
@@ -143,6 +160,7 @@ def get_settings() -> dict:
         "watermark_text": config.watermark_text,
         "watermark_position": config.watermark_position,
         "watermark_opacity": float(config.watermark_opacity),
+        "courses_folder": str(config._config.get("courses_folder") or ""),
     }
 
 
@@ -391,6 +409,22 @@ def _watermark_opacity(value) -> float:
                    "The watermark opacity must be a number between 0.1 (faint) and 1 (solid).")
 
 
+def _courses_folder(value) -> str:
+    """"" (not set) or an absolute path to an EXISTING folder on the server. Nothing is
+    created: the courses are somebody else's files, and the import only ever reads them."""
+    if not isinstance(value, str):
+        raise ValueError("The courses folder must be a path (leave it empty to turn the workshop import off).")
+    text = value.strip()
+    if not text:
+        return ""
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        raise ValueError("The courses folder must be an absolute path on the server (for example C:\\Courses).")
+    if not path.is_dir():
+        raise ValueError(f"The courses folder was not found on the server: {path}. It must be an existing folder.")
+    return str(path)
+
+
 _VALIDATORS = {
     "tts_provider": _provider,
     "edge_tts_voice": _edge_voice,
@@ -406,6 +440,7 @@ _VALIDATORS = {
     "watermark_text": _watermark_text,
     "watermark_position": _watermark_position,
     "watermark_opacity": _watermark_opacity,
+    "courses_folder": _courses_folder,
 }
 
 

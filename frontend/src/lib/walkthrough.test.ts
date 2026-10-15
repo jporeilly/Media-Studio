@@ -7,13 +7,14 @@
 import { describe, expect, it } from "vitest";
 import {
   type Step, type WalkthroughDocument, MAX_STEPS, MIN_HOTSPOT_SIDE, backIndex, canAddStep, chapterAt, chapterCount, chapterStart, chapters,
-  clampHotspot, clampIndex, countsLine, deleteStep, displayedRect, documentOf, endIndex, fitRect, homeIndex, imagesOf, insertStep, moveStep,
-  namesOnly, narrationOf, nextIndex, normaliseStep, playUrl, putBody, reorderStep, safeFileStem, sameDocument, serialiseDocument, setHotspot,
-  shownAsModal, stepById, stepImageUrl, stepIndex, stepLabel, tooltipPlacement, transcript, transcriptFileName, typingIn, updateStep,
+  clampHotspot, clampIndex, countsLine, deleteStep, displayedRect, documentOf, endIndex, fitRect, hasPicture, homeIndex, imagesOf, insertStep,
+  moveStep, namesOnly, narrationOf, nextIndex, normaliseStep, playUrl, putBody, reorderStep, safeFileStem, sameDocument, serialiseDocument,
+  setHotspot, shownAsModal, stepById, stepImageUrl, stepIndex, stepLabel, stepsToCapture, tooltipPlacement, transcript, transcriptFileName,
+  typingIn, updateStep,
 } from "./walkthrough";
 
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 400, height: 300, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 400, height: 300, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
 });
 const ids = (doc: WalkthroughDocument) => doc.steps.map((s) => s.id);
 const doc = (...steps: Step[]): WalkthroughDocument => ({ name: "Tour", steps });
@@ -22,7 +23,7 @@ const A = "aaaaaaaaaaaa", B = "bbbbbbbbbbbb", C = "cccccccccccc", D = "ddddddddd
 describe("the document", () => {
   it("normalises a step to exactly the server's fields, the hotspot in whole pixels, and compares by content", () => {
     const s = normaliseStep({ ...step(A), hotspot: { x: 1.4, y: 2.6, width: 10.2, height: 9.9 }, extra: "dropped" } as Step);
-    expect(Object.keys(s)).toEqual(["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "source"]);
+    expect(Object.keys(s)).toEqual(["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "note", "source"]);
     expect(s.hotspot).toEqual({ x: 1, y: 3, width: 10, height: 10 });
     const a = doc(step(A, { text: "x" })), b = doc({ ...step(A, { text: "x" }) });
     expect(sameDocument(a, b)).toBe(true);
@@ -76,6 +77,33 @@ const TRANSCRIPT_FIXTURE = {
 const TRANSCRIPT_EXPECTED =
   "# Fixture tour\n\n## Start\n\n1. Open the menu.\n   Pick Import.\n2. Press Save\n\n## Finish\n\n3. (no instruction yet)\n" +
   "4. Line one\n   Line two\n   three\n";
+
+describe("W2: a step without a picture, and the note", () => {
+  it("a step may have no picture: normalised with image null and note \"\"; the images named skip it; the capture targets find it", () => {
+    const bare = normaliseStep({ ...step(A), image: null, width: 0, height: 0, note: undefined as unknown as string });
+    expect(bare.image).toBeNull();
+    expect(bare.note).toBe("");
+    expect(hasPicture(bare)).toBe(false);
+    expect(hasPicture(step(B))).toBe(true);
+    expect(normaliseStep({ ...step(A), note: "Why\r\nit ran" }).note).toBe("Why\nit ran");
+    const d = doc(bare, step(B));
+    expect([...imagesOf(d)]).toEqual([`step-${B}.png`]);
+    expect(namesOnly(d, new Set([`step-${B}.png`]))).toBe(true);
+    expect(namesOnly(d, new Set())).toBe(false);
+    expect(stepsToCapture(d, false)).toEqual([A]);
+    expect(stepsToCapture(d, true)).toEqual([A, B]);
+    expect(sameDocument(d, doc({ ...bare, note: "" }, step(B)))).toBe(true);
+    expect(sameDocument(d, doc({ ...bare, note: "x" }, step(B)))).toBe(false);
+  });
+
+  it("a note never reaches the narration or the transcript (narrationOf is unchanged by W2)", () => {
+    expect(narrationOf({ instruction: "", text: "Press Save", note: "Under the hood" } as Step)).toBe("Press Save");
+    expect(narrationOf({ instruction: "", text: "", note: "Under the hood" } as Step)).toBe("");
+    const md = transcript({ name: "T", steps: [step(A, { text: "Press Save", note: "SECRET-NOTE" })] });
+    expect(md).toBe("# T\n\n1. Press Save\n");
+    expect(md).not.toContain("SECRET-NOTE");
+  });
+});
 
 describe("the narration and the transcript", () => {
   it("narrationOf is the instruction when it is not blank, else the text (tests/test_walkthroughs.py::test_narration_of_is_the_instruction_else_the_text asserts the same cases)", () => {

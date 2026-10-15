@@ -234,7 +234,7 @@ def test_add_step_copies_the_captures_current_picture_through_the_oracle(rig, mo
     a, b = rec["steps"]
     assert a["image"] == f"step-{a['id']}.png" and (a["width"], a["height"]) == (40, 30)
     assert a == {"id": a["id"], "image": a["image"], "width": 40, "height": 30, "hotspot": None, "kind": "tooltip", "text": "",
-                 "instruction": "", "placement": "auto", "chapter": "", "source": {"capture_id": plain, "annotated": False}}
+                 "instruction": "", "placement": "auto", "chapter": "", "note": "", "source": {"capture_id": plain, "annotated": False}}
     assert b["source"] == {"capture_id": marked, "annotated": True} and (b["width"], b["height"]) == (60, 20)
     # The annotated still gives the ANNOTATED picture (blue), the plain one its still (red).
     assert _pixel(c, w["id"], a["id"]) == RED
@@ -634,6 +634,8 @@ WALKTHROUGH_ROUTES: dict[tuple[str, str], dict | None] = {
     ("GET", "/api/walkthroughs/{wid}/steps/{sid}/image"): None,
     ("GET", "/api/walkthroughs/{wid}/transcript"): None,
     ("POST", "/api/walkthroughs/{wid}/duplicate"): None,
+    # W2: the guided capture's audit row.
+    ("POST", "/api/walkthroughs/{wid}/guided-capture"): {"event": "start"},
 }
 
 
@@ -693,7 +695,8 @@ def test_the_sweep_covers_every_walkthrough_route_the_app_has(routes):
     assert sorted(live - set(WALKTHROUGH_ROUTES)) == [], "routes missing from WALKTHROUGH_ROUTES"
     assert sorted(set(WALKTHROUGH_ROUTES) - live) == [], "WALKTHROUGH_ROUTES names routes the app no longer has"
     plain = {(r.method, r.path) for r in routes if r.path.startswith("/api/walkthroughs") and "{wid}" not in r.path}
-    assert plain == {("GET", "/api/walkthroughs"), ("POST", "/api/walkthroughs")}
+    # W2: the import makes a walkthrough of the caller's (tests/test_workshops.py holds its ownership).
+    assert plain == {("GET", "/api/walkthroughs"), ("POST", "/api/walkthroughs"), ("POST", "/api/walkthroughs/import")}
 
 
 def test_every_route_needs_a_session(rig):

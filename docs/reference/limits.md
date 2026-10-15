@@ -9,22 +9,22 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Jobs | 2 worker threads for the studio; 1 job per project at a time (`require_idle`) | `services/jobs.py:60`, `services/jobs.py:230-234` |
 | Job poll | every 1.2 s; stopped after 3 failed attempts in a row, at once on a 404; a page with no job in flight asks for its project's job (or the running update) every 5 s | `frontend/src/lib/jobs.ts:17`, `frontend/src/lib/jobs.ts:21`, `frontend/src/lib/jobs.ts:19` |
 | Speaker notes | 20,000 characters per slide | `services/slides.py:54` |
-| Alt text | 2,000 characters | `api/schemas.py:351` |
+| Alt text | 2,000 characters | `api/schemas.py:352` |
 | Pause after slide | 0–30 s | `services/slides.py:55` |
 | Notes undo history | 20 steps per slide | `core/project_manager.py:327` |
-| Narration speed | 0.5–2 for a sentence's own speed, a deck render and a re-voice; the server refuses outside it (`MIN_SPEED`, `MAX_SPEED`) | `services/narration.py:91-92`, `api/schemas.py:294`, `api/schemas.py:331` |
+| Narration speed | 0.5–2 for a sentence's own speed, a deck render and a re-voice; the server refuses outside it (`MIN_SPEED`, `MAX_SPEED`) | `services/narration.py:91-92`, `api/schemas.py:295`, `api/schemas.py:332` |
 | Sentence offset | ±300 s | `services/narration.py:86` |
 | Sentence voice id | 200 characters | `services/narration.py:93` |
 | Offsets in one save | 5,000 sentences (bound on abuse) | `services/narration.py:90` |
 | One-sentence preview | 1,000 characters spoken; 30 s wait | `services/narration.py:103`, `services/narration.py:112` |
 | Speaking-rate measurement | 45 s wait | `services/narration.py:120` |
 | SRT cue | at least 0.5 s | `services/narration.py:906` |
-| Transition duration | 0.1–2 s | `services/studio_settings.py:74` |
-| Pause between slides | 0–5 s | `services/studio_settings.py:72` |
-| Music volume | 0–1 | `services/studio_settings.py:73` |
-| Watermark opacity | 0.1–1 | `services/studio_settings.py:75` |
-| Intro and outro card | 1–10 s; text 200 characters | `api/schemas.py:305`, `api/schemas.py:307`, `api/schemas.py:20` |
-| Preview render | 15 s on the card; the API takes 0–120 s | `frontend/src/lib/generateOptions.ts:37`, `api/schemas.py:323` |
+| Transition duration | 0.1–2 s | `services/studio_settings.py:79` |
+| Pause between slides | 0–5 s | `services/studio_settings.py:77` |
+| Music volume | 0–1 | `services/studio_settings.py:78` |
+| Watermark opacity | 0.1–1 | `services/studio_settings.py:80` |
+| Intro and outro card | 1–10 s; text 200 characters | `api/schemas.py:306`, `api/schemas.py:308`, `api/schemas.py:20` |
+| Preview render | 15 s on the card; the API takes 0–120 s | `frontend/src/lib/generateOptions.ts:37`, `api/schemas.py:324` |
 | WebM export | VP9 at constant quality 30 on libvpx's realtime deadline, cpu-used 8, row threading; Opus | `services/processing.py:109-110` |
 | GIF export | the first 30 s, 5 fps, 480 px wide | `services/processing.py:2152` |
 | WebM and GIF export wait | 60 s plus twice the video's length, never under 300 s; 600 s when the length cannot be told (the MP3: 300 s) | `services/processing.py:81-93` |
@@ -51,8 +51,8 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Zoom | up to 200 px per second | `frontend/src/lib/edit.ts:42` |
 | Re-voice speed-up | up to +30 % to fit; tempo squeeze past 1.15× the window, up to 2× | `services/processing.py:569`, `services/processing.py:511-512` |
 | QA review pass | 20 slides, 12,000 characters of notes | `services/ai_slides.py:64-65` |
-| Q&A document | 1–50 questions, 10 by default | `api/schemas.py:452` |
-| Tone instruction | 2,000 characters; a tone name 40 | `api/schemas.py:410`, `api/schemas.py:409` |
+| Q&A document | 1–50 questions, 10 by default | `api/schemas.py:453` |
+| Tone instruction | 2,000 characters; a tone name 40 | `api/schemas.py:411`, `api/schemas.py:410` |
 | Ollama waits | 3 s probe; 120 s per slide; 180 s per QA pass; 60 s per translation request | `services/ai_slides.py:61-63`, `core/translator.py:84` |
 | Model-paced pacing | an answer under 80 % of the note's length falls back to the rules | `services/ai_slides.py:125` |
 | Password length | policy minimum 4–64 (default 12); never over 72 bytes | `api/passwords.py:24-25`, `api/passwords.py:43`, `api/passwords.py:23` |
@@ -70,27 +70,33 @@ Every fixed number the app enforces, in one table, with the line of code it is r
 | Capture rectangle | 1–32,000 pixels a side; the grab waits 20 s; up to 16 monitors frozen at once | `services/capture.py:36-37`, `services/capture.py:33`, `services/capture.py:100` |
 | Capture and recording names | 120 characters | `services/captures.py:56`, `services/recordings.py:94` |
 | Still added to a deck | letterboxed onto the deck's own background (`border_colour`: the median colour of a band 1 % deep round its first slide image) at that image's size; white (`LETTERBOX_BACKGROUND`) at 1920 × 1080 when no slide is rendered | `services/slides.py:593`, `services/slides.py:615`, `services/slides.py:587`, `services/slides.py:590` |
-| Annotation shapes | 500 per still (`MAX_SHAPES`); 500 characters of text in a Text or a Callout (`MAX_TEXT_CHARS`) | `services/captures.py:64-65`, `api/schemas.py:646`, `frontend/src/lib/annotate.ts:29-31` |
+| Annotation shapes | 500 per still (`MAX_SHAPES`); 500 characters of text in a Text or a Callout (`MAX_TEXT_CHARS`) | `services/captures.py:64-65`, `api/schemas.py:647`, `frontend/src/lib/annotate.ts:29-31` |
 | Annotated picture | the exported PNG at most 64 MB (`MAX_ANNOTATED_BYTES`), refused with 413 as the body passes it; the document itself at most 1 MB (`MAX_DOCUMENT_BYTES`); the picture must be a real PNG of the crop's size, else the still's - its own header read first, then verified and decoded | `services/captures.py:69`, `services/captures.py:72`, `api/body.py:17-22`, `services/captures.py:206` |
-| Annotation crop | one per still, applied at export; at least 16 × 16 (`MIN_CROP_SIDE`), inside the still | `services/captures.py:74`, `api/schemas.py:626-627`, `frontend/src/lib/annotate.ts:35` |
-| Annotation geometry | every number finite and within −size … 2 × size of the still (a shape may hang off the edge; the picture clips it); the editor keeps what it makes, moves and resizes inside the same range (`withinStill`, `clampShape`) and caps a text box at 2 × the still's height | `api/schemas.py:524`, `frontend/src/lib/annotate.ts:194`, `frontend/src/lib/annotate.ts:204`, `frontend/src/lib/annotate.ts:290` |
+| Annotation crop | one per still, applied at export; at least 16 × 16 (`MIN_CROP_SIDE`), inside the still | `services/captures.py:74`, `api/schemas.py:627-628`, `frontend/src/lib/annotate.ts:35` |
+| Annotation geometry | every number finite and within −size … 2 × size of the still (a shape may hang off the edge; the picture clips it); the editor keeps what it makes, moves and resizes inside the same range (`withinStill`, `clampShape`) and caps a text box at 2 × the still's height | `api/schemas.py:525`, `frontend/src/lib/annotate.ts:194`, `frontend/src/lib/annotate.ts:204`, `frontend/src/lib/annotate.ts:290` |
 | Annotated still size | a picture of more than 100 million pixels (the crop's size, else the still's) is not opened by the editor and is refused by the server at save (`MAX_ANNOTATE_PIXELS` on both sides) | `frontend/src/lib/annotate.ts:33`, `services/captures.py:79`, `services/captures.py:243` |
 | Annotation preview | the canvas's backing store at most 16,384 a side and 128 million pixels (`MAX_CANVAS_SIDE`, `MAX_CANVAS_PIXELS`): the preview is drawn at the largest scale under zoom × DPR that fits, at the size asked for | `frontend/src/lib/annotate.ts:653-654` |
 | Blur cells | square, 1 % of the still's shorter side (`MOSAIC_SHARE`), never under 8 px (`MIN_MOSAIC_CELL`) | `frontend/src/lib/annotate.ts:37-38` |
-| Magnify lens | 2× or 3× (`LENS_FACTORS`), on both sides | `frontend/src/lib/annotate.ts:40`, `api/schemas.py:607` |
+| Magnify lens | 2× or 3× (`LENS_FACTORS`), on both sides | `frontend/src/lib/annotate.ts:40`, `api/schemas.py:608` |
 | Annotation zoom | Fit, 50 %, 100 % and 200 % on the toolbar; + and − step through 25, 50, 100, 200 and 400 % (`ZOOM_STEPS`) | `frontend/src/lib/annotate.ts:42-44` |
-| Walkthrough steps | 200 per walkthrough (`MAX_STEPS`): a step added past it, and a save holding more, are refused | `services/walkthroughs.py:65`, `api/schemas.py:782`, `frontend/src/lib/walkthrough.ts:21` |
-| Walkthrough text | 1,000 characters of a step's text (`MAX_STEP_TEXT`), with its line breaks; 80 of a chapter's name (`MAX_CHAPTER_CHARS`); 120 of the walkthrough's name (`MAX_NAME_CHARS`) | `services/walkthroughs.py:66-68`, `api/schemas.py:727`, `api/schemas.py:688`, `api/schemas.py:684`, `frontend/src/lib/walkthrough.ts:23-29` |
-| Walkthrough instruction | 2,000 characters of a step's instruction (`MAX_INSTRUCTION_CHARS`) - what the learner does, as it would be spoken; the transcript says it, else the step's text (`narration_of`, `narrationOf`) | `services/walkthroughs.py:71`, `api/schemas.py:728`, `frontend/src/lib/walkthrough.ts:25` |
-| Walkthrough hotspot | at least 8 × 8 (`MIN_HOTSPOT_SIDE`), whole pixels, inside the picture; kept inside a smaller picture when the picture is replaced (`clamp_hotspot`, `clampHotspot`) | `services/walkthroughs.py:69`, `api/schemas.py:705-706`, `frontend/src/lib/walkthrough.ts:31` |
-| Walkthrough save | the JSON body of a save at most 2 MB (`MAX_PUT_BYTES`), refused with 413 as it passes; the pictures never travel in it | `services/walkthroughs.py:74`, `api/body.py:17-22` |
+| Walkthrough steps | 200 per walkthrough (`MAX_STEPS`): a step added past it, a save holding more, and a workshop import of more are refused | `services/walkthroughs.py:82`, `api/schemas.py:808-809`, `frontend/src/lib/walkthrough.ts:21` |
+| Walkthrough text | 1,000 characters of a step's text (`MAX_STEP_TEXT`), with its line breaks; 80 of a chapter's name (`MAX_CHAPTER_CHARS`); 120 of the walkthrough's name (`MAX_NAME_CHARS`) | `services/walkthroughs.py:83-85`, `api/schemas.py:743`, `api/schemas.py:690`, `api/schemas.py:686`, `frontend/src/lib/walkthrough.ts:23-31` |
+| Walkthrough instruction | 2,000 characters of a step's instruction (`MAX_INSTRUCTION_CHARS`) - what the learner does, as it would be spoken; the transcript says it, else the step's text (`narration_of`, `narrationOf`) | `services/walkthroughs.py:88`, `api/schemas.py:744`, `frontend/src/lib/walkthrough.ts:25` |
+| Walkthrough hotspot | at least 8 × 8 (`MIN_HOTSPOT_SIDE`), whole pixels, inside the picture; kept inside a smaller picture when the picture is replaced (`clamp_hotspot`, `clampHotspot`) | `services/walkthroughs.py:86`, `api/schemas.py:706-707`, `frontend/src/lib/walkthrough.ts:33` |
+| Walkthrough save | the JSON body of a save at most 2 MB (`MAX_PUT_BYTES`), refused with 413 as it passes; the pictures never travel in it | `services/walkthroughs.py:105`, `api/body.py:17-22` |
+| Walkthrough guided capture | the hotspot placed round the pointer at the key press is 160 × 60 picture pixels (`HOTSPOT_DEFAULT`), clamped into the picture, none for a pointer outside it; the capture bar is 600 × 96 at scale 1 (`STEPS_BAR_WIDTH`, `STEPS_BAR_HEIGHT`) | `frontend/src/lib/guided.ts:23`, `frontend/src/lib/guided.ts:25-26` |
+| Workshop guide | 2 MB a guide (`MAX_GUIDE_BYTES`), refused before it is read - and any `course.json`, `SUMMARY.md` or `manifest.json` over it: the course or workshop is left out of the list, logged | `services/workshops.py:89` |
+| Workshop parse | 500 steps read from one guide (`MAX_PARSE_STEPS`, bound on abuse); the walkthrough's own 200 (`MAX_STEPS`) applies on import | `services/workshops.py:91`, `services/walkthroughs.py:82` |
+| Workshop step text | the tooltip is the instruction's first sentence, at most 140 characters (`TOOLTIP_CHARS`), cut at a word; the instruction itself within the 2,000 of `MAX_INSTRUCTION_CHARS` - a paragraph cut after its last whole sentence, a code block (kept between its ``` fences) left out whole when it does not fit | `services/workshops.py:93`, `services/walkthroughs.py:88` |
+| Workshop step note | 4,000 characters of a step's note (`MAX_NOTE_CHARS`): the guide's Under the hood hint kept for the narrated video, never shown by the player | `services/walkthroughs.py:90`, `api/schemas.py:747`, `frontend/src/lib/walkthrough.ts:29` |
+| Workshop step source | 400 characters of a launcher's or a guide image's path kept with an imported step (`MAX_SOURCE_PATH_CHARS`; a longer path is dropped, not cut), 2,000 of the figure's alt text (`MAX_ALT_CHARS`); every imported text stripped of the control characters a step may not carry (`TEXT_CONTROL_RE`) - the save's own rules, read by the parser, never copied | `services/walkthroughs.py:92-93`, `services/walkthroughs.py:97`, `api/schemas.py:728-730` |
 | Screen capture from | this computer only (`is_local_client`): freezing or reading the screen, taking a still, and starting or feeding a recording answer a loopback client with no proxy header (`FORWARDING_HEADERS`), 403 to anyone else (`LOCAL_ONLY`) | `api/routers/capture.py:22`, `api/routers/capture.py:27`, `api/routers/capture.py:30-46`, `api/routers/capture.py:49-62` |
-| Voice list caches | the Edge and Kokoro lists are kept 7 days | `utils/config.py:558`, `utils/config.py:521` |
-| Kokoro model | about 340 MB, downloaded once | `services/studio_settings.py:48` |
+| Voice list caches | the Edge and Kokoro lists are kept 7 days | `utils/config.py:561`, `utils/config.py:524` |
+| Kokoro model | about 340 MB, downloaded once | `services/studio_settings.py:53` |
 | Whisper voice activity | silences of 500 ms or more skipped | `core/video_importer.py:322` |
 | Document slug on the Docs page | 200 characters | `api/routers/docs.py:105` |
 
-The constants behind the music limits are `MAX_MUSIC_BYTES`, `MAX_CHANNELS` and `MAX_NAME_CHARS`; behind the edit's, `MAX_CLIPS`, `MIN_CLIP_SECONDS`, `MAX_MARKERS` and `MAX_MARKER_NAME`; behind the narration's, `MAX_OFFSET_SECONDS`, `MIN_SPEED` and `MAX_SPEED`; behind the render's, `STATIC_FPS`, `TRANSITION_FPS`, `CHUNK_PIXELS`, `MIN_CHUNK_SEGMENTS`, `MIN_CHUNK_FRAMES`, `RENDER_BASE_SECONDS`, `RENDER_SECONDS_PER_FRAME` and `ZOOM_FROM`; behind the screen capture's, `MAX_RECORDING_SECONDS`, `MIN_FREE_BYTES`, `MIN_CHUNK_FREE_BYTES`, `MAX_RECORDING_BYTES`, `LIVE_WINDOW_SECONDS`, `MAX_CHUNKS`, `MAX_CHUNK_BYTES`, `TRANSCODE_BASE_SECONDS`, `TIMESLICE_MS`, `HEARTBEAT_MS`, `VIDEO_BITS_PER_SECOND`, `STILL_DELAYS`, `MAX_DIMENSION` and `MAX_MONITORS`; behind the annotations', `MAX_SHAPES`, `MAX_TEXT_CHARS`, `MAX_ANNOTATED_BYTES`, `MAX_DOCUMENT_BYTES`, `MIN_CROP_SIDE`, `MAX_ANNOTATE_PIXELS`, `MOSAIC_SHARE`, `MIN_MOSAIC_CELL`, `LENS_FACTORS`, `ZOOM_STEPS`, `MAX_CANVAS_SIDE` and `MAX_CANVAS_PIXELS`; behind the walkthroughs', `MAX_STEPS`, `MAX_STEP_TEXT`, `MAX_INSTRUCTION_CHARS`, `MAX_CHAPTER_CHARS`, `MAX_NAME_CHARS`, `MIN_HOTSPOT_SIDE` and `MAX_PUT_BYTES`.
+The constants behind the music limits are `MAX_MUSIC_BYTES`, `MAX_CHANNELS` and `MAX_NAME_CHARS`; behind the edit's, `MAX_CLIPS`, `MIN_CLIP_SECONDS`, `MAX_MARKERS` and `MAX_MARKER_NAME`; behind the narration's, `MAX_OFFSET_SECONDS`, `MIN_SPEED` and `MAX_SPEED`; behind the render's, `STATIC_FPS`, `TRANSITION_FPS`, `CHUNK_PIXELS`, `MIN_CHUNK_SEGMENTS`, `MIN_CHUNK_FRAMES`, `RENDER_BASE_SECONDS`, `RENDER_SECONDS_PER_FRAME` and `ZOOM_FROM`; behind the screen capture's, `MAX_RECORDING_SECONDS`, `MIN_FREE_BYTES`, `MIN_CHUNK_FREE_BYTES`, `MAX_RECORDING_BYTES`, `LIVE_WINDOW_SECONDS`, `MAX_CHUNKS`, `MAX_CHUNK_BYTES`, `TRANSCODE_BASE_SECONDS`, `TIMESLICE_MS`, `HEARTBEAT_MS`, `VIDEO_BITS_PER_SECOND`, `STILL_DELAYS`, `MAX_DIMENSION` and `MAX_MONITORS`; behind the annotations', `MAX_SHAPES`, `MAX_TEXT_CHARS`, `MAX_ANNOTATED_BYTES`, `MAX_DOCUMENT_BYTES`, `MIN_CROP_SIDE`, `MAX_ANNOTATE_PIXELS`, `MOSAIC_SHARE`, `MIN_MOSAIC_CELL`, `LENS_FACTORS`, `ZOOM_STEPS`, `MAX_CANVAS_SIDE` and `MAX_CANVAS_PIXELS`; behind the walkthroughs', `MAX_STEPS`, `MAX_STEP_TEXT`, `MAX_INSTRUCTION_CHARS`, `MAX_NOTE_CHARS`, `MAX_CHAPTER_CHARS`, `MAX_NAME_CHARS`, `MIN_HOTSPOT_SIDE`, `MAX_PUT_BYTES`, `MAX_SOURCE_PATH_CHARS`, `MAX_ALT_CHARS`, `TEXT_CONTROL_RE`, `HOTSPOT_DEFAULT`, `STEPS_BAR_WIDTH` and `STEPS_BAR_HEIGHT`; behind the workshop import's, `MAX_GUIDE_BYTES`, `MAX_PARSE_STEPS` and `TOOLTIP_CHARS`.
 
 ## See also
 

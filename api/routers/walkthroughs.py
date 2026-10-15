@@ -1,6 +1,8 @@
 """Walkthroughs (W1): the list, one record, the builder's whole-document save,
 a step from a still, a step's picture replaced, the player's pictures, a copy
-and a delete.
+and a delete. W2 adds the import of a course workshop (``POST /import``: a
+new walkthrough built from the guide's parse, its pictures copied from the
+course) and the guided capture's audit row (``POST /{wid}/guided-capture``).
 
 Every route takes ``current_user`` and answers the owner or an administrator,
 as a project's do (``api.deps.may_access_project`` on the record). Nothing
@@ -14,21 +16,22 @@ own ``_owned`` decides (404 / 403 as there).
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from api.audit import (
-    WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE, WALKTHROUGH_REPLACE_PICTURE,
-    WALKTHROUGH_UPDATE, audit,
+    WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE, WALKTHROUGH_GUIDED_CAPTURE,
+    WALKTHROUGH_IMPORT, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_UPDATE, audit,
 )
 from api.body import capped_body
 from api.deps import current_user, may_access_project
 from api.routers.captures import _owned as owned_capture
-from api.schemas import WalkthroughIn, WalkthroughName, plain_validation_error
+from api.schemas import HotspotIn, WalkthroughIn, WalkthroughName, plain_validation_error
 from api.store import display_name_of
-from services import walkthroughs
+from services import walkthroughs, workshops
 from services.recordings import safe_stem
 from utils.helpers import is_hex12
 
@@ -55,9 +58,38 @@ class AddStepIn(BaseModel):
 
 
 class ReplacePictureIn(BaseModel):
+    """The still whose picture the step takes; ``hotspot`` left out keeps the step's own (clamped into
+    the new picture), a rectangle sets it (clamped), null removes it - the guided capture's pointer rule."""
+
     model_config = ConfigDict(extra="forbid")
 
     capture_id: str = Field(min_length=12, max_length=12)
+    hotspot: HotspotIn | None = None
+
+
+class ImportIn(BaseModel):
+    """A course workshop to import (W2): the course's folder name and the workshop's slug, as
+    ``GET /api/courses`` lists them, and the walkthrough's name (the workshop's title when left out)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    course: str = Field(min_length=1, max_length=100)
+    slug: str = Field(min_length=1, max_length=100)
+    name: WalkthroughName | None = None
+
+
+class GuidedCaptureIn(BaseModel):
+    """The guided capture's two events (W2): its start (the kind, with or without the pointer) and its
+    end (how many steps were captured and skipped). The stills themselves are ``capture.still`` rows and
+    each picture attached a ``walkthrough.replace_picture`` row; this is the row that frames them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["start", "done"]
+    kind: Literal["region", "window", "screen"] | None = None
+    cursor: bool = False
+    captured: int = Field(0, ge=0, le=10_000)
+    skipped: int = Field(0, ge=0, le=10_000)
 
 
 def _owned(wid: str, user: dict) -> dict:
@@ -88,6 +120,37 @@ def create(body: NewWalkthroughIn, user: dict = Depends(current_user)):
     """A new, empty walkthrough; the record."""
     rec = walkthroughs.create(body.name, owner_id=user["id"], owner_name=display_name_of(user))
     audit(WALKTHROUGH_CREATE, user=user, entity="walkthrough", entity_id=rec["id"], detail=rec["name"])
+    return rec
+
+
+@router.post("/import")
+def import_workshop(body: ImportIn, user: dict = Depends(current_user)):
+    """A new walkthrough built from a course workshop's guide (W2): the chapters and steps of the parse
+    (``services.workshops``), each step's instruction, text and note, the guide's pictures copied in
+    through the one copy routine, the course kept as the record's ``source``. Owned by the caller. 400 when
+    the courses folder is not set, the course or workshop was left out of the list (a file over 2 MB, not
+    UTF-8 or not JSON), the workshop has more steps than a walkthrough holds, or the planned record would not
+    pass the save's own validation; 404 for a course or workshop that is not there; a workshop with no steps
+    makes an empty walkthrough. Answers the record."""
+    try:
+        root = workshops.courses_root()
+        loaded, workshop, text, folder = workshops.load_workshop(root, body.course, body.slug)
+    except workshops.NoCoursesFolder as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except workshops.UnreadableCourse as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    parsed = workshops.parse_guide(text, loaded["launchers"])
+    source, steps = workshops.import_plan(loaded, workshop, parsed, folder)
+    name = body.name or (workshop.get("title") or parsed.title or workshop["slug"])
+    try:
+        rec = walkthroughs.create_from_workshop(name, owner_id=user["id"], owner_name=display_name_of(user), source=source, steps=steps)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    pictures = sum(1 for s in rec["steps"] if walkthroughs.has_picture(s))
+    audit(WALKTHROUGH_IMPORT, user=user, entity="walkthrough", entity_id=rec["id"],
+          detail=f"{body.course}/{body.slug}: {_counts(rec)}, {pictures} picture{'' if pictures == 1 else 's'}")
     return rec
 
 
@@ -160,22 +223,39 @@ def add_step(wid: str, body: AddStepIn, user: dict = Depends(current_user)):
 
 @router.post("/{wid}/steps/{sid}/picture")
 def replace_picture(wid: str, sid: str, body: ReplacePictureIn, user: dict = Depends(current_user)):
-    """Replace the step's picture with the capture's current one; the hotspot
-    is kept, clamped to the new size. Answers the record."""
+    """Replace the step's picture with the capture's current one - the first
+    picture of a step that had none; the hotspot is kept, clamped to the new
+    size, unless the body names one (set, clamped) or nulls it (removed).
+    Answers the record."""
     _owned(wid, user)
     owned_capture(body.capture_id, user)
     if not is_hex12(sid):
         raise HTTPException(status_code=404, detail="No such step.")
+    hotspot = walkthroughs.KEEP_HOTSPOT if "hotspot" not in body.model_fields_set else (body.hotspot.model_dump() if body.hotspot else None)
     try:
-        rec = walkthroughs.replace_picture(wid, sid, body.capture_id)
+        rec = walkthroughs.replace_picture(wid, sid, body.capture_id, hotspot=hotspot)
     except walkthroughs.NoSuchStep as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
-    audit(WALKTHROUGH_REPLACE_PICTURE, user=user, entity="walkthrough", entity_id=wid, detail=f"step {sid}: capture {body.capture_id}")
+    spot = "" if hotspot is walkthroughs.KEEP_HOTSPOT else (", no hotspot" if hotspot is None else ", hotspot set")
+    audit(WALKTHROUGH_REPLACE_PICTURE, user=user, entity="walkthrough", entity_id=wid, detail=f"step {sid}: capture {body.capture_id}{spot}")
     return rec
+
+
+@router.post("/{wid}/guided-capture", status_code=204)
+def guided_capture(wid: str, body: GuidedCaptureIn, user: dict = Depends(current_user)):
+    """The guided capture's audit row (W2): "start" with the kind (and whether the pointer is drawn),
+    "done" with how many steps were captured and skipped. The desktop app sends both; nothing is
+    written to the walkthrough here (each picture attached is a replace_picture of its own)."""
+    _owned(wid, user)
+    if body.event == "start":
+        detail = f"start: {body.kind or 'unknown'}{' with pointer' if body.cursor else ''}"
+    else:
+        detail = f"done: {body.captured} captured, {body.skipped} skipped"
+    audit(WALKTHROUGH_GUIDED_CAPTURE, user=user, entity="walkthrough", entity_id=wid, detail=detail)
 
 
 @router.get("/{wid}/steps/{sid}/image")

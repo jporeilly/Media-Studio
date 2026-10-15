@@ -141,6 +141,87 @@ describe("the list", () => {
     expect(q("[data-builder]")!.getAttribute("data-builder")).toBe("new000000001");
   });
 
+  it("W2: Import workshop… lists the courses and workshops, previews the parse, imports on the server and opens the builder with a notice", async () => {
+    const payload = {
+      configured: true, message: null,
+      courses: [{
+        id: "pdi-2hr-lab", title: "PDI in 2 Hours", version: "0.1.21", description: "",
+        sections: [
+          { title: "Get Ready", workshops: [{ slug: "00-before", title: "Before You Start", description: "", estimatedMinutes: 5, stepCount: 5 }] },
+          { title: "See It Work", workshops: [{ slug: "01-first-win", title: "Your First Win", description: "", estimatedMinutes: 10, stepCount: 6 }] },
+        ],
+      }],
+    };
+    const preview = (slug: string) => ({
+      course: { id: "pdi-2hr-lab", title: "PDI in 2 Hours", version: "0.1.21" },
+      workshop: { slug, title: slug === "01-first-win" ? "Your First Win" : "Before You Start", section: "", estimatedMinutes: 10, stepCount: 6 },
+      name: slug === "01-first-win" ? "Your First Win" : "Before You Start",
+      chapters: ["Open the pipeline"],
+      steps: [
+        { number: 1, chapter: "Open the pipeline", instruction: "Open win_preview.ktr in Pentaho Data Integration.", text: "Open win_preview.ktr in Pentaho Data Integration.", picture: false, image: null, alt: "", launcher: { id: "spoon", path: "files/win_preview.ktr", label: "Open" }, note: false },
+        { number: 2, chapter: "", instruction: "Right-click the step named Valid rows.", text: "Right-click the step named Valid rows.", picture: true, image: "a.png", alt: "a", launcher: null, note: true },
+      ],
+      counts: slug === "01-first-win" ? { steps: 10, chapters: 4, pictures: 2, to_capture: 8 } : { steps: 1, chapters: 1, pictures: 1, to_capture: 0 },
+      message: null,
+    });
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === "/api/walkthroughs") return { walkthroughs: [tour] } as never;
+      if (path === "/api/courses") return payload as never;
+      if (path === "/api/courses/pdi-2hr-lab/workshops/00-before/preview") return preview("00-before") as never;
+      if (path === "/api/courses/pdi-2hr-lab/workshops/01-first-win/preview") return preview("01-first-win") as never;
+      throw new Error(`unexpected GET ${path}`);
+    });
+    vi.mocked(api.post).mockImplementation(async () => ({ ...tour, id: "imp000000001", name: "Your First Win", steps: [] }) as never);
+    await mount();
+    await act(async () => { q("[data-import-workshop]")!.click(); });
+    await settle();
+    const dialog = q("[role=dialog]")!;
+    expect(dialog.textContent).toContain("Import workshop");
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith("/api/courses");
+    const courseSelect = dialog.querySelector("[data-import-course]") as HTMLSelectElement;
+    expect([...courseSelect.options].map((o) => o.textContent)).toEqual(["PDI in 2 Hours (0.1.21)"]);
+    const workshopSelect = dialog.querySelector("[data-import-slug]") as HTMLSelectElement;
+    expect([...workshopSelect.querySelectorAll("optgroup")].map((g) => g.getAttribute("label"))).toEqual(["Get Ready", "See It Work"]);
+    expect([...workshopSelect.options].map((o) => o.textContent)).toEqual(["Before You Start (5 min · 5 steps)", "Your First Win (10 min · 6 steps)"]);
+    expect(workshopSelect.value).toBe("00-before");
+    await settle();
+    expect(q("[data-import-line]")!.textContent).toBe("1 step in 1 chapter; 1 picture from the guide, 0 to capture");
+    // Another workshop: its preview, with the steps and whether each has a picture.
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(workshopSelect, "01-first-win");
+      workshopSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith("/api/courses/pdi-2hr-lab/workshops/01-first-win/preview");
+    expect(q("[data-import-line]")!.textContent).toBe("10 steps in 4 chapters; 2 pictures from the guide, 8 to capture");
+    const rows = [...document.querySelectorAll("[data-import-steps] li")];
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("Open the pipeline");
+    expect(rows[0].querySelector("[aria-label='to capture']")).not.toBeNull();
+    expect(rows[1].querySelector("[aria-label='picture from the guide']")).not.toBeNull();
+    expect((q("[data-import-name]") as HTMLInputElement).placeholder).toBe("Your First Win");
+    expect(vi.mocked(api.post)).not.toHaveBeenCalled();
+    await act(async () => { (q("[data-import-confirm]") as HTMLButtonElement).click(); });
+    await settle();
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith("/api/walkthroughs/import", { course: "pdi-2hr-lab", slug: "01-first-win" });
+    expect(q("[data-builder]")!.getAttribute("data-builder")).toBe("imp000000001");
+  });
+
+  it("W2: with no courses folder set, the dialog says where to set it and offers no Import", async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === "/api/walkthroughs") return { walkthroughs: [] } as never;
+      if (path === "/api/courses") return { configured: false, message: "Set the Courses folder on the Settings page (Studio settings, an administrator) first.", courses: [] } as never;
+      throw new Error(`unexpected GET ${path}`);
+    });
+    await mount();
+    // The empty state offers the import too.
+    await act(async () => { q("[data-import-workshop]")!.click(); });
+    await settle();
+    expect(q("[data-import-unset]")!.textContent).toContain("Set the Courses folder on the Settings page");
+    expect((q("[data-import-confirm]") as HTMLButtonElement).disabled).toBe(true);
+    expect(q("[data-import-course]")).toBeNull();
+  });
+
   it("the empty state says how a walkthrough is made and that a still needs the desktop app; a route notice is shown once", async () => {
     vi.mocked(api.get).mockImplementation(async () => ({ walkthroughs: [] }) as never);
     await mount({ notice: "That walkthrough is gone." });

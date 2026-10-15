@@ -42,7 +42,9 @@ def test_defaults_when_nothing_is_stored():
         "watermark_text": "",
         "watermark_position": "bottom-right",
         "watermark_opacity": 0.5,
+        "courses_folder": "",  # W2: not set until an administrator points the app at a courses folder
     }
+    assert DEFAULT_CONFIG["courses_folder"] == ""
     # The generation defaults are the engine's own (utils/config.py DEFAULT_CONFIG).
     for key in ("slide_transition", "transition_duration", "watermark_text", "watermark_position", "watermark_opacity"):
         assert s[key] == DEFAULT_CONFIG[key], key
@@ -142,6 +144,9 @@ def test_empty_update_writes_nothing(monkeypatch):
         ("watermark_opacity", 0, "between 0.1 (faint) and 1 (solid)"),
         ("watermark_opacity", 1.5, "between 0.1 (faint) and 1 (solid)"),
         ("watermark_opacity", True, "between 0.1 (faint) and 1 (solid)"),
+        ("courses_folder", "relative/courses", "must be an absolute path"),
+        ("courses_folder", 5, "must be a path"),
+        ("courses_folder", None, "must be a path"),
         ("brand_colour", "red", "Unknown setting: brand_colour"),
     ],
 )

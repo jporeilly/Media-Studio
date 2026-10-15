@@ -4,7 +4,7 @@
 """
 
 from api.routers import (
-    admin, ai, auth, capture, captures, docs, edit, health, jobs, media, music, narration, projects, recordings,
+    admin, ai, auth, capture, captures, courses, docs, edit, health, jobs, media, music, narration, projects, recordings,
     settings, slides, updates, users, walkthroughs,
 )
 
@@ -16,6 +16,7 @@ API_ROUTERS = [
     # Captures list, and the recorder's chunks.
     capture.router, captures.router, recordings.router,
     # Walkthroughs (W1): steps made from stills, the builder's whole-document
-    # save and the player's pictures.
-    walkthroughs.router,
+    # save and the player's pictures. Courses (W2): the courses folder's
+    # workshops and the preview of an import.
+    walkthroughs.router, courses.router,
 ]

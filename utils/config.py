@@ -307,6 +307,9 @@ DEFAULT_CONFIG = {
     "kokoro_lang": "en-us",
     "kokoro_model_dir": "",
     "whisper_model": "",  # "" = the recommended default (turbo on GPU, else medium)
+    # The folder of courses the Walkthroughs page imports workshops from (W2): one
+    # folder per course, each with a course.json. "" = not set; the feature says so.
+    "courses_folder": "",
 }
 
 

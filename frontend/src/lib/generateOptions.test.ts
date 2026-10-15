@@ -25,6 +25,7 @@ const STUDIO: StudioSettings = {
   watermark_text: "ACME",
   watermark_position: "top-left",
   watermark_opacity: 0.3,
+  courses_folder: "",
 };
 
 const TRANSITIONS: Option[] = [
