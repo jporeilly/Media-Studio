@@ -44,7 +44,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from utils.helpers import replace_with_retry
+from utils.helpers import rename_with_retry, replace_with_retry
 from utils.logger import get_logger
 
 log = get_logger("PROJECTS")
@@ -374,6 +374,16 @@ def delete_project(pid: str) -> bool:
     the files in use are named (``_files_in_use``) so the message says which,
     as it always did.
 
+    Refused, that is, after the half second ``utils.helpers.rename_with_retry``
+    allows it: Windows refuses the rename for ANY open handle inside the
+    directory, and a real-time scanner or the indexer holds one for an instant
+    on every file just written - the instant each project.json save already
+    rides out (``replace_with_retry``). Made in one attempt, the delete of a
+    project imported or edited a moment before failed on that instant: a
+    "Something is still using it" with nothing of the user's open, which is how
+    the test suite's DELETE answered 409 instead of 204 on a loaded machine. A
+    file a player really holds outlasts the retries and is refused as before.
+
     After the rename the project is already gone from the store:
     ``list_projects`` skips a directory whose name is not a project id, and
     ``get_project`` looks only at the original path. Removing the renamed
@@ -398,7 +408,7 @@ def delete_project(pid: str) -> bool:
             return False
         gone = PROJECTS_DIR / f"{pid}{DELETING_SUFFIX}{uuid.uuid4().hex[:8]}"
         try:
-            pdir.rename(gone)
+            rename_with_retry(pdir, gone)
         except OSError as exc:
             held = _files_in_use(pdir)
             what = ", ".join(held) if held else f"{pdir.name} ({exc.strerror or exc})"

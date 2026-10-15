@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- [fix] **Deleting a project no longer fails with "Could not delete this project ... Something is still using it" when the only thing using it is a scanner's or the indexer's instant on a file written a moment before.** The delete takes the project's directory out of the store with one rename, which Windows refuses while any file inside it is open - and a real-time scanner or the search indexer opens each file the moment it is written, for milliseconds. Every project.json save already rides that instant out (`replace_with_retry`); the delete's rename now does the same, through the one retry loop both share (`utils.helpers.rename_with_retry`, about 0.6 s in all), so a delete straight after an import or a slide edit succeeds instead of asking the user to close something they never opened. A file a player really holds outlasts the retries and is still refused, with the file named, as before. Found as the test suite's `DELETE /api/projects/{pid}` answering 409 instead of 204 on a loaded machine (`tests/test_slides.py`, `tests/test_project_ownership.py`), which no job or lock of the app's could explain: the delete runs `jobs.require_idle` first and neither test attaches a job. Those two assertions now carry the response body, and `tests/test_projects.py` holds a file open for an instant and proves the delete waits it out.
+
 ## [0.16.0] - 2026-10-15
 
 One feature: Walkthroughs, a tile of its own. A walkthrough is a click-through tour made of

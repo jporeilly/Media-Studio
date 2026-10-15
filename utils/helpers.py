@@ -13,10 +13,26 @@ from utils.logger import get_logger
 
 _retry_logger = get_logger("RETRY")
 
-# The rename that publishes an atomically-written file, retried on a transient
-# Windows refusal. Worst case ~0.6 s before the write really fails.
+# A rename retried on a transient Windows refusal - the one that publishes an
+# atomically-written file and the one that takes a deleted project's directory
+# out of the store. Worst case ~0.6 s before it really fails.
 _REPLACE_ATTEMPTS = 8
 _REPLACE_BACKOFF_SECONDS = 0.02
+
+
+def _retry_sharing_refusal(rename) -> None:
+    """Run ``rename`` (an ``os.replace`` or a ``Path.rename``), retrying it on
+    ``PermissionError`` with a growing pause, ``_REPLACE_ATTEMPTS`` times in
+    all. The ONE retry loop behind :func:`replace_with_retry` and
+    :func:`rename_with_retry`; what it rides out is explained on the first."""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            rename()
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
 
 
 def replace_with_retry(tmp: Path, path: Path) -> None:
@@ -46,14 +62,26 @@ def replace_with_retry(tmp: Path, path: Path) -> None:
     Retrying exposes nothing partial: the destination is either the old file or
     the new one throughout, and only the rename is repeated.
     """
-    for attempt in range(_REPLACE_ATTEMPTS):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == _REPLACE_ATTEMPTS - 1:
-                raise
-            time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
+    _retry_sharing_refusal(lambda: os.replace(tmp, path))
+
+
+def rename_with_retry(src: Path, dst: Path) -> None:
+    """``src.rename(dst)`` - a directory as well as a file - retried briefly on
+    the same transient Windows refusal as :func:`replace_with_retry`, for the
+    same reason and with the same budget.
+
+    ``services.projects.delete_project`` takes a project out of the store by
+    renaming its whole directory, one call that Windows refuses (WinError 5)
+    while ANY file inside it is open - including for the instant a real-time
+    scanner or the indexer spends on a file written a moment before, the very
+    instant every project.json save rides out above. Made in one attempt, the
+    delete of a project imported or edited a moment ago failed on that instant
+    and answered "Something is still using it" with nothing of the user's open
+    (the test suite's DELETE answering 409 instead of 204 on a loaded machine).
+    A file a player really holds outlasts the retries and is still refused,
+    with the same error, so the caller still names it.
+    """
+    _retry_sharing_refusal(lambda: src.rename(dst))
 
 
 def publish_to_cache(source: Path, cache_path: Path) -> bool:

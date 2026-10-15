@@ -199,6 +199,40 @@ def test_a_delete_with_a_file_really_held_open_is_refused_whole(tmp_projects_dir
     assert projects.list_projects() == []
 
 
+def test_a_delete_waits_out_a_handle_held_only_for_an_instant(tmp_projects_dir):
+    """The holder is usually no player but a real-time scanner or the search
+    indexer, which opens a file the moment it is written and lets go a few
+    milliseconds later - the instant ``replace_with_retry`` rides out for every
+    project.json save. The delete's rename rides it out too: a project imported
+    or edited a moment before must not answer "Something is still using it"
+    with nothing of the user's open (seen as the full suite's DELETE answering
+    409 instead of 204 on a loaded machine, twice). Windows only, like the test
+    above: POSIX renames a directory with open files in it, so there is nothing
+    to wait out."""
+    import os
+    import threading
+
+    if os.name != "nt":
+        pytest.skip("only Windows refuses to rename a directory with an open file in it")
+
+    pid = projects.import_upload("deck.pptx", b"deck-bytes")["id"]
+    pdir = projects.PROJECTS_DIR / pid
+
+    # Python's open() shares reads and writes but never deletes - a scanner's kind of handle.
+    handle = open(pdir / "deck.pptx", "rb")
+    let_go = threading.Timer(0.05, handle.close)
+    let_go.start()
+    try:
+        assert projects.delete_project(pid) is True, "an instant's handle is waited out, not reported"
+    finally:
+        let_go.cancel()
+        handle.close()
+
+    assert not pdir.exists()
+    assert projects.list_projects() == []
+    assert not [d for d in projects.PROJECTS_DIR.iterdir() if projects.DELETING_SUFFIX in d.name]
+
+
 def test_an_interrupted_removal_is_invisible_and_swept_by_the_next_delete(tmp_projects_dir, monkeypatch):
     """Once the directory is renamed the project is gone as far as any user can
     see; if removing the renamed directory then fails, the delete still

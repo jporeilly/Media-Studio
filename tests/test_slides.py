@@ -294,7 +294,8 @@ def test_deleting_a_project_forgets_its_lock_and_deck_cache(client):
     pid = _import_deck()
     slides.list_slides(pid)
     assert pid in slides._locks and pid in slides._deck_cache
-    assert client.delete(f"/api/projects/{pid}").status_code == 204
+    r = client.delete(f"/api/projects/{pid}")
+    assert r.status_code == 204, r.text
     assert pid not in slides._locks and pid not in slides._deck_cache
     assert store.delete_project("aabbccddeeff") is False
 
