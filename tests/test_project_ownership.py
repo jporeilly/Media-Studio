@@ -264,7 +264,8 @@ def test_the_owner_may_use_every_route_class_and_so_may_an_admin(cast):
         assert client.post(f"/api/projects/{pid}/ai/pacing", json={}).status_code == 200, who
 
     # And the owner can delete their own project.
-    assert cast["owner"].delete(f"/api/projects/{pid}").status_code == 204
+    r = cast["owner"].delete(f"/api/projects/{pid}")
+    assert r.status_code == 204, r.text
 
 
 def test_another_editor_is_refused_every_project_scoped_route(cast):
