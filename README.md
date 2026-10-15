@@ -31,6 +31,11 @@ the whole app suite looks and feels the same.
   transcribe, re-voice and cut. Or take a pixel-exact still, annotate it - arrows, callouts,
   text, shapes, numbered steps, a blur that is a mosaic, a highlighter, a crop and a magnifying
   lens, in the browser edition too - and add it to a deck as a slide.
+- **Walkthroughs.** Turn stills into a click-through product walkthrough: each step is a picture
+  (annotated or not) with a hotspot the viewer clicks, a tooltip beside it or a centred card, a
+  chapter, and the instruction the learner follows; a builder makes one and a full-window player
+  presents it, in the browser edition too, and the walkthrough reads as a transcript - the script
+  of the narrated video to come.
 - **An AI assistant on the slides.** A local Ollama model writes and rewrites speaker
   notes, reviews them for grammar, tone, flow and transitions and fixes what it finds,
   adapts them to an audience, translates them, paces them, scores the deck for video and
@@ -47,9 +52,10 @@ the whole app suite looks and feels the same.
 The app's **Docs** page has a guide for each of these. What changed in each release, and
 when, is in [CHANGELOG.md](CHANGELOG.md).
 
-**Still to come:** the transition-sound library, and the rest of the administration work:
-notifications, a branding lock, an administration page of its own, and per-kind job
-limits. Until parity, the NiceGUI app remains the shipping product; its source lives at
+**Still to come:** sharing a walkthrough (a link, an embed snippet and an export as a
+self-contained HTML page) and rendering one as a narrated video; the transition-sound library,
+and the rest of the administration work: notifications, a branding lock, an administration page
+of its own, and per-kind job limits. Until parity, the NiceGUI app remains the shipping product; its source lives at
 `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).
 
 ## Stack

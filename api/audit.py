@@ -86,6 +86,16 @@ CAPTURE_REVERT = "capture.revert"
 # and the client address.
 CAPTURE_REFUSED = "capture.refused"
 
+# Walkthroughs (W1): one made, saved whole (the detail: the step and chapter
+# counts - never a step's text), given a step from a still, a step's picture
+# replaced, copied, deleted.
+WALKTHROUGH_CREATE = "walkthrough.create"
+WALKTHROUGH_UPDATE = "walkthrough.update"
+WALKTHROUGH_ADD_STEP = "walkthrough.add_step"
+WALKTHROUGH_REPLACE_PICTURE = "walkthrough.replace_picture"
+WALKTHROUGH_DUPLICATE = "walkthrough.duplicate"
+WALKTHROUGH_DELETE = "walkthrough.delete"
+
 # The music library (``services.music``): studio-wide, so the row is what says
 # who put a file there or took it away. The detail carries the name and the
 # size, no more.
@@ -127,11 +137,13 @@ ACTIONS: tuple[str, ...] = (
     JOB_CANCEL, SYSTEM_UPDATE, SYSTEM_RESTART, AUDIT_PURGE,
     RECORDING_START, RECORDING_FINISH, RECORDING_DISCARD, CAPTURE_STILL, CAPTURE_ADD_TO_DECK, CAPTURE_DELETE,
     CAPTURE_REFUSED, CAPTURE_ANNOTATE, CAPTURE_REVERT,
+    WALKTHROUGH_CREATE, WALKTHROUGH_UPDATE, WALKTHROUGH_ADD_STEP, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_DUPLICATE,
+    WALKTHROUGH_DELETE,
 )
 
 # What the action was done to (the ``entity`` column).
 ENTITIES: tuple[str, ...] = (
-    "auth", "user", "settings", "project", "music", "job", "system", "audit", "recording", "capture",
+    "auth", "user", "settings", "project", "music", "job", "system", "audit", "recording", "capture", "walkthrough",
 )
 
 

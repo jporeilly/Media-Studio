@@ -1,9 +1,10 @@
 """Pydantic request/response models for the API layer."""
 
+import re
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import (
-    BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, StringConstraints, ValidationError,
+    AfterValidator, BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, StringConstraints, ValidationError,
     field_validator, model_validator,
 )
 
@@ -13,6 +14,7 @@ from services.ai_slides import CUSTOM_TONE, MAX_ISSUE_CHARS, QA_CRITERIA
 from services.captures import DOCUMENT_VERSION, MAX_SHAPES, MAX_TEXT_CHARS, MIN_CROP_SIDE
 from services.narration import MAX_OFFSET_BATCH, MAX_OFFSET_SECONDS, MAX_SPEED, MAX_VOICE_CHARS, MIN_SPEED
 from services.slides import MAX_NOTES_CHARS, MAX_PAUSE_SECONDS
+from services import walkthroughs as walkthrough_rules
 
 # A title-card text: stripped, so a whitespace-only value makes no card, and capped.
 CardText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)]
@@ -643,6 +645,146 @@ class AnnotationDocument(BaseModel):
     version: Literal[DOCUMENT_VERSION]
     shapes: list[Shape] = Field(default_factory=list, max_length=MAX_SHAPES)
     crop: CropIn | None = None
+
+
+# ── Walkthroughs (W1) ─────────────────────────────────────────────────────────
+# The whole document the builder saves (``PUT /api/walkthroughs/{wid}``),
+# validated HERE with the pictures the walkthrough's folder holds passed as the
+# context (``WalkthroughIn.model_validate(data, context={"pictures": {name:
+# (W, H)}})``, from ``services.walkthroughs.held_pictures``), so one model
+# answers "is this well formed" and "does it fit this walkthrough": every step
+# names a picture that is there, at the size it really is, the hotspot inside
+# it and at least MIN_HOTSPOT_SIDE a side, the texts within their limits, the
+# ids and the pictures unique. The route answers a failure with 400 and the
+# first error as a plain line; nothing is written then. The step cap is read
+# at validation time from ``services.walkthroughs.MAX_STEPS`` (a test can
+# lower it) and says what it is.
+
+WalkthroughKind = Literal[walkthrough_rules.KINDS]
+WalkthroughPlacement = Literal[walkthrough_rules.PLACEMENTS]
+#: A walkthrough's or a step's id: twelve hex characters, as a capture's.
+Hex12 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
+#: A step's picture, by its file name in the walkthrough's folder.
+StepImageName = Annotated[str, StringConstraints(pattern=r"^step-[0-9a-f]{12}\.png$")]
+#: A control character a text may not carry (a step's text keeps its line breaks and tabs; a name keeps none).
+_TEXT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_NAME_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _no_control_characters(value: str) -> str:
+    """The one rule for a NAME (a walkthrough's, a chapter's): no control character at all. On the type, so
+    every route that takes the name - the create and the save - refuses the same thing."""
+    if _NAME_CONTROL_RE.search(value):
+        raise ValueError("A name may not contain control characters.")
+    return value
+
+
+#: The walkthrough's name: stripped, 1 to MAX_NAME_CHARS characters, no control characters.
+WalkthroughName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=walkthrough_rules.MAX_NAME_CHARS), AfterValidator(_no_control_characters),
+]
+#: A chapter's name: stripped first, then at most MAX_CHAPTER_CHARS characters (the bound counts what is stored), no control characters.
+ChapterName = Annotated[
+    str, StringConstraints(strip_whitespace=True, max_length=walkthrough_rules.MAX_CHAPTER_CHARS), AfterValidator(_no_control_characters),
+]
+
+
+def _pictures(info) -> dict | None:
+    context = getattr(info, "context", None) or {}
+    return context.get("pictures")
+
+
+class HotspotIn(BaseModel):
+    """The rectangle the viewer clicks, in the picture's pixels: whole pixels,
+    inside it (the step checks that), at least MIN_HOTSPOT_SIDE a side."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: StrictInt = Field(ge=0)
+    y: StrictInt = Field(ge=0)
+    width: StrictInt = Field(ge=walkthrough_rules.MIN_HOTSPOT_SIDE)
+    height: StrictInt = Field(ge=walkthrough_rules.MIN_HOTSPOT_SIDE)
+
+
+class StepSourceIn(BaseModel):
+    """Where a step's picture came from: informational only, never read back."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capture_id: Hex12
+    annotated: bool = False
+
+
+class StepIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: Hex12
+    image: StepImageName
+    width: StrictInt = Field(ge=1)
+    height: StrictInt = Field(ge=1)
+    hotspot: HotspotIn | None = None
+    kind: WalkthroughKind = "tooltip"
+    text: str = Field("", max_length=walkthrough_rules.MAX_STEP_TEXT)
+    instruction: str = Field("", max_length=walkthrough_rules.MAX_INSTRUCTION_CHARS)
+    placement: WalkthroughPlacement = "auto"
+    chapter: ChapterName = ""
+    source: StepSourceIn | None = None
+
+    @field_validator("text", "instruction")
+    @classmethod
+    def _plain_text(cls, value: str) -> str:
+        """Plain text with line breaks: CRLF normalised to LF, no other control character (a tab is allowed)."""
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
+        if _TEXT_CONTROL_RE.search(value):
+            raise ValueError("A step's text may not contain control characters.")
+        return value
+
+    @model_validator(mode="after")
+    def _image_named_by_id(self):
+        """A step's picture is ``step-<id>.png`` and nothing else: ``replace_picture`` writes by the step's id,
+        so a document that names another step's file would leave two steps on one file and an orphan."""
+        expected = walkthrough_rules.step_image_name(self.id)
+        if self.image != expected:
+            raise ValueError(f"step {self.id}'s picture must be {expected}, not {self.image}.")
+        return self
+
+    @model_validator(mode="after")
+    def _against_the_pictures(self, info):
+        pictures = _pictures(info)
+        if pictures is None:
+            return self
+        size = pictures.get(self.image)
+        if size is None:
+            raise ValueError(f"step {self.id} names a picture the walkthrough does not hold ({self.image}).")
+        width, height = size
+        if (self.width, self.height) != (width, height):
+            raise ValueError(f"step {self.id}: the picture is {width}x{height}, not {self.width}x{self.height}.")
+        h = self.hotspot
+        if h is not None and (h.x + h.width > width or h.y + h.height > height):
+            raise ValueError(f"step {self.id}: the hotspot runs past the picture's edge ({width}x{height}).")
+        return self
+
+
+class WalkthroughIn(BaseModel):
+    """PUT /walkthroughs/{wid}: the whole document, with the revision it was loaded at."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[walkthrough_rules.DOCUMENT_VERSION] = walkthrough_rules.DOCUMENT_VERSION
+    name: WalkthroughName
+    revision: StrictInt = Field(ge=1)
+    steps: list[StepIn] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_and_bounded(self):
+        """At most MAX_STEPS steps, every id unique (and so, since a step's picture is named by its id, every
+        picture unique too)."""
+        if len(self.steps) > walkthrough_rules.MAX_STEPS:
+            raise ValueError(f"A walkthrough can hold at most {walkthrough_rules.MAX_STEPS} steps.")
+        ids = [s.id for s in self.steps]
+        if len(set(ids)) != len(ids):
+            raise ValueError("Two steps carry the same id.")
+        return self
 
 
 def plain_validation_error(exc: ValidationError) -> str:

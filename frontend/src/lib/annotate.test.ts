@@ -10,11 +10,12 @@ import {
   type AnnotationDocument, type BoxShape, type CalloutShape, type MagnifyShape, type Measure, type SegmentShape, type Shape, type StepShape,
   type TextShape, DEFAULT_STYLE, DOCUMENT_VERSION, MAX_CANVAS_PIXELS, MAX_CANVAS_SIDE, MAX_SHAPES, MAX_TEXT_CHARS, MIN_CROP_SIDE, MIN_MOSAIC_CELL,
   STEP_RADIUS, TEXT_PX, TOOL_KEYS, X_FIELDS, Y_FIELDS, ZOOM_STEPS,
-  addShape, backingScale, bounds, canAddShape, canRedo, canUndo, clampShape, clipRect, commit, cropFromDrag, currentSequence, deleteShape,
+  addShape, backingScale, bounds, canAddShape, clampShape, clipRect, cropFromDrag, currentSequence, deleteShape,
   fitZoom, handleAt, handles, history, hitTest, hitsLens, lensRect, mosaicCell, moveCrop, moveLens, moveShape, outputSize, parseDocument,
-  placeShape, redo, resizeCrop, resizeShape, restartSequence, serialise, setCrop, shapeFromDrag, stepNumbers, textBoxHeight, textOn, toolForKey,
-  undo, updateShape, withinStill, wrapText, zoomIn, zoomOut,
+  placeShape, resizeCrop, resizeShape, restartSequence, serialise, setCrop, shapeFromDrag, stepNumbers, textBoxHeight, textOn, toolForKey,
+  updateShape, withinStill, wrapText, zoomIn, zoomOut,
 } from "./annotate";
+import { canRedo, canUndo, commit, redo, undo } from "./history";
 
 const STILL = { width: 1000, height: 800 };
 const measure: Measure = (text) => text.length * 8;

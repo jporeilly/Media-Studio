@@ -85,8 +85,9 @@ There is no share dialog for a still.
 - **Copy** puts the image on the clipboard.
 - **Save as…** downloads it as a PNG named after the capture.
 - The bin, **Delete still**, asks first, then deletes it.
+- A still becomes a **step of a walkthrough** from the Walkthroughs page's builder (**Add step…**), which copies the picture the still shows at that moment; deleting or re-annotating the still afterwards leaves the step as it was ([Walkthroughs](walkthroughs.md)).
 
-Once a still has been annotated (below), all three use the annotated picture.
+Once a still has been annotated (below), all of them use the annotated picture.
 
 ### Annotate a still
 
@@ -167,6 +168,7 @@ A still or a recording belongs to whoever made it, like a project: an editor see
 ## See also
 
 - [Projects](projects.md): the page the captures live on
+- [Walkthroughs](walkthroughs.md): stills as the steps of a click-through walkthrough
 - [The Timeline](timeline.md): cutting a recording, and music under it
 - [Keyboard shortcuts](../reference/keyboard-shortcuts.md)
 - [Limits](../reference/limits.md)

@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Clapperboard, FileText, FolderOpen, LayoutDashboard, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
+import { Clapperboard, FileText, FolderOpen, Footprints, LayoutDashboard, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { CaptureProvider } from "../context/CaptureContext";
@@ -14,6 +14,8 @@ interface NavItem { to: string; label: string; icon: React.ReactNode }
 const NAV: NavItem[] = [
   { to: "/", label: "Dashboard", icon: <LayoutDashboard size={18} /> },
   { to: "/projects", label: "Projects", icon: <FolderOpen size={18} /> },
+  // Walkthroughs (W1): shown everywhere - the list, the builder and the player touch no screen.
+  { to: "/walkthroughs", label: "Walkthroughs", icon: <Footprints size={18} /> },
   { to: "/docs", label: "Docs", icon: <FileText size={18} /> },
   { to: "/settings", label: "Settings", icon: <SettingsIcon size={18} /> },
 ];

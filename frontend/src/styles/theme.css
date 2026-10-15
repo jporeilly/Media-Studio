@@ -750,3 +750,58 @@ p { margin: 0 0 8px; }
   .os-table td { padding: 11px 10px; }
   .bulk-check { width: 20px; height: 20px; }
 }
+
+/* ── Walkthroughs (W1): the player and the builder ─────────────── */
+/* The player fills the window outside the Shell: a header, then the stage - a neutral backdrop the picture
+   is fitted and centred on; the hotspot is a BUTTON over it, outlined and pulsing (no pulse under
+   prefers-reduced-motion); the tooltip and the modal card are positioned by the component. */
+.ms-player { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); color: var(--text); z-index: 30; }
+.ms-player-head { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--surface); flex-wrap: wrap; }
+.ms-player-head .os-progress { height: 6px; flex: 1; min-width: 120px; }
+.ms-stage { position: relative; flex: 1; overflow: hidden; background: #1f2937; }
+[data-theme="light"] .ms-stage { background: #cbd5e1; }
+.ms-stage > img { position: absolute; user-select: none; -webkit-user-drag: none; }
+.ms-dim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); }
+.ms-hotspot { position: absolute; box-sizing: border-box; border: 3px solid var(--brand); border-radius: 6px; background: transparent; cursor: pointer; padding: 0; box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7); }
+.ms-hotspot:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+.ms-hotspot-pulse { animation: ms-pulse 1.6s ease-out infinite; }
+@keyframes ms-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7); }
+  70% { box-shadow: 0 0 0 14px rgba(255, 255, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ms-hotspot-pulse { animation: none; }
+}
+.ms-tooltip { position: absolute; max-width: min(320px, 80vw); background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 10px 14px; white-space: pre-wrap; font-size: 14px; line-height: 1.45; }
+.ms-modal { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(480px, 90%); background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; white-space: pre-wrap; font-size: 15px; line-height: 1.5; }
+.ms-chapters { position: relative; }
+.ms-chapters-menu { position: absolute; top: 100%; left: 0; z-index: 5; min-width: 220px; margin: 4px 0 0; padding: 6px; list-style: none; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow-lg); }
+.ms-chapters-menu button { display: flex; width: 100%; text-align: left; gap: 8px; align-items: center; background: none; border: 0; color: inherit; font: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.ms-chapters-menu button:hover, .ms-chapters-menu button[aria-current="true"] { background: var(--surface-2); }
+.ms-chapters-menu button[aria-current="true"] { font-weight: 600; }
+.ms-chapters-menu button:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+/* The transcript: a drawer over the player's stage, a panel under the builder's toolbar; the Markdown as it is. */
+.ms-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(440px, 92%); background: var(--surface); color: var(--text); border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-lg); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; overflow: auto; z-index: 6; }
+.ms-transcript { margin: 0; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow: auto; flex: 1; min-height: 120px; }
+.ms-transcript-panel { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.ms-transcript-panel .ms-transcript { max-height: 280px; }
+
+/* The builder: the step list, the picture with its hotspot, the step's properties. */
+.ms-builder { display: grid; grid-template-columns: 220px minmax(0, 1fr) 280px; gap: 14px; align-items: start; }
+.ms-step-list { display: flex; flex-direction: column; gap: 8px; max-height: calc(100vh - 300px); min-height: 200px; overflow: auto; }
+.ms-step-item { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 6px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; align-items: start; }
+.ms-step-item[aria-selected="true"] { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+.ms-step-item.ms-drop-before { border-top: 3px solid var(--brand); }
+.ms-step-item img { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #0f172a; border-radius: 4px; display: block; }
+.ms-step-num { display: flex; align-items: center; gap: 2px; font-weight: 600; font-size: 12px; color: var(--muted); padding-top: 2px; }
+.ms-builder-stage { position: relative; overflow: auto; min-height: 360px; height: calc(100vh - 300px); background: var(--surface-2); border-radius: var(--radius-sm); }
+.ms-builder-props { display: flex; flex-direction: column; gap: 10px; }
+.ms-surface { position: relative; display: inline-block; line-height: 0; margin: 12px; user-select: none; touch-action: none; box-shadow: var(--shadow); background: #fff; }
+.ms-surface img { display: block; -webkit-user-drag: none; pointer-events: none; }
+.ms-surface-spot { position: absolute; box-sizing: border-box; border: 2px solid var(--brand); background: rgba(13, 148, 136, 0.14); pointer-events: none; }
+.ms-surface-handle { position: absolute; width: 8px; height: 8px; background: #fff; border: 1px solid #1e293b; transform: translate(-50%, -50%); pointer-events: none; }
+@media (max-width: 1100px) {
+  .ms-builder { grid-template-columns: 180px minmax(0, 1fr); }
+  .ms-builder-props { grid-column: 1 / -1; }
+}

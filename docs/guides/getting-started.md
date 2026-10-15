@@ -14,11 +14,11 @@ On a fresh install the app creates one account, `admin` with the password `admin
 
 ### The shell
 
-Once you are in, the sidebar lists **Dashboard**, **Projects**, **Docs** and **Settings**, then your avatar, display name and role, and at the foot the version the server reports. The top bar has three controls: **Accent colour** (Teal, Slate, Blue, Indigo, Purple, Green, Orange or Rose), **Toggle dark / light**, and **Log out**. The theme starts dark and Teal and is remembered in this browser, not on your account.
+Once you are in, the sidebar lists **Dashboard**, **Projects**, **Walkthroughs**, **Docs** and **Settings**, then your avatar, display name and role, and at the foot the version the server reports. The top bar has three controls: **Accent colour** (Teal, Slate, Blue, Indigo, Purple, Green, Orange or Rose), **Toggle dark / light**, and **Log out**. The theme starts dark and Teal and is remembered in this browser, not on your account.
 
 ### The dashboard
 
-The dashboard is four tiles, **Projects**, **Import Video**, **Generate Video** and **Translate**, and every tile's **Open** goes to the Projects page, because each of those things happens inside a project. In the desktop app a fifth tile, **Capture**, opens the Projects page with the Capture dialog ready ([Screen capture](capture.md)). An error box appears here only when the API does not answer.
+The dashboard is five tiles, **Projects**, **Import Video**, **Generate Video**, **Translate** and **Walkthroughs**: the first four open the Projects page, because each of those things happens inside a project, and **Walkthroughs** opens the Walkthroughs page ([Walkthroughs](walkthroughs.md)). In the desktop app a sixth tile, **Capture**, opens the Projects page with the Capture dialog ready ([Screen capture](capture.md)). An error box appears here only when the API does not answer.
 
 ### The three kinds of project
 

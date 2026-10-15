@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import shutil
 import struct
 import uuid
@@ -45,7 +44,7 @@ from pathlib import Path
 
 from services import capture
 from utils.config import CONFIG_DIR, TEMP_DIR
-from utils.helpers import replace_with_retry
+from utils.helpers import HEX12_RE, file_under, is_hex12, replace_with_retry
 from utils.logger import get_logger
 
 log = get_logger("CAPTURES")
@@ -55,7 +54,8 @@ STILL_NAME = "still.png"
 #: The annotated picture, exported by the page's renderer; beside the still.
 ANNOTATED_NAME = "annotated.png"
 MAX_NAME_CHARS = 120
-_CID_RE = re.compile(r"^[0-9a-f]{12}$")
+#: A capture id: the twelve-hex shape every record folder shares (``utils.helpers.HEX12_RE``).
+_CID_RE = HEX12_RE
 
 #: The annotation document's version this release reads and writes.
 DOCUMENT_VERSION = 1
@@ -85,7 +85,7 @@ class TooLarge(ValueError):
 
 
 def _valid(cid: str) -> bool:
-    return bool(_CID_RE.fullmatch(cid or ""))
+    return is_hex12(cid)
 
 
 def default_name(now: datetime | None = None) -> str:
@@ -125,12 +125,9 @@ def list_captures() -> list[dict]:
 
 def _under(cid: str, name: str) -> Path | None:
     """``name`` inside the capture's directory, proven to lie under it and to
-    exist; None otherwise."""
-    base = (CAPTURES_DIR / cid).resolve()
-    path = (base / name).resolve()
-    if base not in path.parents or not path.is_file():
-        return None
-    return path
+    exist; None otherwise (``utils.helpers.file_under``, the idiom the
+    walkthroughs share)."""
+    return file_under(CAPTURES_DIR / cid, name)
 
 
 def image_path(cid: str, original: bool = False) -> Path | None:

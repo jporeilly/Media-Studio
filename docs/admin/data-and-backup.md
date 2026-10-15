@@ -22,6 +22,7 @@ data\
     revoice\                   the re-voice job's working project
     exports\                   <name>-notes.pptx and <name>-qa.txt
   captures\<id>\               one screen still: still.png (the screen as captured) and capture.json; annotated.png once annotated in the editor (capture.json then carries the document)
+  walkthroughs\<id>\           one walkthrough: walkthrough.json (the record: name, owner, revision, steps) and one step-<id>.png per step, copied from the still when the step was added
   logs\app.log                 the server log (rotating)
   cache\                       every synthesised sentence and slide, keyed by text, voice and speed; never swept
   temp\                        scratch files
@@ -41,7 +42,7 @@ Renders belong to their project: a deck's MP4 and sidecars, a video's re-voice a
 There is no backup feature in the app.
 
 1. Stop the app: close the desktop window, or stop the server. Jobs live in memory, so a job in flight is lost: let it finish first.
-2. Copy `data\` and `assets\music\`. That is the accounts, the settings, every project with its transcript, edit and renders, the screen stills, and the music library. `data\cache\`, `assets\temp\` and everything in `data\temp\` except `data\temp\recordings\` can be left out (that folder holds screen recordings not saved yet, the only copy of them); `assets\models\kokoro\` downloads again on the first Kokoro narration if it is missing.
+2. Copy `data\` and `assets\music\`. That is the accounts, the settings, every project with its transcript, edit and renders, the screen stills, the walkthroughs with their pictures, and the music library. `data\cache\`, `assets\temp\` and everything in `data\temp\` except `data\temp\recordings\` can be left out (that folder holds screen recordings not saved yet, the only copy of them); `assets\models\kokoro\` downloads again on the first Kokoro narration if it is missing.
 3. Start the app.
 
 A single project can be backed up on its own: its directory `data\projects\<id>\` is self-contained, and the music files its clips name are in `assets\music\` by name.

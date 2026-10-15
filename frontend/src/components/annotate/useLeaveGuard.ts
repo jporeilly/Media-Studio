@@ -24,7 +24,8 @@
 import { useCallback, useContext, useEffect, useRef } from "react";
 import { UNSAFE_NavigationContext } from "react-router-dom";
 
-export const SENTINEL = "annotate-unsaved";
+/** The history entry's mark - generic, since the guard serves the annotation editor and the walkthrough builder alike. */
+export const SENTINEL = "unsaved-changes";
 
 type HistoryState = Record<string, unknown> | null;
 

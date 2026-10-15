@@ -5,7 +5,7 @@
 
 from api.routers import (
     admin, ai, auth, capture, captures, docs, edit, health, jobs, media, music, narration, projects, recordings,
-    settings, slides, updates, users,
+    settings, slides, updates, users, walkthroughs,
 )
 
 API_ROUTERS = [
@@ -15,4 +15,7 @@ API_ROUTERS = [
     # Screen capture (T3): stills and the overlay's frozen frames, the
     # Captures list, and the recorder's chunks.
     capture.router, captures.router, recordings.router,
+    # Walkthroughs (W1): steps made from stills, the builder's whole-document
+    # save and the player's pictures.
+    walkthroughs.router,
 ]

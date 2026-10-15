@@ -20,6 +20,8 @@
  * each one colour. A Gaussian blur can be partly undone; one colour per 8-pixel cell cannot be read back.
  */
 
+import { type History, history as makeHistory } from "./history";
+
 // ---- limits and constants ------------------------------------------------------------------------------
 
 export const DOCUMENT_VERSION = 1;
@@ -301,15 +303,18 @@ export function placeShape(tool: Tool, p: Point, style: Style, measure: Measure,
   return null;
 }
 
-/** The crop a drag makes, clamped to the still and in whole pixels; null under MIN_CROP_SIDE a side. */
-export function cropFromDrag(start: Point, end: Point, still: Size): Crop | null {
-  return clampCrop(normalise(start, end), still);
+/**
+ * The crop a drag makes, clamped to the still and in whole pixels; null under `minSide` a side - the crop's
+ * MIN_CROP_SIDE here, the hotspot's MIN_HOTSPOT_SIDE when the walkthrough builder draws one with the same maths.
+ */
+export function cropFromDrag(start: Point, end: Point, still: Size, minSide: number = MIN_CROP_SIDE): Crop | null {
+  return clampCrop(normalise(start, end), still, minSide);
 }
 
-export function clampCrop(r: Rect, still: Size): Crop | null {
+export function clampCrop(r: Rect, still: Size, minSide: number = MIN_CROP_SIDE): Crop | null {
   const x0 = Math.max(0, Math.round(r.x)), y0 = Math.max(0, Math.round(r.y));
   const x1 = Math.min(still.width, Math.round(r.x + r.width)), y1 = Math.min(still.height, Math.round(r.y + r.height));
-  if (x1 - x0 < MIN_CROP_SIDE || y1 - y0 < MIN_CROP_SIDE) return null;
+  if (x1 - x0 < minSide || y1 - y0 < minSide) return null;
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
@@ -475,10 +480,10 @@ export function resizeShape(s: Shape, handle: HandleName, p: Point, still: Size)
   }
 }
 
-/** The crop with `handle` dragged to `p`, kept inside the still; the old crop when the drag would make it too small. */
-export function resizeCrop(crop: Crop, handle: HandleName, p: Point, still: Size): Crop {
+/** The crop with `handle` dragged to `p`, kept inside the still; the old crop when the drag would make it smaller than `minSide`. */
+export function resizeCrop(crop: Crop, handle: HandleName, p: Point, still: Size, minSide: number = MIN_CROP_SIDE): Crop {
   const r = resizeRect(crop, handle, { x: Math.max(0, Math.min(still.width, p.x)), y: Math.max(0, Math.min(still.height, p.y)) }, 1);
-  return clampCrop(r, still) ?? crop;
+  return clampCrop(r, still, minSide) ?? crop;
 }
 
 export function moveCrop(crop: Crop, dx: number, dy: number, still: Size): Crop {
@@ -538,41 +543,19 @@ export function restartSequence(doc: AnnotationDocument): number {
 }
 
 // ---- undo / redo -----------------------------------------------------------------------------------------
+// The history itself is `lib/history.ts` (one for this editor and the walkthrough builder: commit, undo,
+// redo, canUndo, canRedo). What stays here is the document's own: WHEN two documents are the same - compared
+// as the server would store them (`serialise`), never by reference, so a click that moved nothing, a drag too
+// small to crop, a style pick that applied to nothing, and a difference under a hundredth of a pixel add no step.
 
-export interface History<T> { past: T[]; present: T; future: T[] }
-
-export function history<T>(present: T): History<T> {
-  return { past: [], present, future: [] };
+export function sameDocument(a: AnnotationDocument, b: AnnotationDocument): boolean {
+  return serialise(a) === serialise(b);
 }
 
-/**
- * A new present; the old one joins the past and the future is forgotten. Unlimited within the session. A
- * document EQUAL in content to the present (a click that moved nothing, a drag too small to crop, a style
- * pick that applied to nothing) is no change and adds no step - compared as the server would store it
- * (`serialise`), never by reference.
- */
-export function commit<T>(h: History<T>, next: T): History<T> {
-  if (next === h.present || sameContent(next, h.present)) return h;
-  return { past: [...h.past, h.present], present: next, future: [] };
+/** A history over an annotation document, made with the content-equality rule above. */
+export function history(present: AnnotationDocument): History<AnnotationDocument> {
+  return makeHistory(present, sameDocument);
 }
-
-function sameContent(a: unknown, b: unknown): boolean {
-  const doc = (v: unknown): v is AnnotationDocument => !!v && typeof v === "object" && Array.isArray((v as AnnotationDocument).shapes);
-  return doc(a) && doc(b) ? serialise(a) === serialise(b) : false;
-}
-
-export function undo<T>(h: History<T>): History<T> {
-  if (h.past.length === 0) return h;
-  return { past: h.past.slice(0, -1), present: h.past[h.past.length - 1], future: [h.present, ...h.future] };
-}
-
-export function redo<T>(h: History<T>): History<T> {
-  if (h.future.length === 0) return h;
-  return { past: [...h.past, h.present], present: h.future[0], future: h.future.slice(1) };
-}
-
-export const canUndo = <T,>(h: History<T>) => h.past.length > 0;
-export const canRedo = <T,>(h: History<T>) => h.future.length > 0;
 
 // ---- serialise / parse -----------------------------------------------------------------------------------
 

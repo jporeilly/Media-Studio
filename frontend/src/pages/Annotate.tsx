@@ -23,10 +23,11 @@ import { exportPng } from "../components/annotate/exportPng";
 import { loadImage } from "../components/annotate/loadImage";
 import { useLeaveGuard } from "../components/annotate/useLeaveGuard";
 import {
-  type AnnotationDocument, type History, type Size, type Style, type Tool, DEFAULT_STYLE, GONE_MESSAGE, MAX_ANNOTATE_PIXELS, TOO_BIG_MESSAGE,
-  UNSAVED_ASK, canRedo, canUndo, commit, currentSequence, deleteShape, emptyDocument, fitZoom, history, parseDocument, redo, restartSequence,
-  serialise, shapeById, toolForKey, undo, updateShape, zoomIn, zoomOut,
+  type AnnotationDocument, type Size, type Style, type Tool, DEFAULT_STYLE, GONE_MESSAGE, MAX_ANNOTATE_PIXELS, TOO_BIG_MESSAGE,
+  UNSAVED_ASK, currentSequence, deleteShape, emptyDocument, fitZoom, history, parseDocument, restartSequence,
+  serialise, shapeById, toolForKey, updateShape, zoomIn, zoomOut,
 } from "../lib/annotate";
+import { type History, canRedo, canUndo, commit, redo, undo } from "../lib/history";
 import { type Capture, captureOriginalUrl, captureQueryKey, capturesQueryKey } from "../lib/capture";
 
 /** The one shared style, remembered for the session (the next still opens with it). */

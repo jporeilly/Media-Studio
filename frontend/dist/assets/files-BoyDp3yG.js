@@ -1,0 +1,1 @@
+async function a(t){try{return await navigator.clipboard.writeText(t),!0}catch{return!1}}function c(t,n,r="text/markdown;charset=utf-8"){const o=URL.createObjectURL(new Blob([n],{type:r})),e=document.createElement("a");e.href=o,e.download=t,e.rel="noopener",document.body.appendChild(e),e.click(),e.remove(),setTimeout(()=>URL.revokeObjectURL(o),0)}export{a as c,c as d};

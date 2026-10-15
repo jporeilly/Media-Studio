@@ -1,6 +1,7 @@
 """Utility helper functions."""
 
 import os
+import re
 import shutil
 import time
 import hashlib
@@ -102,6 +103,29 @@ def publish_to_cache(source: Path, cache_path: Path) -> bool:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# A twelve-hex-character id: the shape every record folder under data/ is named by
+# (a project, a capture, a walkthrough and its steps). One regex, one check, so a
+# path is never built from an id that was not proven to be one.
+HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def is_hex12(value: str | None) -> bool:
+    return bool(HEX12_RE.fullmatch(value or ""))
+
+
+def file_under(base: Path, name: str) -> Path | None:
+    """``name`` inside the directory ``base``, proven to lie under it and to be
+    an existing file; None otherwise. The one idiom for "a file of a record's
+    folder": a name that walks out (``..``, an absolute path, a drive letter)
+    resolves elsewhere and is refused by the parents check, never served.
+    ``services.captures._under`` and ``services.walkthroughs`` both ask it."""
+    root = base.resolve()
+    path = (root / name).resolve()
+    if root not in path.parents or not path.is_file():
+        return None
+    return path
 
 
 def retry(max_attempts: int = 3, base_delay: float = 2.0, exceptions: tuple = (Exception,)):

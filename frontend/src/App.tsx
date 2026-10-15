@@ -13,6 +13,9 @@ const ProjectDetailPage = lazy(() => import("./pages/ProjectDetail"));
 const DocsPage = lazy(() => import("./pages/Docs"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const AnnotatePage = lazy(() => import("./pages/Annotate"));
+const WalkthroughsPage = lazy(() => import("./pages/Walkthroughs"));
+const WalkthroughBuilderPage = lazy(() => import("./pages/WalkthroughBuilder"));
+const WalkthroughPlayPage = lazy(() => import("./pages/WalkthroughPlay"));
 
 function RequireAuth({ children }: { children: React.ReactElement }) {
   const { user, loading } = useAuth();
@@ -33,12 +36,17 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* The walkthrough player (W1): full window, OUTSIDE the Shell, signed in like everything else. */}
+      <Route path="/walkthroughs/:id/play" element={<RequireAuth><Lazy><WalkthroughPlayPage /></Lazy></RequireAuth>} />
       <Route element={<RequireAuth><Shell /></RequireAuth>}>
         <Route index element={<DashboardPage />} />
         <Route path="/projects" element={<Lazy><ProjectsPage /></Lazy>} />
         <Route path="/projects/:id" element={<Lazy><ProjectDetailPage /></Lazy>} />
         {/* Annotate a still (T3b): pure web, so not behind the capture hide rule - the browser edition too. */}
         <Route path="/captures/:id/annotate" element={<Lazy><AnnotatePage /></Lazy>} />
+        {/* Walkthroughs (W1): the list and the builder; pure web too, the browser edition has them. */}
+        <Route path="/walkthroughs" element={<Lazy><WalkthroughsPage /></Lazy>} />
+        <Route path="/walkthroughs/:id" element={<Lazy><WalkthroughBuilderPage /></Lazy>} />
         {/* The splat carries the document's own path (`docs/guides/timeline`),
             so every document is a link anyone can send. */}
         <Route path="/docs/*" element={<Lazy><DocsPage /></Lazy>} />

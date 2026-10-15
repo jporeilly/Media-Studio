@@ -88,8 +88,8 @@ SECTION_ORDER = [
 #: ``tests/test_docs.py`` fails until it is given its place.
 READING_ORDER: dict[str, tuple[str, ...]] = {
     "guides": (
-        "getting-started.md", "projects.md", "capture.md", "slide-editor.md", "ai-assistant.md", "generate-video.md",
-        "transcript.md", "re-voice.md", "timeline.md", "music.md", "markers-and-chapters.md", "jobs.md",
+        "getting-started.md", "projects.md", "capture.md", "walkthroughs.md", "slide-editor.md", "ai-assistant.md",
+        "generate-video.md", "transcript.md", "re-voice.md", "timeline.md", "music.md", "markers-and-chapters.md", "jobs.md",
     ),
     "admin": (
         "accounts-and-roles.md", "password-policy.md", "studio-settings.md", "updates.md", "audit-log.md",

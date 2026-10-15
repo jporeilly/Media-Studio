@@ -1,8 +1,8 @@
 # Keyboard shortcuts
 
-Every key the Timeline, the slide editor, the annotation editor and the screen recorder answer to.
+Every key the Timeline, the slide editor, the annotation editor, the walkthrough builder and player, and the screen recorder answer to.
 
-The Timeline's keys are ignored while you are typing in a box and while the music library is open; the slide editor's arrows are ignored in a field and while a dialog is open; the annotation editor's keys are ignored while you are typing in a text box, except Ctrl+S, which keeps the text and saves.
+The Timeline's keys are ignored while you are typing in a box and while the music library is open; the slide editor's arrows are ignored in a field and while a dialog is open; the annotation editor's keys are ignored while you are typing in a text box, except Ctrl+S, which keeps the text and saves; the walkthrough builder's Undo and Redo are ignored while you are typing in a box, and its Ctrl+S saves from anywhere.
 
 ## The Timeline
 
@@ -61,6 +61,28 @@ Keys pressed with **Alt** held are left to the browser, except the nudge keys, w
 | **Ctrl+S** | Save (in a text box too: keeps the text, then saves) |
 | **+** / **−** / **0** | Zoom in / zoom out / fit the whole still (**=** and **_** work as **+** and **−**) |
 
+## The walkthrough builder
+
+| Key | What it does |
+| --- | --- |
+| **Ctrl+S** | Save the whole walkthrough (from a text box too) |
+| **Ctrl+Z** / **Ctrl+Y** | Undo / redo over the whole walkthrough (Ctrl+Shift+Z redoes as well); not while typing in a box |
+| **Escape** (while dragging the hotspot) | Put the hotspot back as it was |
+| **Enter** (in the New walkthrough name box, on the list) | Create it |
+
+## The walkthrough player
+
+| Key | What it does |
+| --- | --- |
+| **→**, **Space**, **Enter** | Go on (on the last step, finish); Enter or Space on a focused button (the hotspot, Next, a chapter) is that button's click |
+| **←** | Go back (from the end card, back to the last step) |
+| **Home** / **End** | The first / the last step |
+| **T** | Open or close the transcript drawer (not while typing) |
+| **↑** / **↓** (with the Chapters menu open) | Move within the menu, wrapping round; **Enter** opens the chapter |
+| **Escape** | Close the transcript if it is open, else the Chapters menu if it is open, else leave the player: to the builder it was opened from, else to the list |
+| A click on the hotspot | Go on |
+| A click on the picture outside the hotspot | Make the hotspot pulse once more; it does not go on |
+
 ## Screen recording (desktop app)
 
 While a recording runs these work from anywhere, whichever window has the focus, as in Snagit.
@@ -79,3 +101,4 @@ The keys are taken from the countdown until the recording stops, and not otherwi
 - [The slide editor](../guides/slide-editor.md)
 - [Markers and chapters](../guides/markers-and-chapters.md)
 - [Screen capture](../guides/capture.md): taking and annotating a still
+- [Walkthroughs](../guides/walkthroughs.md): the builder and the player
