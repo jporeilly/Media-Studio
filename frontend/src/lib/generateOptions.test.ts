@@ -26,6 +26,7 @@ const STUDIO: StudioSettings = {
   watermark_position: "top-left",
   watermark_opacity: 0.3,
   courses_folder: "",
+  courses_export: false,
 };
 
 const TRANSITIONS: Option[] = [

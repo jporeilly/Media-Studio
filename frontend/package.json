@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 5681",
-    "build": "tsc --noEmit && vite build && node scripts/build-info.mjs",
+    "build": "tsc --noEmit && vite build && vite build --mode player && node scripts/build-info.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

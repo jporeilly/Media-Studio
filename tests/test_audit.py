@@ -58,6 +58,13 @@ AUDIT_EXEMPT: dict[str, str] = {
         "the user then captures is audited where it is made: capture.still for a "
         "still, recording.start for a recording."
     ),
+    "api.routers.walkthroughs.export_course_plan": (
+        "Export to course's preview (W2c): it reads the walkthrough and the "
+        "workshop's guide and answers what the export would write, writing "
+        "nothing; a POST only because it takes options (the player or not). The "
+        "write itself is audited (walkthrough.export_course), as the zips, both "
+        "reads, are not."
+    ),
     "api.routers.capture.forget_frozen": (
         "Deletes those throwaway overlay pictures once they have served: "
         "housekeeping of files no user made or named, with no record to change."

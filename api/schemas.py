@@ -4,7 +4,7 @@ import re
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import (
-    AfterValidator, BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, StringConstraints, ValidationError,
+    AfterValidator, BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, StringConstraints, ValidationError,
     field_validator, model_validator,
 )
 
@@ -63,6 +63,7 @@ class StudioSettingsIn(BaseModel):
     watermark_position: str | None = None
     watermark_opacity: StrictFloat | None = None
     courses_folder: str | None = None
+    courses_export: StrictBool | None = None
 
 
 class LoginRequest(BaseModel):
@@ -730,6 +731,33 @@ class WorkshopSourceIn(BaseModel):
     launcher: str | None = Field(None, max_length=walkthrough_rules.MAX_SOURCE_PATH_CHARS)
 
 
+class WorkshopCaptureSourceIn(WorkshopSourceIn):
+    """An imported step whose picture a capture replaced (W2c): the workshop's fields KEPT - so the step still
+    says where in the guide it came from - with the capture's merged in (``services.walkthroughs.captured_source``;
+    ``image`` is then null: the picture is no longer the guide's). Informational only."""
+
+    capture_id: Hex12
+    annotated: bool = False
+
+
+class AnchorIn(BaseModel):
+    """Where an imported step is in its guide (W2c): the key (its section and its first sentence, normalised -
+    ``services.workshops.anchor_key``) and the ordinal among the guide's steps with that key. Set by the import,
+    kept by the server through every save; Export to course places the step's figure by it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=walkthrough_rules.MAX_ANCHOR_KEY_CHARS)
+    ordinal: StrictInt = Field(ge=1, le=walkthrough_rules.MAX_ANCHOR_ORDINAL)
+
+    @field_validator("key")
+    @classmethod
+    def _one_line(cls, value: str) -> str:
+        if _NAME_CONTROL_RE.search(value):
+            raise ValueError("An anchor's key may not contain control characters.")
+        return value
+
+
 class StepIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -745,7 +773,9 @@ class StepIn(BaseModel):
     placement: WalkthroughPlacement = "auto"
     chapter: ChapterName = ""
     note: str = Field("", max_length=walkthrough_rules.MAX_NOTE_CHARS)
-    source: StepSourceIn | WorkshopSourceIn | None = None
+    source: StepSourceIn | WorkshopCaptureSourceIn | WorkshopSourceIn | None = None
+    #: W2c: where an imported step is in its guide; None for any other step (the save keeps the record's own).
+    anchor: AnchorIn | None = None
 
     @field_validator("text", "instruction", "note")
     @classmethod

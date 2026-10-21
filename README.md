@@ -38,7 +38,12 @@ the whole app suite looks and feels the same.
   of the narrated video to come. Or import a course workshop: its sections become the chapters,
   its numbered steps the steps with their instructions and the guide's screenshots, and the
   desktop app captures the rest as you perform them - every click a step, Shift+F8 for a still
-  without one - placing each hotspot where you clicked or the pointer was.
+  without one - placing each hotspot where you clicked or the pointer was. Export to course then
+  writes the captured steps back into the workshop's guide, each as the content manager's
+  annotated figure (previewed as a diff first; written only when an administrator allows it, else
+  as a zip) - its pin at the hotspot shows once the Content Manager renders that form, which it
+  does not yet - and the walkthrough downloads as an interactive player that opens offline in a
+  web browser.
 - **An AI assistant on the slides.** A local Ollama model writes and rewrites speaker
   notes, reviews them for grammar, tone, flow and transitions and fixes what it finds,
   adapts them to an audience, translates them, paces them, scores the deck for video and
@@ -56,8 +61,8 @@ The app's **Docs** page has a guide for each of these. What changed in each rele
 when, is in [CHANGELOG.md](CHANGELOG.md).
 
 **Still to come:** rendering a walkthrough as a narrated video (the next round: the narration
-from each step's instruction, a zoom to its hotspot, the chapters), then sharing one (a link, an
-embed snippet and an export as a self-contained HTML page); the transition-sound library,
+from each step's instruction, a zoom to its hotspot, the chapters), then sharing one (a link and
+an embed snippet); the transition-sound library,
 and the rest of the administration work: notifications, a branding lock, an administration page
 of its own, and per-kind job limits. Until parity, the NiceGUI app remains the shipping product; its source lives at
 `jporeilly/slidestudio-enterprise` (no longer checked out on the development machine).

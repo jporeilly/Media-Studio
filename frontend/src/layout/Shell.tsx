@@ -1,6 +1,6 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Clapperboard, FileText, FolderOpen, Footprints, LayoutDashboard, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
+import { Clapperboard, FileText, FolderOpen, LayoutDashboard, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { CaptureProvider } from "../context/CaptureContext";
@@ -9,21 +9,28 @@ import { Avatar, Select } from "../components/ui";
 
 const BRAND_NAME = "Media Studio";
 
-interface NavItem { to: string; label: string; icon: React.ReactNode }
+/** A sidebar entry; `also` names the pages reached from it that light it too (a tile's pages light the Dashboard). */
+interface NavItem { to: string; label: string; icon: React.ReactNode; also?: string[] }
 
+// The Dashboard's tiles have no entries of their own (W2c, C9: Walkthroughs left the sidebar, as Captures never had
+// one): the tile is the way in, and the pages it opens light the Dashboard.
 const NAV: NavItem[] = [
-  { to: "/", label: "Dashboard", icon: <LayoutDashboard size={18} /> },
+  { to: "/", label: "Dashboard", icon: <LayoutDashboard size={18} />, also: ["/walkthroughs"] },
   { to: "/projects", label: "Projects", icon: <FolderOpen size={18} /> },
-  // Walkthroughs (W1): shown everywhere - the list, the builder and the player touch no screen.
-  { to: "/walkthroughs", label: "Walkthroughs", icon: <Footprints size={18} /> },
   { to: "/docs", label: "Docs", icon: <FileText size={18} /> },
   { to: "/settings", label: "Settings", icon: <SettingsIcon size={18} /> },
 ];
+
+/** Whether `pathname` is one of the pages `prefixes` name: the page itself or a page under it. */
+function underAny(pathname: string, prefixes: string[] | undefined): boolean {
+  return (prefixes ?? []).some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
 
 export function Shell() {
   const { user, logout } = useAuth();
   const { dark, setDark, accent, setAccent } = useTheme();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const version = useQuery({
     queryKey: ["system-health"],
     queryFn: () => api.get<{ status: string; version: string }>("/api/system/health"),
@@ -40,7 +47,7 @@ export function Shell() {
           <Clapperboard size={24} /> {BRAND_NAME}
         </div>
         {NAV.map((item) => (
-          <NavLink key={item.to} to={item.to} end={item.to === "/"} className={({ isActive }) => `os-nav-item ${isActive ? "active" : ""}`}>
+          <NavLink key={item.to} to={item.to} end={item.to === "/"} className={({ isActive }) => `os-nav-item ${isActive || underAny(pathname, item.also) ? "active" : ""}`}>
             {item.icon}
             <span>{item.label}</span>
           </NavLink>

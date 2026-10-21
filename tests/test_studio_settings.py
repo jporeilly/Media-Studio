@@ -43,6 +43,7 @@ def test_defaults_when_nothing_is_stored():
         "watermark_position": "bottom-right",
         "watermark_opacity": 0.5,
         "courses_folder": "",  # W2: not set until an administrator points the app at a courses folder
+        "courses_export": False,  # W2c: Export to course writes into the courses folder only once an administrator allows it
     }
     assert DEFAULT_CONFIG["courses_folder"] == ""
     # The generation defaults are the engine's own (utils/config.py DEFAULT_CONFIG).
@@ -147,6 +148,9 @@ def test_empty_update_writes_nothing(monkeypatch):
         ("courses_folder", "relative/courses", "must be an absolute path"),
         ("courses_folder", 5, "must be a path"),
         ("courses_folder", None, "must be a path"),
+        ("courses_export", "yes", "is on or off"),
+        ("courses_export", 1, "is on or off"),
+        ("courses_export", None, "is on or off"),
         ("brand_colour", "red", "Unknown setting: brand_colour"),
     ],
 )

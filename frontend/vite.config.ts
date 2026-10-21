@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import type { Plugin, UserConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 /*
@@ -40,11 +41,79 @@ function vendorChunk(id: string, getModuleInfo: GetModuleInfo): string | undefin
   return undefined;
 }
 
+/*
+ * The interactive player bundle (W2c, C7): `vite build --mode player` builds src/player/main.tsx on its own -
+ * one IIFE (a classic script, so a page opened from the disk runs it), the theme's CSS beside it - and this
+ * plugin folds both into ONE page, dist/walkthrough-player.html, writing nothing else. The server fills the
+ * page's data slot with a walkthrough (services/course_export.py: PLAYER_DATA_SLOT and PLAYER_TITLE_SLOT, the
+ * two strings below), and it opens offline, the pictures beside it. `</script` and `</style` inside the code
+ * are escaped so no string can end its element early.
+ */
+export const PLAYER_PAGE = "walkthrough-player.html";
+
+function playerPage(js: string, css: string): string {
+  const script = js.replace(/<\/script/gi, "<\\/script");
+  const style = css.replace(/<\/style/gi, "<\\/style");
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="UTF-8" />',
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0" />',
+    "<title>Walkthrough</title>",
+    `<style>${style}</style>`,
+    "</head>",
+    "<body>",
+    '<div id="root"></div>',
+    '<script type="application/json" id="walkthrough-data">null</script>',
+    `<script>${script}</script>`,
+    "</body>",
+    "</html>",
+    "",
+  ].join("\n");
+}
+
+function inlinePlayer(): Plugin {
+  return {
+    name: "media-studio-inline-player",
+    apply: "build",
+    // After Vite's own plugins: the stylesheet is emitted by its CSS plugin in this same hook.
+    enforce: "post",
+    generateBundle(_options, bundle) {
+      let js = "";
+      let css = "";
+      for (const [name, item] of Object.entries(bundle)) {
+        if (item.type === "chunk") js += item.code;
+        else if (name.endsWith(".css")) css += typeof item.source === "string" ? item.source : new TextDecoder().decode(item.source);
+        delete bundle[name];
+      }
+      this.emitFile({ type: "asset", fileName: PLAYER_PAGE, source: playerPage(js, css) });
+    },
+  };
+}
+
+const playerConfig: UserConfig = {
+  plugins: [react(), inlinePlayer()],
+  publicDir: false,
+  build: {
+    outDir: "dist",
+    emptyOutDir: false,
+    sourcemap: false,
+    cssCodeSplit: false,
+    assetsInlineLimit: Number.MAX_SAFE_INTEGER,
+    chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      input: "src/player/main.tsx",
+      output: { format: "iife", inlineDynamicImports: true, entryFileNames: "player.js", assetFileNames: "player[extname]" },
+    },
+  },
+};
+
 // Dev server proxies API and uploads to the FastAPI backend (python main.py, port 5680).
 // changeOrigin stays false so the session cookie ("ms_session") is preserved across the proxy.
 // 5681 pairs with the 5680 backend; 5273 (the previous choice) collided with the Pentaho
 // Content Editor's Vite on the same machine.
-export default defineConfig({
+export default defineConfig(({ mode }) => (mode === "player" ? playerConfig : {
   plugins: [react()],
   server: {
     port: 5681,
@@ -81,4 +150,4 @@ export default defineConfig({
     // test imports a stylesheet (only main.tsx does), so nothing else changes.
     css: true,
   },
-});
+}));

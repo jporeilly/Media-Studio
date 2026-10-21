@@ -14,7 +14,7 @@ On a fresh install the app creates one account, `admin` with the password `admin
 
 ### The shell
 
-Once you are in, the sidebar lists **Dashboard**, **Projects**, **Walkthroughs**, **Docs** and **Settings**, then your avatar, display name and role, and at the foot the version the server reports. The top bar has three controls: **Accent colour** (Teal, Slate, Blue, Indigo, Purple, Green, Orange or Rose), **Toggle dark / light**, and **Log out**. The theme starts dark and Teal and is remembered in this browser, not on your account.
+Once you are in, the sidebar lists **Dashboard**, **Projects**, **Docs** and **Settings** (Walkthroughs has no entry of its own: its Dashboard tile opens it, and the sidebar lights **Dashboard** while you are on the walkthroughs' list or builder), then your avatar, display name and role, and at the foot the version the server reports. The top bar has three controls: **Accent colour** (Teal, Slate, Blue, Indigo, Purple, Green, Orange or Rose), **Toggle dark / light**, and **Log out**. The theme starts dark and Teal and is remembered in this browser, not on your account.
 
 ### The dashboard
 

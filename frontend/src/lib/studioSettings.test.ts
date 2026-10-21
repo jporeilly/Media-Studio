@@ -17,6 +17,7 @@ const SAVED: StudioSettings = {
   watermark_position: "bottom-right",
   watermark_opacity: 0.5,
   courses_folder: "",
+  courses_export: false,
 };
 
 const VOICES: Voice[] = [

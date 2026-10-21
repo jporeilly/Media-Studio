@@ -17,9 +17,18 @@ walkthrough's transcript, and later its narration; "" when not written),
 text, for the narrated video to come - the player does not show it) and
 ``source`` (where the picture came from, informational only: ``{capture_id,
 annotated}`` for a still, ``{course, slug, image, alt, launcher}`` for a step
-imported from a course workshop). A record from before ``instruction`` or
-``note`` existed reads as ``""`` for every step (:func:`get_walkthrough` fills
-them in).
+imported from a course workshop - and, since W2c, the two merged once a
+capture replaced an imported step's picture: the workshop fields kept,
+``image`` null, :func:`captured_source`). A record from before ``instruction``
+or ``note`` existed reads as ``""`` for every step (:func:`get_walkthrough`
+fills them in).
+
+**An imported step knows where it is in its guide** (W2c): ``anchor``
+(``{key, ordinal}``, ``services.workshops.anchor_key``) is set by the import
+and kept by every replaced picture and every save (:func:`keep_anchor`: the
+record's own anchor for the step's id wins - the builder neither edits nor
+sends it); Export to course (``services.course_export``) places the step's
+figure by it.
 
 **A step may have no picture yet** (W2): a workshop step the guide showed no
 screenshot for imports with ``image`` null and ``width`` / ``height`` 0 and no
@@ -91,6 +100,10 @@ MAX_NOTE_CHARS = 4000
 #: Characters of a step's informational source fields (W2): a guide image's or a launcher's path, and an image's alt text.
 MAX_SOURCE_PATH_CHARS = 400
 MAX_ALT_CHARS = 2000
+#: W2c, a step's anchor in its guide: characters of its key (the section and the first sentence, normalised), and its
+#: ordinal at most - the parse's own bound on a guide's steps (``services.workshops.MAX_PARSE_STEPS``, a test pins it).
+MAX_ANCHOR_KEY_CHARS = 400
+MAX_ANCHOR_ORDINAL = 500
 #: A control character a step's text, instruction or note may not carry - a tab and a line break are allowed, a
 #: CR is normalised away: THE one rule, read by ``api.schemas.StepIn`` (the refusal) and by the workshop parser
 #: (``services.workshops.plain_text`` and its code lines strip them), so an import never writes what a save refuses.
@@ -426,6 +439,30 @@ def clamp_hotspot(hotspot: dict | None, width: int, height: int) -> dict | None:
 #: ``replace_picture``'s "keep the step's own hotspot" (the default): a value no caller's hotspot can be.
 KEEP_HOTSPOT = object()
 
+
+def is_workshop_source(source) -> bool:
+    """Whether a step's ``source`` says it came from a course workshop (W2: ``{course, slug, …}``)."""
+    return isinstance(source, dict) and bool(source.get("course")) and bool(source.get("slug"))
+
+
+def has_guide_picture(step: dict) -> bool:
+    """Whether the step's picture is the guide's own (W2c): imported with the step, never replaced since -
+    its workshop ``source`` still names the guide's ``image``. Export to course never writes such a step."""
+    source = step.get("source")
+    return has_picture(step) and is_workshop_source(source) and bool(source.get("image"))
+
+
+def captured_source(old, capture_id: str, annotated: bool) -> dict:
+    """The ``source`` of a step whose picture a capture has just replaced (W2c, C1): a workshop step KEEPS where
+    it came from - its course, slug, alt text and launcher - with ``image`` null (the picture is no longer the
+    guide's) and the capture's ``capture_id`` and ``annotated`` merged in; any other step's is the capture's own
+    ``{capture_id, annotated}``, as before W2c."""
+    capture = {"capture_id": capture_id, "annotated": bool(annotated)}
+    if not is_workshop_source(old):
+        return capture
+    return {"course": old["course"], "slug": old["slug"], "image": None, "alt": old.get("alt") or "",
+            "launcher": old.get("launcher"), **capture}
+
 #: W2b, the frame of a guided capture's run (Window kind: the widest width x the tallest height of its
 #: stills so far). A smaller still is drawn centred on a TRANSPARENT canvas of the frame's size (alpha 0
 #: outside the still, the still itself opaque), so the run's pictures are one size and the player's
@@ -500,9 +537,10 @@ def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT, f
         index, step = found
         image, width, height, annotated, placement = _copy_picture(wid, sid, capture_id, frame=frame)
         wanted = step.get("hotspot") if hotspot is KEEP_HOTSPOT else hotspot_in_frame(hotspot, placement)
+        # The step's anchor stays (``{**step}``); a workshop step keeps where in the guide it came from (W2c).
         step = {**step, "image": image, "width": width, "height": height,
                 "hotspot": clamp_hotspot(wanted, width, height),
-                "source": {"capture_id": capture_id, "annotated": annotated}}
+                "source": captured_source(step.get("source"), capture_id, annotated)}
         rec["steps"][index] = step
         rec["revision"] = int(rec.get("revision") or 1) + 1
         rec["updated_at"] = _now()
@@ -526,6 +564,18 @@ def _sweep_pictures(wid: str, keep: set[str]) -> int:
     return gone
 
 
+def keep_anchor(step: dict, rec: dict) -> dict:
+    """A saved step with its anchor (W2c, C1): the anchor the record holds for the step's id - the server's,
+    set by the import; the builder never edits it and does not send it - else the one the document carries,
+    else none (no ``anchor`` key, as a record from before W2c reads)."""
+    held = next((s.get("anchor") for s in rec.get("steps") or [] if s.get("id") == step.get("id")), None)
+    anchor = held or step.get("anchor")
+    step.pop("anchor", None)
+    if anchor:
+        step["anchor"] = dict(anchor)
+    return step
+
+
 def save(wid: str, document: dict, revision: int) -> dict:
     """Replace the whole walkthrough with ``document`` (already validated by
     ``api.schemas.WalkthroughIn`` against the pictures the folder holds):
@@ -539,7 +589,7 @@ def save(wid: str, document: dict, revision: int) -> dict:
         current = int(rec.get("revision") or 1)
         if int(revision) != current:
             raise StaleRevision(STALE_MESSAGE)
-        steps = [dict(s) for s in document.get("steps") or []]
+        steps = [keep_anchor(dict(s), rec) for s in document.get("steps") or []]
         rec = {
             **rec,
             "name": (document.get("name") or "").strip()[:MAX_NAME_CHARS] or rec.get("name") or "Walkthrough",
@@ -644,12 +694,16 @@ def create_from_workshop(name: str, owner_id: str | None, owner_name: str | None
                     image, width, height = None, 0, 0
             if image is None and "image" in step_source:
                 step_source["image"] = None
-            out.append({
+            made = {
                 "id": sid, "image": image, "width": width, "height": height, "hotspot": None,
                 "kind": "tooltip", "text": parsed.get("text") or "", "instruction": parsed.get("instruction") or "",
                 "placement": "auto", "chapter": parsed.get("chapter") or "", "note": parsed.get("note") or "",
                 "source": step_source,
-            })
+            }
+            if parsed.get("anchor"):
+                # W2c: where in the guide the step is - kept through every replaced picture and save (C1).
+                made["anchor"] = dict(parsed["anchor"])
+            out.append(made)
         record = {
             "id": wid, "name": (name or "").strip()[:MAX_NAME_CHARS] or "Walkthrough",
             "owner_id": owner_id, "owner_name": owner_name,

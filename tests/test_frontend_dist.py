@@ -67,6 +67,19 @@ def test_built_ui_matches_the_source():
     )
 
 
+def test_the_walkthrough_player_page_is_built():
+    """W2c (K7): the interactive player is a page of its own, `walkthrough-player.html`, built by `npm run build`
+    (`vite build --mode player`) and read by the server for every player export. Its source is in the fingerprint
+    (`src/player/**`, `lib/playerBundle.ts`, `vite.config.ts`, `package.json`); this pins the artifact itself, so a
+    commit of `frontend/dist` without it - every player export a 503 on an installed app - fails here."""
+    page = DIST / "walkthrough-player.html"
+    assert page.is_file(), f"frontend/dist/walkthrough-player.html is missing - {REBUILD_HINT}"
+    html = page.read_text(encoding="utf-8")
+    assert '<script type="application/json" id="walkthrough-data">null</script>' in html, "the page has no data slot for the server to fill"
+    assert "<title>Walkthrough</title>" in html and re.search(r"<style>[^<]*\.ms-player\{", html), "the title slot and the inline styles"
+    assert not re.search(r"<script[^>]+src=|<link\b", html), "one self-contained page: no script or stylesheet by address"
+
+
 def test_index_references_only_assets_that_exist():
     """A partial commit of dist (index.html without its hashed chunks) would 404 at runtime."""
     html = (DIST / "index.html").read_text(encoding="utf-8")

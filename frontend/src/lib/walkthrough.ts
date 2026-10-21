@@ -61,8 +61,14 @@ export const PLACEMENT_LABELS: Record<Placement, string> = { auto: "Auto", top: 
 export interface Hotspot { x: number; y: number; width: number; height: number }
 /** Where a step's picture came from (informational): a still, or a course workshop's guide (W2). */
 export interface CaptureSource { capture_id: string; annotated: boolean }
-export interface WorkshopSource { course: string; slug: string; image: string | null; alt: string; launcher: string | null }
+/**
+ * A step imported from a course workshop (W2). Once a capture replaced its picture (W2c) it keeps the workshop's
+ * fields - `image` then null, the picture no longer the guide's - with the capture's `capture_id` and `annotated`.
+ */
+export interface WorkshopSource { course: string; slug: string; image: string | null; alt: string; launcher: string | null; capture_id?: string; annotated?: boolean }
 export type StepSource = CaptureSource | WorkshopSource;
+/** Where an imported step is in its guide (W2c): set by the import, kept by the server through every save. */
+export interface StepAnchor { key: string; ordinal: number }
 /** The workshop a walkthrough was imported from (W2), on the record. */
 export interface WalkthroughSource { course: string; slug: string; title: string; version: string }
 
@@ -90,6 +96,11 @@ export interface Step {
   note: string;
   /** Where the picture came from: informational only. */
   source: StepSource | null;
+  /**
+   * Where an imported step is in its guide (W2c, read by Export to course). The server's alone: the builder neither
+   * edits nor sends it (`normaliseStep` leaves it out), and every save keeps the record's own.
+   */
+  anchor?: StepAnchor | null;
 }
 
 /** What the builder edits and the history holds: the name and the steps; the revision is kept beside it. */

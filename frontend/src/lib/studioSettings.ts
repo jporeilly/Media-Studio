@@ -23,6 +23,8 @@ export interface StudioSettings {
   watermark_opacity: number;
   /** The folder of courses the Walkthroughs page imports workshops from (W2); "" when not set. */
   courses_folder: string;
+  /** "Allow export into the Courses folder" (W2c): off by default; on, Export to course may write into a course. */
+  courses_export: boolean;
 }
 
 /** One selectable value, with the note the form shows as its hint. */

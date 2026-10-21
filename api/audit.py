@@ -102,6 +102,11 @@ WALKTHROUGH_DELETE = "walkthrough.delete"
 # and each picture attached a walkthrough.replace_picture row).
 WALKTHROUGH_IMPORT = "walkthrough.import"
 WALKTHROUGH_GUIDED_CAPTURE = "walkthrough.guided_capture"
+# W2c: a walkthrough's figures written into its course workshop's guide (the
+# detail: "<course>/<slug>: N figures, M images", and ", player" when the
+# interactive player was written beside the guide too). The plan and the two
+# zips are reads and write no row.
+WALKTHROUGH_EXPORT_COURSE = "walkthrough.export_course"
 
 # The music library (``services.music``): studio-wide, so the row is what says
 # who put a file there or took it away. The detail carries the name and the
@@ -145,7 +150,7 @@ ACTIONS: tuple[str, ...] = (
     RECORDING_START, RECORDING_FINISH, RECORDING_DISCARD, CAPTURE_STILL, CAPTURE_ADD_TO_DECK, CAPTURE_DELETE,
     CAPTURE_REFUSED, CAPTURE_ANNOTATE, CAPTURE_REVERT,
     WALKTHROUGH_CREATE, WALKTHROUGH_UPDATE, WALKTHROUGH_ADD_STEP, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_DUPLICATE,
-    WALKTHROUGH_DELETE, WALKTHROUGH_IMPORT, WALKTHROUGH_GUIDED_CAPTURE,
+    WALKTHROUGH_DELETE, WALKTHROUGH_IMPORT, WALKTHROUGH_GUIDED_CAPTURE, WALKTHROUGH_EXPORT_COURSE,
 )
 
 # What the action was done to (the ``entity`` column).

@@ -636,6 +636,11 @@ WALKTHROUGH_ROUTES: dict[tuple[str, str], dict | None] = {
     ("POST", "/api/walkthroughs/{wid}/duplicate"): None,
     # W2: the guided capture's audit row.
     ("POST", "/api/walkthroughs/{wid}/guided-capture"): {"event": "start"},
+    # W2c: Export to course - the plan, the write, the course zip and the player zip.
+    ("POST", "/api/walkthroughs/{wid}/export/course/plan"): None,
+    ("POST", "/api/walkthroughs/{wid}/export/course"): {"guide_sha256": "0" * 64},
+    ("GET", "/api/walkthroughs/{wid}/export/course.zip"): None,
+    ("GET", "/api/walkthroughs/{wid}/export/player.zip"): None,
 }
 
 

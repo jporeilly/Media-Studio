@@ -3,6 +3,11 @@ a step from a still, a step's picture replaced, the player's pictures, a copy
 and a delete. W2 adds the import of a course workshop (``POST /import``: a
 new walkthrough built from the guide's parse, its pictures copied from the
 course) and the guided capture's audit row (``POST /{wid}/guided-capture``).
+W2c adds Export to course (``services.course_export``): the plan
+(``POST /{wid}/export/course/plan``), the guarded write (``POST
+/{wid}/export/course``, behind the studio setting), the same as a zip (``GET
+/{wid}/export/course.zip``) and the interactive player as a zip (``GET
+/{wid}/export/player.zip``).
 
 Every route takes ``current_user`` and answers the owner or an administrator,
 as a project's do (``api.deps.may_access_project`` on the record). Nothing
@@ -16,22 +21,25 @@ own ``_owned`` decides (404 / 403 as there).
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
 
 from api.audit import (
-    WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE, WALKTHROUGH_GUIDED_CAPTURE,
-    WALKTHROUGH_IMPORT, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_UPDATE, audit,
+    WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE, WALKTHROUGH_EXPORT_COURSE,
+    WALKTHROUGH_GUIDED_CAPTURE, WALKTHROUGH_IMPORT, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_UPDATE, audit,
 )
 from api.body import capped_body
 from api.deps import current_user, may_access_project
 from api.routers.captures import _owned as owned_capture
 from api.schemas import HotspotIn, WalkthroughIn, WalkthroughName, plain_validation_error
 from api.store import display_name_of
-from services import walkthroughs, workshops
+from services import course_export, studio_settings, walkthroughs, workshops
 from services.recordings import safe_stem
 from utils.helpers import is_hex12
 
@@ -330,6 +338,105 @@ def transcript(wid: str, download: bool = Query(default=False), user: dict = Dep
     if download:
         headers["Content-Disposition"] = f'attachment; filename="{safe_stem(rec.get("name") or "", "walkthrough")}.md"'
     return Response(content=walkthroughs.transcript_markdown(rec), media_type="text/markdown; charset=utf-8", headers=headers)
+
+
+# -- Export to course (W2c) -------------------------------------------------------------------------------
+
+class ExportPlanIn(BaseModel):
+    """The plan's options: whether the interactive player is written beside the guide too (C7)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    player: StrictBool = False
+
+
+class ExportCourseIn(ExportPlanIn):
+    """The write (C5): the guide's sha256 as the plan showed it - a guide changed since is refused with 409."""
+
+    guide_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@contextmanager
+def _export_refusals():
+    """Every refusal of an export as its status: 409 the guide changed since the plan; 400 not imported, no
+    courses folder, an unreadable course or guide, a link where a folder should be; 503 no player bundle; 404 a
+    course or workshop no longer there. Nothing is written in any of them."""
+    try:
+        yield
+    except course_export.GuideChanged as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except (course_export.NotImported, workshops.NoCoursesFolder, workshops.UnreadableCourse, course_export.ExportRefused) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except course_export.PlayerNotBuilt as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+def _zip_response(path: Path, stem: str) -> FileResponse:
+    """The zip's temporary file, streamed from the disk and removed once it is sent (K6)."""
+    headers = {**NO_STORE, "Content-Disposition": f'attachment; filename="{safe_stem(stem, "walkthrough")}.zip"'}
+    return FileResponse(str(path), media_type="application/zip", headers=headers, background=BackgroundTask(_remove_quietly, path))
+
+
+def _remove_quietly(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:  # held open for a moment by a scanner: the system's temporary folder is cleaned anyway
+        pass
+
+
+@router.post("/{wid}/export/course/plan")
+def export_course_plan(wid: str, body: ExportPlanIn | None = None, user: dict = Depends(current_user)):
+    """The dry run of Export to course (C2): the workshop's CURRENT guide re-parsed, each step with a picture
+    Media Studio took placed (never the guide's own pictures: "already in the guide"), and the answer - the
+    steps placed (number, the guide's first sentence, the picture's name, the hotspot in percent), those not
+    placed and why, those skipped, the files it would write or remove, the guide's sha256 now, the new
+    ``guide.md`` as a unified diff, and whether the studio allows the write. Nothing is written; no audit row."""
+    rec = _owned(wid, user)
+    with _export_refusals():
+        return course_export.plan_view(course_export.compute(rec, player=bool(body and body.player)))
+
+
+@router.post("/{wid}/export/course")
+def export_course(wid: str, body: ExportCourseIn, user: dict = Depends(current_user)):
+    """Write the export into the course (C5): 403 while the studio setting "Allow export into the Courses
+    folder" is off; 409 "The guide changed since the preview: preview again." when the guide's sha256 is not
+    the plan's (nothing written); else the pictures, the player when asked, then ``guide.md`` (its line endings
+    kept), each atomically and only inside the course's own folder (a link or junction refused, 400). A file it
+    cannot write (read-only, locked) is found before the first byte when it can be, else met mid-write and
+    everything written rolled back: 400 "Could not write <file> into the course: <reason>. …", no audit row.
+    Audit row ``walkthrough.export_course`` on success."""
+    rec = _owned(wid, user)
+    if not studio_settings.courses_export_allowed():
+        raise HTTPException(status_code=403, detail=course_export.EXPORT_OFF_MESSAGE)
+    with _export_refusals():
+        result = course_export.write(rec, body.guide_sha256, player=body.player)
+    audit(WALKTHROUGH_EXPORT_COURSE, user=user, entity="walkthrough", entity_id=wid, detail=course_export.audit_detail(result))
+    return result
+
+
+@router.get("/{wid}/export/course.zip")
+def export_course_zip(wid: str, player: bool = Query(default=False), user: dict = Depends(current_user)):
+    """The export as a zip laid out like the course folder (C6): ``<slug>/guide.md`` with the figures and
+    ``_assets/images/…`` (and ``<slug>/walkthrough/…`` with ``?player=1``) - for a server that may not write the
+    Courses folder: copied into the course by hand. Whatever the setting; nothing written, no audit row."""
+    rec = _owned(wid, user)
+    with _export_refusals():
+        plan = course_export.compute(rec, player=player)
+        data = course_export.course_zip(plan)
+    return _zip_response(data, f"{plan.course['id']}-{plan.slug}-export")
+
+
+@router.get("/{wid}/export/player.zip")
+def export_player_zip(wid: str, user: dict = Depends(current_user)):
+    """The interactive player as a zip (C7): ``walkthrough/index.html`` (one file: the player's script and styles
+    inline, the walkthrough in it), ``walkthrough/walkthrough.json`` and the step pictures - it opens from the
+    disk in a browser, with no network and no app. Any walkthrough; 503 when the bundle is not built."""
+    rec = _owned(wid, user)
+    with _export_refusals():
+        data = course_export.player_zip(rec)
+    return _zip_response(data, f"{rec.get('name') or 'walkthrough'}-player")
 
 
 @router.post("/{wid}/duplicate")

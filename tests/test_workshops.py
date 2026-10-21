@@ -966,7 +966,10 @@ def test_the_import_makes_the_walkthrough_from_the_parse(rig):
         "id": click["id"], "image": f"step-{click['id']}.png", "width": 10, "height": 6, "hotspot": None, "kind": "tooltip",
         "text": "Click Run.", "instruction": "Click Run.", "placement": "auto", "chapter": "", "note": "Why it ran.",
         "source": {"course": "demo", "slug": "01-first", "image": "_assets/images/blue.png", "alt": "alt text", "launcher": None},
+        # W2c: where in the guide the step is - its section (no number) and its first sentence, the first with that key.
+        "anchor": {"key": "open it :: click run.", "ordinal": 1},
     }
+    assert launcher["anchor"] == {"key": "open it :: open win.ktr in pentaho data integration.", "ordinal": 1}
     assert done["chapter"] == "Next" and done["instruction"] == "Done." and done["note"] == ""
     # The picture is a COPY of the course's PNG, through the one copy routine, served by the step route.
     copied = rig["tmp"] / "walkthroughs" / rec["id"] / click["image"]
@@ -1224,7 +1227,9 @@ def test_the_first_picture_of_a_pictureless_step_and_the_hotspot_rule(rig, monke
     step = r.json()["steps"][0]
     assert step["image"] == f"step-{sid}.png" and (step["width"], step["height"]) == (400, 300)
     assert step["hotspot"] == {"x": 240, "y": 240, "width": 160, "height": 60}, "moved in to fit"
-    assert step["source"] == {"capture_id": cid, "annotated": False}
+    # W2c (C1): the imported step keeps where it came from, the capture merged in, the guide's image gone.
+    assert step["source"] == {"course": "demo", "slug": "01-first", "image": None, "alt": "", "launcher": None, "capture_id": cid, "annotated": False}
+    assert step["anchor"] == {"key": "s :: one.", "ordinal": 1}
     assert c.get(f"/api/walkthroughs/{rec['id']}/steps/{sid}/image").status_code == 200
     # Left out: the step's own hotspot is kept; null: removed.
     r = c.post(f"/api/walkthroughs/{rec['id']}/steps/{sid}/picture", json={"capture_id": cid})

@@ -26,7 +26,13 @@ Each setting maps to ONE config key - the key the engine reads:
   Walkthroughs page imports workshops from (``services.workshops``): one folder per
   course, each with a ``course.json``. "" = not set, and the import says where to set it;
   anything else must be an existing folder on the server (:func:`courses_folder` answers
-  the folder as a path, or None).
+  the folder as a path, or None). The folder is read; it is written only by Export to
+  course (W2c), on an administrator's or the walkthrough owner's explicit action, inside
+  the course's own folder - and only while ``courses_export`` is on.
+- ``courses_export``   ``config._config["courses_export"]`` - "Allow export into the
+  Courses folder" (W2c): False (the default) = Export to course previews and offers the
+  zip, and never writes into the folder; True = it may write the figures (and the player)
+  into the course (:func:`courses_export_allowed`).
 
 The transition, pause and watermark values are the *defaults* of a generate
 job: the Generate card prefills them and every generate request may override
@@ -107,7 +113,7 @@ FIELDS = (
     "ollama_model", "output_folder", "transition_pause", "music_volume",
     "slide_transition", "transition_duration",
     "watermark_text", "watermark_position", "watermark_opacity",
-    "courses_folder",
+    "courses_folder", "courses_export",
 )
 
 # The settings a generate request may override per job (GenerateRequest sends
@@ -141,6 +147,11 @@ def courses_folder() -> Path | None:
     return path if path.is_absolute() and path.is_dir() else None
 
 
+def courses_export_allowed() -> bool:
+    """"Allow export into the Courses folder" (W2c): only a stored True turns it on; off by default."""
+    return config._config.get("courses_export") is True
+
+
 # -- read ------------------------------------------------------------------
 
 def get_settings() -> dict:
@@ -161,6 +172,7 @@ def get_settings() -> dict:
         "watermark_position": config.watermark_position,
         "watermark_opacity": float(config.watermark_opacity),
         "courses_folder": str(config._config.get("courses_folder") or ""),
+        "courses_export": courses_export_allowed(),
     }
 
 
@@ -411,7 +423,8 @@ def _watermark_opacity(value) -> float:
 
 def _courses_folder(value) -> str:
     """"" (not set) or an absolute path to an EXISTING folder on the server. Nothing is
-    created: the courses are somebody else's files, and the import only ever reads them."""
+    created: the courses are somebody else's files; the import only reads them, and only
+    Export to course writes into them, while ``courses_export`` allows it (W2c)."""
     if not isinstance(value, str):
         raise ValueError("The courses folder must be a path (leave it empty to turn the workshop import off).")
     text = value.strip()
@@ -423,6 +436,13 @@ def _courses_folder(value) -> str:
     if not path.is_dir():
         raise ValueError(f"The courses folder was not found on the server: {path}. It must be an existing folder.")
     return str(path)
+
+
+def _courses_export(value) -> bool:
+    """On or off, nothing else (a "yes" or a 1 is not a yes)."""
+    if not isinstance(value, bool):
+        raise ValueError("Allow export into the Courses folder is on or off (true or false).")
+    return value
 
 
 _VALIDATORS = {
@@ -441,6 +461,7 @@ _VALIDATORS = {
     "watermark_position": _watermark_position,
     "watermark_opacity": _watermark_opacity,
     "courses_folder": _courses_folder,
+    "courses_export": _courses_export,
 }
 
 

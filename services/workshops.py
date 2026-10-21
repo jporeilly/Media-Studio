@@ -78,6 +78,7 @@ routes' 400).
 
 from __future__ import annotations
 
+import bisect
 import html
 import json
 import posixpath
@@ -519,6 +520,9 @@ class Block:
     lines: list[str] = field(default_factory=list)
     level: int = 0
     attrs: dict = field(default_factory=dict)
+    #: W2c: the block's first and last line in the guide (0-based, inclusive) - what a step's span is made of.
+    start: int = 0
+    end: int = 0
 
 
 def _is_special(line: str) -> bool:
@@ -553,16 +557,27 @@ def _img_block(line: str) -> Block | None:
     return Block("image", text=alt, attrs={"path": attrs.get("src", "")})
 
 
+def guide_lines(text: str) -> list[str]:
+    """The guide's lines without their endings (CRLF, CR or LF): line ``i`` here is line ``i`` of every span."""
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
 def blocks_of(text: str) -> list[Block]:
-    """The guide's lines as blocks: headings, numbered items (with their continuation lines), bullet
-    lists, hints (block quotes), code fences, images (a Markdown image line, or an ``<img>`` tag on its line,
-    in its figure or alone), launchers, tables, prose paragraphs. ``<details>`` blocks, HTML wrappers, rules
-    and ``:::`` fences yield nothing."""
-    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    """The guide's lines as blocks, each with its first and last line (``start``, ``end``, 0-based): headings,
+    numbered items (with their continuation lines), bullet lists, hints (block quotes), code fences, images (a
+    Markdown image line, or an ``<img>`` tag on its line, in its figure or alone), launchers, tables, prose
+    paragraphs. ``<details>`` blocks, rules and ``:::`` fences are ``stop`` blocks - no content, but a step's
+    span ends before them (W2c); HTML wrappers yield nothing."""
+    lines = guide_lines(text)
     out: list[Block] = []
     i = 0
     n = len(lines)
+    # Each pass appends at most one block; the next pass (or the end) gives it the lines it was read from.
+    mark, begin = 0, 0
     while i < n:
+        if len(out) > mark:
+            out[-1].start, out[-1].end = begin, _last_line(lines, begin, i)
+        mark, begin = len(out), i
         line = lines[i]
         s = line.strip()
         if not s:
@@ -582,6 +597,7 @@ def blocks_of(text: str) -> list[Block]:
             while i < n and "</details>" not in lines[i].lower():
                 i += 1
             i += 1
+            out.append(Block("stop", text="details"))
             continue
         if s.startswith(">"):
             quote: list[str] = []
@@ -663,7 +679,12 @@ def blocks_of(text: str) -> list[Block]:
                 i += 1
             out.append(Block("table", lines=rows))
             continue
-        if s.startswith("<") or _RULE.match(line) or s.startswith(":::"):
+        if _RULE.match(line) or s.startswith(":::"):
+            # A rule or a ``:::`` fence (the guide's tabs): no content, but a step's span ends before it (W2c).
+            i += 1
+            out.append(Block("stop", text="rule" if _RULE.match(line) else "fence"))
+            continue
+        if s.startswith("<"):
             i += 1
             continue
         prose: list[str] = [s]
@@ -672,7 +693,17 @@ def blocks_of(text: str) -> list[Block]:
             prose.append(lines[i].strip())
             i += 1
         out.append(Block("prose", text=" ".join(prose)))
+    if len(out) > mark:
+        out[-1].start, out[-1].end = begin, _last_line(lines, begin, n)
     return out
+
+
+def _last_line(lines: list[str], start: int, stop: int) -> int:
+    """The last line before ``stop`` that is not blank (``start`` when none is)."""
+    for j in range(stop - 1, start - 1, -1):
+        if lines[j].strip():
+            return j
+    return start
 
 
 # -- the parse -----------------------------------------------------------------------------------------
@@ -687,7 +718,18 @@ class ParsedStep:
     alt: str = ""
     launcher: dict | None = None
     note: str = ""
+    #: W2c, the step's place in the guide: its section's heading (as written), its span - the item's (or the
+    #: launcher's) first line through the last line that is not blank before the next item, launcher, hint,
+    #: heading, ``<details>``, rule or ``:::`` fence, 1-based and inclusive - and its anchor: ``key`` (the
+    #: section and the first sentence, normalised: :func:`anchor_key`) with ``ordinal``, the how-manieth step
+    #: of the guide with that key (1 for the first).
+    section: str = ""
+    start_line: int = 0
+    end_line: int = 0
+    key: str = ""
+    ordinal: int = 0
     _paragraphs: list[str] = field(default_factory=list, repr=False)
+    _block_end: int = field(default=0, repr=False)
 
 
 @dataclass
@@ -829,7 +871,8 @@ def parse_guide(text: str, launchers: dict[str, str] | None = None) -> ParsedGui
         open_step, accepting = step, True
         return step
 
-    for block in blocks_of(text):
+    blocks = blocks_of(text)
+    for block in blocks:
         if block.kind == "heading":
             if block.level == 1:
                 if not title:
@@ -845,12 +888,13 @@ def parse_guide(text: str, launchers: dict[str, str] | None = None) -> ParsedGui
         if section_skipped:
             continue
         if block.kind == "item":
-            step = ParsedStep()
+            step = ParsedStep(section=section, start_line=block.start + 1, _block_end=block.end)
             step._paragraphs.append(_item_paragraph(block.lines))
             start_step(step)
             continue
         if block.kind == "launcher":
-            step = ParsedStep(launcher={"id": block.attrs["id"], "path": source_path(block.attrs.get("path")), "label": block.text})
+            step = ParsedStep(launcher={"id": block.attrs["id"], "path": source_path(block.attrs.get("path")), "label": block.text},
+                              section=section, start_line=block.start + 1, _block_end=block.end)
             step._paragraphs.append(launcher_instruction(block.text, block.attrs.get("path"), labels, block.attrs["id"]))
             start_step(step)
             continue
@@ -876,10 +920,40 @@ def parse_guide(text: str, launchers: dict[str, str] | None = None) -> ParsedGui
                     open_step._paragraphs.append(paragraph)
             continue
 
+    # The spans (W2c): a step runs to the last line that is not blank before the next block that starts
+    # something of its own - an item, a launcher, a hint, a heading, a ``<details>``, a rule or a ``:::`` fence.
+    lines = guide_lines(text)
+    stops = [b.start for b in blocks if b.kind in SPAN_STOPS]
+    seen: dict[str, int] = {}
     for step in steps:
         step.instruction = join_within([p.replace("\r", "").strip() for p in step._paragraphs], rules.MAX_INSTRUCTION_CHARS)
         step.text = first_sentence(step.instruction)[: rules.MAX_STEP_TEXT]
+        later = bisect.bisect_right(stops, step._block_end)
+        stop = stops[later] if later < len(stops) else len(lines)
+        step.end_line = max(step._block_end, _last_line(lines, step._block_end, stop)) + 1
+        step.key = anchor_key(step.section, step.text)
+        seen[step.key] = step.ordinal = seen.get(step.key, 0) + 1
     return ParsedGuide(title=title, steps=steps, chapters=chapters, truncated=truncated)
+
+
+#: The blocks a step's span ends before (W2c): each starts something of its own.
+SPAN_STOPS = ("item", "launcher", "quote", "heading", "stop")
+#: A section heading's own number ("2. Preview the valid rows"): left out of an anchor's key, so renumbering the
+#: sections moves no anchor.
+_SECTION_NUMBER = re.compile(r"^\d+[.)]\s+")
+
+
+def key_text(value: str) -> str:
+    """A text as an anchor compares it: its runs of white space one space, trimmed, lower case."""
+    return " ".join((value or "").split()).lower()
+
+
+def anchor_key(section: str, sentence: str) -> str:
+    """A step's anchor key (W2c): its section's heading without its number and the step's first sentence (the
+    tooltip ``first_sentence`` makes), each through :func:`key_text`, joined by " :: " - within
+    ``walkthroughs.MAX_ANCHOR_KEY_CHARS``. Pure."""
+    head = key_text(_SECTION_NUMBER.sub("", (section or "").strip()))[: rules.MAX_CHAPTER_CHARS]
+    return f"{head} :: {key_text(sentence)[:TOOLTIP_CHARS]}"[: rules.MAX_ANCHOR_KEY_CHARS]
 
 
 # -- the preview and the import plan -------------------------------------------------------------------
@@ -930,7 +1004,7 @@ def import_plan(course: dict, workshop: dict, parsed: ParsedGuide, folder: Path)
         picture = resolve_image(folder, workshop["slug"], step.image) if rel else None
         steps.append({
             "chapter": step.chapter, "instruction": step.instruction, "text": step.text, "note": step.note,
-            "picture": picture,
+            "picture": picture, "anchor": {"key": step.key, "ordinal": step.ordinal},
             "source": {"course": course["id"], "slug": workshop["slug"], "image": source_path(rel) if picture else None,
                        "alt": rules.strip_control_characters(step.alt)[: rules.MAX_ALT_CHARS],
                        "launcher": source_path((step.launcher or {}).get("path"))},

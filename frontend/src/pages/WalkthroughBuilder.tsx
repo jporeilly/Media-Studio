@@ -31,21 +31,27 @@
  * Shift+F8 takes a still, attaches it and places the hotspot round the pointer, and Done reloads the builder from
  * the server - every record the server answers during the capture is the saved baseline, so nothing is "unsaved".
  * A fresh import opens with a notice on the status line ("Imported …: 12 steps in 4 chapters; …").
+ *
+ * W2c: **Export to course…** (saving first, asked as Play asks) opens `ExportCourseDialog`: the preview of the
+ * figures the walkthrough's pictures become in its workshop's guide, the write (the studio setting's), the zip, and
+ * the interactive player as a download.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowLeft, ArrowUp, Camera, Copy, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Camera, Copy, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Share, Trash2, Undo2, X } from "lucide-react";
 import { ApiError, api, errorMessage } from "../api/client";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Button, Card, EmptyState, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { useLeaveGuard } from "../components/annotate/useLeaveGuard";
 import { CaptureStepsDialog } from "../components/walkthrough/CaptureStepsDialog";
+import { ExportCourseDialog } from "../components/walkthrough/ExportCourseDialog";
 import { HotspotSurface } from "../components/walkthrough/HotspotSurface";
 import { StillPicker } from "../components/walkthrough/StillPicker";
 import { useGuidedCapture } from "../components/walkthrough/useGuidedCapture";
 import { fitZoom } from "../lib/annotate";
 import type { Capture } from "../lib/capture";
+import { SAVE_BEFORE_EXPORT } from "../lib/courseExport";
 import { copyText, downloadText } from "../lib/files";
 import { type GuidedOptions, CLICK_HINT, capturedSteps } from "../lib/guided";
 import { type History, canRedo, canUndo, commit, history, prune, redo, undo } from "../lib/history";
@@ -90,6 +96,7 @@ export default function WalkthroughBuilderPage() {
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [captureOpen, setCaptureOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   // The document and its history from the record once (and again on Reload); the saved baseline beside it.
   const load = useCallback((r: Walkthrough) => {
@@ -292,6 +299,15 @@ export default function WalkthroughBuilderPage() {
     navigate(playUrl(id, at), { state: { from: "builder", step: at } });
   }, [doc, selectedIndex, dirty, confirm, save, release, navigate, id]);
 
+  /** Export to course (W2c): it reads the SAVED walkthrough, so unsaved changes are saved first, asked as Play asks. */
+  const openExport = useCallback(async () => {
+    if (dirty) {
+      if (!(await confirm({ ...SAVE_BEFORE_EXPORT }))) return;
+      if (!(await save())) return;
+    }
+    setExportOpen(true);
+  }, [dirty, confirm, save]);
+
   /** Capture steps: the builder saves first (as Play does), then the guided capture starts. */
   const startCapture = useCallback(async (options: GuidedOptions) => {
     setCaptureOpen(false);
@@ -349,6 +365,7 @@ export default function WalkthroughBuilderPage() {
           <Button size="sm" variant="primary" icon={<Save size={14} />} onClick={() => void save()} disabled={!dirty || saving} title="Save (Ctrl+S)">Save</Button>
           <Button size="sm" icon={<Play size={14} />} onClick={() => void play()} disabled={doc.steps.length === 0} title="Play from the selected step">Play</Button>
           <Button size="sm" icon={<FileText size={14} />} onClick={() => setTranscriptOpen((o) => !o)} aria-expanded={transcriptOpen} title="The walkthrough as a transcript: what is said at each step" data-transcript-toggle="">Transcript</Button>
+          <Button size="sm" icon={<Share size={14} />} onClick={() => void openExport()} disabled={saving || capturing} title={rec.source ? `Write the figures into ${rec.source.course}/${rec.source.slug}, or download them; or download the interactive player` : "Download the interactive player (the walkthrough was not imported from a course workshop)"} data-export-course="">Export to course…</Button>
           {canCapture && (
             <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={doc.steps.length === 0 || capturing || saving} title={missingCount ? `${missingCount} step${missingCount === 1 ? " has" : "s have"} no picture yet: capture them in order` : "Capture every step again, in order"} data-capture-steps="">Capture steps…</Button>
           )}
@@ -498,6 +515,7 @@ export default function WalkthroughBuilderPage() {
       {canCapture && (
         <CaptureStepsDialog open={captureOpen} missing={missingCount} total={doc.steps.length} onClose={() => setCaptureOpen(false)} onStart={(o) => void startCapture(o)} />
       )}
+      <ExportCourseDialog open={exportOpen} wid={id} onClose={() => setExportOpen(false)} />
       <StillPicker
         open={picker !== null}
         title={picker === "replace" ? "Replace picture" : "Add step"}

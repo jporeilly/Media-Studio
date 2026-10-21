@@ -109,8 +109,14 @@ export function StudioCard() {
             <Field label="Output folder" hint="Not used by this edition yet — renders are saved with their project. An absolute path on the server; it is created if missing and must be writable.">
               <Input value={form.output_folder} disabled={readOnly} onChange={(e) => update({ output_folder: e.target.value })} aria-invalid={!form.output_folder.trim()} />
             </Field>
-            <Field label="Courses folder" hint="The folder Walkthroughs › Import workshop… reads: one folder per course, each with a course.json. An existing folder on the server, read and never written; leave it empty to turn the import off.">
+            <Field label="Courses folder" hint="The folder Walkthroughs › Import workshop… reads: one folder per course, each with a course.json. An existing folder on the server; read, and written only by Export to course while the box below is ticked. Leave it empty to turn the import off.">
               <Input value={form.courses_folder ?? ""} disabled={readOnly} placeholder="(not set)" onChange={(e) => update({ courses_folder: e.target.value })} data-courses-folder="" />
+            </Field>
+            <Field label="Export to course" hint="Ticked, a walkthrough's owner (or an administrator) may write its figures into its course workshop, inside that course's own folder. Unticked, Export to course previews and offers a zip to copy in by hand. Keep it off for a published course until the Content Manager renders annotated figures (until then a guide shows the pin's text, not the pin).">
+              <label className="os-row" style={{ gap: 8, alignItems: "center" }}>
+                <input type="checkbox" checked={!!form.courses_export} disabled={readOnly} onChange={(e) => update({ courses_export: e.target.checked })} data-courses-export="" />
+                <span>Allow export into the Courses folder</span>
+              </label>
             </Field>
 
             <Field label="Transition pause" hint={`Seconds of silence between slides (${pause.min} to ${pause.max}).`}>
