@@ -1,9 +1,10 @@
 /**
  * Capture steps (W2): the builder's dialog before a guided capture - the kind, chosen once for every step
- * (Window: the window under the pointer at the key press; Region: a region drawn once on the overlay and reused;
- * Full screen: a monitor), the pointer on or off, which steps (those without a picture, or every step), then
- * Start. Desktop app only (behind `useCaptureAvailable`, like the Capture button); the flow itself is
- * `useGuidedCapture`.
+ * (Window: the window under the pointer at the click or the key press; Region: a region drawn once on the overlay
+ * and reused; Full screen: a monitor), the pointer on or off, which steps (those without a picture, or every
+ * step), Capture on click (W2b: every click in the frame takes the step's still, on by default; off is the one
+ * key press per step), then Start. Desktop app only (behind `useCaptureAvailable`, like the Capture button); the
+ * flow itself is `useGuidedCapture`.
  */
 import { useEffect, useState } from "react";
 import { Camera, Monitor, MousePointer2, Square } from "lucide-react";
@@ -12,8 +13,8 @@ import { type CaptureKind, type MonitorInfo, shellBridge } from "../../lib/captu
 import type { GuidedOptions } from "../../lib/guided";
 
 const KINDS: { key: CaptureKind; label: string; how: string }[] = [
-  { key: "window", label: "Window", how: "The window under the pointer when you press Shift+F8 (from the bar's Capture button: the front-most window)." },
-  { key: "region", label: "Region", how: "Drag a region on the frozen screen once; every step is cut to it." },
+  { key: "window", label: "Window", how: "The window under the pointer when you click or press Shift+F8 (from the bar's Capture button: the front-most window)." },
+  { key: "region", label: "Region", how: "Drag a region on the frozen screen once; every step is cut to it, and only a click inside it is a step." },
   { key: "screen", label: "Full screen", how: "A whole monitor, every step." },
 ];
 
@@ -28,6 +29,7 @@ export function CaptureStepsDialog({ open, missing, total, onClose, onStart }: {
   const [kind, setKind] = useState<CaptureKind>("window");
   const [cursor, setCursor] = useState(true);
   const [every, setEvery] = useState(false);
+  const [clicks, setClicks] = useState(true);
   const [monitor, setMonitor] = useState<number | null>(null);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
 
@@ -50,12 +52,12 @@ export function CaptureStepsDialog({ open, missing, total, onClose, onStart }: {
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" icon={<Camera size={16} />} disabled={count === 0} onClick={() => onStart({ kind, cursor, every, monitor })} data-capture-steps-start="">Start</Button>
+          <Button variant="primary" icon={<Camera size={16} />} disabled={count === 0} onClick={() => onStart({ kind, cursor, every, monitor, clicks })} data-capture-steps-start="">Start</Button>
         </>
       }
     >
       <p style={{ marginTop: 0 }}>
-        A capture bar opens beside the screen with the step's text and instruction. Do the step in the application, put the pointer on the thing the viewer should click, and press <b>Shift+F8</b> (or <b>Capture</b> on the bar): the still is taken, attached to the step, and a hotspot is placed round the pointer. <b>Skip</b> leaves a step for later, <b>Back</b> returns to the one before, <b>Done</b> closes the bar. The builder is saved first and reloads when you are done.
+        A capture bar opens beside the screen with the step's text and instruction. Just do the step in the application: every click takes the still at that moment, attaches it to the step and places a hotspot round the click, and the next click's still shows the result. For a step with no click, put the pointer on the thing the viewer should click and press <b>Shift+F8</b> (or <b>Capture</b> on the bar). <b>Skip</b> leaves a step for later, <b>Back</b> returns to the one before, <b>Done</b> closes the bar. The builder is saved first and reloads when you are done.
       </p>
       <div style={{ display: "flex", gap: 8, margin: "14px 0" }}>
         {KINDS.map((k) => (
@@ -83,6 +85,10 @@ export function CaptureStepsDialog({ open, missing, total, onClose, onStart }: {
             </Select>
           </Field>
         )}
+        <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
+          <input type="checkbox" checked={clicks} onChange={(e) => setClicks(e.target.checked)} style={{ marginTop: 3 }} data-capture-clicks="" />
+          <span><b>Capture on click</b> - every click in the frame takes the step's still; Shift+F8 still captures without a click</span>
+        </label>
         <label className="os-row" style={{ gap: 10, alignItems: "center" }}>
           <input type="checkbox" checked={cursor} onChange={(e) => setCursor(e.target.checked)} data-capture-cursor="" />
           <MousePointer2 size={15} /> <span>Cursor in the picture</span>

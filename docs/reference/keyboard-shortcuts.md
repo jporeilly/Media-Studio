@@ -101,10 +101,11 @@ While **Capture steps…** runs in the walkthrough builder, from anywhere, which
 
 | Key | What it does |
 | --- | --- |
-| **Shift+F8** | Take the still for the step the capture bar shows, attach it, and place the hotspot round the pointer as it was at the moment of the press |
+| A **click** - left or right - anywhere but on the app's own windows (with **Capture on click** ticked, the default) | Take the still for the step the capture bar shows at the moment of the press, attach it, and place the hotspot round the point clicked; a right click is a step like a left one, and a click while the previous still is still being taken is a step too (its still is taken at once and attached after the first). Not a step: the second press of a double-click (within 400 ms and 8 px of the first, with the same button), a click outside the region's frame (the bar says "Click inside the frame to capture this step.") or, in Full screen, off the captured monitor ("Click on the captured screen to capture this step." - every click ON it is a step, other applications' included), a third click while two stills are being taken (the bar says "Too fast: wait for the still."), and a click on the capture bar or the walkthrough's window |
+| **Shift+F8** | Take the still without a click, attach it, and place the hotspot round the pointer as it was at the moment of the press |
 | **Esc**, a right click or **Alt+F4** (on the region overlay, when the kind is Region) | Give up the region; nothing starts |
 
-The key is taken from Start until Done, and not otherwise; it is never held together with the recording keys. If another program holds it the bar says so - a red line under the step - and its **Capture** button still works (a capture from the button places no hotspot: the pointer is on the bar). Closing the desktop app's window while the bar is up closes the bar and gives the key back with it.
+The key and the click hook are taken from Start until Done, and not otherwise; it is never held together with the recording keys, and a recording never hooks the clicks. If another program holds the key the bar says so - a red line under the step - and the clicks and its **Capture** button still work (a capture from the button places no hotspot: the pointer is on the bar): the click hook is installed whether or not the app has the key. If the clicks cannot be hooked the bar says that instead, the "Click to capture" line goes, and the key still captures; if neither the key nor the clicks could be had, one line says both and points to the bar's **Capture**. Closing the desktop app's window while the bar is up closes the bar, removes the hook and gives the key back with it.
 
 ## See also
 

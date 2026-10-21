@@ -46,9 +46,16 @@ desktop/
     src/server.rs          backend lifecycle: spawn boot.py, drain logs, job object
     src/capture.rs         screen capture: monitors and windows in physical pixels, the region
                            overlay, the recorder bar (excluded from capture), Shift+F9/F10,
-                           the close guard while recording or saving; `cargo test` covers its
-                           pure parts (the granted origins and permissions, the page URLs,
-                           the overlay generations)
+                           the guided capture's Shift+F8 and click hook (a low-level mouse hook
+                           on the hotkey thread), the close guard while recording or saving;
+                           `cargo test` covers its pure parts (the granted origins and
+                           permissions, the page URLs, the overlay generations, the click
+                           rules) and runs the real hotkey thread with the real hook and no
+                           key, and the own-window list against off-screen windows of the
+                           test process - those tests need an interactive desktop: where
+                           Windows refuses the hook or the DWM cannot report a frame (a
+                           session-0 host, some CI) they print why and pass, unless
+                           MEDIA_STUDIO_HOOK_TEST=require is set
     tauri.conf.json        bundle config (NSIS, currentUser, resources, icons)
     Cargo.toml, Cargo.lock, build.rs
     capabilities/default.json   the splash's commands, and the opener scope behind "Open data folder" / "reveal report"

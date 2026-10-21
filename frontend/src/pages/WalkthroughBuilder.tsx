@@ -47,7 +47,7 @@ import { useGuidedCapture } from "../components/walkthrough/useGuidedCapture";
 import { fitZoom } from "../lib/annotate";
 import type { Capture } from "../lib/capture";
 import { copyText, downloadText } from "../lib/files";
-import type { GuidedOptions } from "../lib/guided";
+import { type GuidedOptions, CLICK_HINT, capturedSteps } from "../lib/guided";
 import { type History, canRedo, canUndo, commit, history, prune, redo, undo } from "../lib/history";
 import { useCaptureAvailable } from "../lib/useCaptureAvailable";
 import {
@@ -127,7 +127,9 @@ export default function WalkthroughBuilderPage() {
     onFinished: (s) => {
       void record.refetch().then((res) => {
         if (res.data) load(res.data);
-        setEvent({ text: `Captured ${s.captured} step${s.captured === 1 ? "" : "s"}${s.skipped ? `, skipped ${s.skipped}` : ""}.`, bad: false });
+        // The distinct steps that got a picture (a retake after Back is not a second step), and the skips.
+        const taken = capturedSteps(s);
+        setEvent({ text: `Captured ${taken} step${taken === 1 ? "" : "s"}${s.skipped ? `, skipped ${s.skipped}` : ""}.`, bad: false });
       });
       void qc.invalidateQueries({ queryKey: walkthroughsQueryKey, exact: true });
     },
@@ -360,7 +362,7 @@ export default function WalkthroughBuilderPage() {
                 <Camera size={14} />
                 <strong data-capture-label="">{guided.bar.label}</strong>
                 <span className="os-truncate" style={{ flex: 1 }}>{guided.bar.text}</span>
-                <span className="os-muted">{guided.phase === "finished" ? "All steps visited." : "Shift+F8 captures; the bar has Capture, Skip, Back and Done."}</span>
+                <span className="os-muted">{guided.phase === "finished" ? "All steps visited." : guided.bar.clicks ? `${CLICK_HINT}; the bar has Capture, Skip, Back and Done.` : "Shift+F8 captures; the bar has Capture, Skip, Back and Done."}</span>
                 <Button size="sm" onClick={() => void guided.done()} disabled={guided.phase === "capturing"} data-capture-done="">Done</Button>
               </>
             )}
@@ -473,7 +475,9 @@ export default function WalkthroughBuilderPage() {
                 </div>
                 <p className="os-muted os-small" style={{ margin: 0 }} data-hotspot-line="">
                   {!hasPicture(selected)
-                    ? "No picture yet, so no hotspot: the hotspot comes with the capture (round the pointer when you press Shift+F8)."
+                    ? canCapture
+                      ? "No picture yet, so no hotspot: the hotspot comes with the capture (Capture steps…: click through the step, or press Shift+F8 - it goes round the click or the pointer)."
+                      : "No picture yet, so no hotspot: the hotspot comes with the capture (round the pointer when you press Shift+F8)."
                     : hotspot
                       ? `Hotspot ${hotspot.width} × ${hotspot.height} at ${hotspot.x}, ${hotspot.y}. Drag inside it to move it, a handle to resize it.`
                       : "No hotspot: drag on the picture to draw one. A tooltip step without a hotspot is shown as a modal card."}

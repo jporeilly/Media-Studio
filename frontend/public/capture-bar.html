@@ -23,15 +23,19 @@
   12", the step's text and, smaller, its instruction, with Capture (also the
   global key Shift+F8, which the shell raises WITH the pointer's position),
   Skip, Back and Done:
-    main -> bar   capture:state   { mode: "steps", phase, name, label, text, instruction, remaining, canBack, canCapture, message }
+    main -> bar   capture:state   { mode: "steps", phase, name, label, text, instruction, remaining, canBack, canCapture, message, clicks }
     bar  -> main  capture:control { action: "hello" | "capture" | "skip" | "back" | "done" }
   The main window sends the state on every change, so this page asks for the
   current one with "hello" as soon as its listener is up (the first state was
   sent before the page had loaded, and missed, without it). A refusal the
   capture goes on under - the key taken by another program, a Windows that
   cannot hide the bar from the picture - comes as `message` and is shown in
-  red under the step. A capture from the button carries no pointer, so it
-  places no hotspot; the bar says so in Capture's title.
+  red under the step; so does one capture's refusal (no window under the
+  pointer, a click outside the frame), which the next state clears. With
+  `clicks` (W2b, Capture on click: every click in the frame is a step) a
+  second small line reads "Click to capture · Shift+F8 captures without a
+  click". A capture from the button carries no pointer, so it places no
+  hotspot; the bar says so in Capture's title.
 -->
 <style>
   :root { color-scheme: dark; }
@@ -46,6 +50,8 @@
   .steps .line { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .steps .text { overflow: hidden; }
   .steps .instruction { color: #cbd5e1; font-size: 11.5px; line-height: 1.3; max-height: 2.6em; overflow: hidden; white-space: pre-line; }
+  .steps .hint { color: #94a3b8; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .steps .hint:empty { display: none; }
   .steps .message { color: #fca5a5; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .steps .message:empty { display: none; }
   .steps .buttons { display: flex; align-items: center; gap: 6px; }
@@ -82,10 +88,11 @@
     <div class="head"><b id="s-label">Step 1 of 1</b><span id="s-name"></span><span id="s-remaining"></span></div>
     <div class="line" id="s-text"></div>
     <div class="instruction" id="s-instruction"></div>
+    <div class="hint" id="s-hint"></div>
     <div class="message" id="s-message" role="status"></div>
   </div>
   <div class="buttons">
-    <button id="s-capture" class="capture" title="Capture this step (Shift+F8 with the pointer on the control places the hotspot; from this button there is no hotspot)">Capture</button>
+    <button id="s-capture" class="capture" title="Capture this step (a click in the frame, or Shift+F8 with the pointer on the control, places the hotspot; from this button there is no hotspot)">Capture</button>
     <button id="s-skip" title="Leave this step for later">Skip</button>
     <button id="s-back" title="Back to the step before">Back</button>
     <button id="s-done" class="stop" title="Close the bar and go back to the builder">Done</button>
@@ -100,7 +107,10 @@
   if (stepsMode) { document.body.classList.add("mode-steps"); document.title = "Capture steps"; }
   const sLabel = document.getElementById("s-label"), sName = document.getElementById("s-name"), sRemaining = document.getElementById("s-remaining");
   const sText = document.getElementById("s-text"), sInstruction = document.getElementById("s-instruction"), sMessage = document.getElementById("s-message");
+  const sHint = document.getElementById("s-hint");
   const sCapture = document.getElementById("s-capture"), sSkip = document.getElementById("s-skip"), sBack = document.getElementById("s-back"), sDone = document.getElementById("s-done");
+  // The second line in click mode (W2b); the same words as lib/guided.ts CLICK_HINT.
+  const CLICK_HINT = "Click to capture · Shift+F8 captures without a click";
   const showSteps = (p) => {
     document.body.classList.add("mode-steps");
     sLabel.textContent = p.label || "";
@@ -108,6 +118,7 @@
     sRemaining.textContent = p.remaining ? `${p.remaining} to go` : "";
     sText.textContent = p.text || "";
     sInstruction.textContent = p.instruction || "";
+    sHint.textContent = p.clicks && p.phase !== "finished" ? CLICK_HINT : "";
     sMessage.textContent = p.message || "";
     sCapture.disabled = !p.canCapture;
     sCapture.textContent = p.phase === "capturing" ? "Capturing…" : "Capture";
@@ -148,7 +159,7 @@
       label.textContent = state === "paused" ? "Paused  (Shift+F9 resumes)" : state === "saving" ? "Saving…" : state === "recording" ? "Recording  (Shift+F10 stops)" : state;
     }
   };
-  if (stepsMode) showSteps({ label: "Starting…", name: "", text: "", instruction: "", message: "", phase: "starting", remaining: 0, canBack: false, canCapture: false });
+  if (stepsMode) showSteps({ label: "Starting…", name: "", text: "", instruction: "", message: "", phase: "starting", remaining: 0, canBack: false, canCapture: false, clicks: false });
   else show({ state: "countdown", elapsedMs: 0, countdown: "" });
   if (t && t.event) await t.event.listen("capture:state", (e) => show(e.payload || {}));
   // The listener is up: ask for the state as it stands (the main window sends it on change only).

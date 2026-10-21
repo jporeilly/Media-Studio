@@ -92,6 +92,25 @@ describe("the capture bar page in its steps mode", () => {
     expect([disabled("s-capture"), disabled("s-skip"), disabled("s-back"), disabled("s-done")]).toEqual([true, true, false, false]);
   });
 
+  it("in click mode a second small line says so under the instruction, until every step is visited (W2b)", async () => {
+    await load("steps");
+    tell(ready);
+    expect(text("s-hint")).toBe("");
+    tell({ ...ready, clicks: true });
+    expect(text("s-hint")).toBe("Click to capture · Shift+F8 captures without a click");
+    expect(text("s-instruction")).toBe("Do b");
+    // A capture's own refusal rides under it in red and the next state clears it; the hint stays.
+    tell({ ...ready, clicks: true, message: "Click inside the frame to capture this step." });
+    expect([text("s-hint"), text("s-message")]).toEqual(["Click to capture · Shift+F8 captures without a click", "Click inside the frame to capture this step."]);
+    tell({ ...ready, clicks: true, phase: "capturing", canCapture: false });
+    expect([text("s-hint"), text("s-message")]).toEqual(["Click to capture · Shift+F8 captures without a click", ""]);
+    // Off by the tick: no line. Every step visited: nothing left to click for.
+    tell({ ...ready, clicks: false });
+    expect(text("s-hint")).toBe("");
+    tell({ ...ready, clicks: true, phase: "finished", label: "All steps visited", canCapture: false });
+    expect(text("s-hint")).toBe("");
+  });
+
   it("the buttons send their actions to the main window", async () => {
     await load("steps");
     tell({ ...ready, canBack: true });

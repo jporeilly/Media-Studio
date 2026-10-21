@@ -1052,6 +1052,150 @@ def test_the_guided_capture_audit_route(rig):
     assert admin.get(f"/api/walkthroughs/{wid}").json()["revision"] == 1, "the row writes nothing to the walkthrough"
 
 
+def test_the_guided_capture_rows_say_on_click_and_count_the_captures(rig):
+    """W2b: the start row says ", on click" when every click is a step; the done row counts the DISTINCT steps
+    pictured, adds the captures made when they differ (a retake after Back) and how many were by click. A page
+    before W2b sends none of these and its rows read as they did (the test above)."""
+    from api.routers.walkthroughs import guided_done_detail, guided_start_detail
+
+    admin = rig["admin"]
+    wid = _imported(rig)["id"]
+    url = f"/api/walkthroughs/{wid}/guided-capture"
+    assert admin.post(url, json={"event": "start", "kind": "region", "cursor": False, "clicks": True}).status_code == 204
+    assert admin.post(url, json={"event": "start", "kind": "window", "cursor": True, "clicks": False}).status_code == 204
+    assert admin.post(url, json={"event": "start", "kind": "screen", "cursor": True, "clicks": True}).status_code == 204
+    assert admin.post(url, json={"event": "done", "captured": 3, "skipped": 1, "captures": 3, "by_click": 2}).status_code == 204
+    assert admin.post(url, json={"event": "done", "captured": 1, "skipped": 0, "captures": 2, "by_click": 2}).status_code == 204
+    assert admin.post(url, json={"event": "done", "captured": 2, "skipped": 0, "captures": 2}).status_code == 204
+    rows = [row["detail"] for row in auth_store.list_audit(action="walkthrough.guided_capture")]
+    assert rows == [
+        "done: 2 captured, 0 skipped",
+        "done: 1 captured, 2 captures (2 by click), 0 skipped",
+        "done: 3 captured (2 by click), 1 skipped",
+        "start: screen with pointer, on click",
+        "start: window with pointer",
+        "start: region, on click",
+    ]
+    assert admin.post(url, json={"event": "done", "captured": 1, "by_click": -1}).status_code == 422
+    assert admin.post(url, json={"event": "done", "captured": 1, "captures": 10_001}).status_code == 422
+    assert admin.post(url, json={"event": "start", "clicks": "yes"}).status_code == 422
+    # The two rules, pure.
+    assert guided_start_detail(None, False, None) == "start: unknown"
+    assert guided_start_detail("window", True, True) == "start: window with pointer, on click"
+    assert guided_done_detail(3, 1, None, None) == "done: 3 captured, 1 skipped"
+    assert guided_done_detail(3, 1, 3, 0) == "done: 3 captured (0 by click), 1 skipped"
+    assert guided_done_detail(0, 2, 0, 0) == "done: 0 captured (0 by click), 2 skipped"
+    assert guided_done_detail(3, 1, 5, None) == "done: 3 captured, 5 captures, 1 skipped"
+
+
+def test_a_window_still_of_another_size_is_drawn_centred_on_the_first_stills_frame(rig, monkeypatch):
+    """W2b, R7 as the fix rounds left it (F6, F7, G5): with ``frame`` (the run's frame - the widest width x the
+    tallest height of its stills so far, as the page keeps it) a smaller still is drawn centred on a TRANSPARENT
+    canvas of that size (alpha 0 outside it, the still opaque) and its hotspot moves with it; a still that does not
+    fit the frame is refused with nothing written (the page never sends one: a larger still grows the frame first);
+    one of the frame's size is left as it is. The placement is pinned."""
+    c = rig["admin"]
+    rec = _imported(rig)
+    wid, sid = rec["id"], rec["steps"][1]["id"]
+    folder = rig["tmp"] / "walkthroughs" / wid
+    frame = {"width": 800, "height": 600}
+    red = (200, 30, 30, 255)
+    clear = (0, 0, 0, 0)
+    # A smaller still (a dialog) on the frame: 400 x 300 centred at (200, 150); outside it the canvas is transparent.
+    small = _still(rig, monkeypatch, 400, 300)
+    r = c.post(f"/api/walkthroughs/{wid}/steps/{sid}/picture", json={"capture_id": small, "hotspot": {"x": 0, "y": 0, "width": 160, "height": 60}, "frame": frame})
+    assert r.status_code == 200, r.text
+    step = r.json()["steps"][1]
+    assert (step["width"], step["height"]) == (800, 600)
+    assert step["hotspot"] == {"x": 200, "y": 150, "width": 160, "height": 60}, "moved with the still"
+    with Image.open(folder / f"step-{sid}.png") as img:
+        assert img.mode == "RGBA"
+        picture = img.convert("RGBA")
+    assert picture.size == (800, 600)
+    assert [picture.getpixel(p) for p in [(0, 0), (799, 599), (199, 150), (200, 149), (600, 450)]] == [clear] * 5, "transparent outside the still"
+    assert [picture.getpixel(p) for p in [(200, 150), (599, 449), (400, 300)]] == [red] * 3, "the still itself opaque"
+    # A still that does not fit the frame is refused, nothing written (F7: the page attaches it at its own size instead).
+    big = _still(rig, monkeypatch, 1600, 600)
+    before = c.get(f"/api/walkthroughs/{wid}").json()["revision"]
+    r = c.post(f"/api/walkthroughs/{wid}/steps/{sid}/picture", json={"capture_id": big, "hotspot": {"x": 800, "y": 300, "width": 160, "height": 60}, "frame": frame})
+    assert r.status_code == 400 and "smaller than the still" in r.json()["detail"], r.text
+    assert c.get(f"/api/walkthroughs/{wid}").json()["revision"] == before
+    assert sorted(p.name for p in folder.iterdir()) == [f"step-{sid}.png", "walkthrough.json"], "no temporary file left"
+    with Image.open(folder / f"step-{sid}.png") as img:
+        assert img.size == (800, 600) and img.convert("RGBA").getpixel((400, 300)) == red, "the step's picture as it was"
+    # The frame's own size: the still as it is, nothing padded, opaque to the corner; no hotspot given keeps the step's own.
+    same = _still(rig, monkeypatch, 800, 600)
+    r = c.post(f"/api/walkthroughs/{wid}/steps/{sid}/picture", json={"capture_id": same, "frame": frame})
+    assert r.status_code == 200 and r.json()["steps"][1]["hotspot"] == {"x": 200, "y": 150, "width": 160, "height": 60}
+    with Image.open(folder / f"step-{sid}.png") as img:
+        assert img.convert("RGBA").getpixel((0, 0)) == red
+    # Without a frame, a still of another size is its own size, as before W2b.
+    r = c.post(f"/api/walkthroughs/{wid}/steps/{sid}/picture", json={"capture_id": small, "hotspot": None})
+    assert (r.json()["steps"][1]["width"], r.json()["steps"][1]["height"]) == (400, 300)
+    # The rows say when a frame was asked for.
+    rows = [row["detail"] for row in auth_store.list_audit(action="walkthrough.replace_picture")]
+    assert rows[0] == f"step {sid}: capture {small}, no hotspot"
+    assert rows[1] == f"step {sid}: capture {same}, framed 800x600"
+    assert rows[2] == f"step {sid}: capture {small}, hotspot set, framed 800x600"
+    # The placement, pure: centred by whole pixels, never scaled; a still that does not fit is refused.
+    assert walkthroughs.place_in_frame(400, 300, 800, 600) == (200, 150)
+    assert walkthroughs.place_in_frame(800, 600, 800, 600) == (0, 0)
+    assert walkthroughs.place_in_frame(799, 599, 800, 600) == (0, 0)
+    with pytest.raises(ValueError):
+        walkthroughs.place_in_frame(1600, 600, 800, 600)
+    with pytest.raises(ValueError):
+        walkthroughs.place_in_frame(800, 601, 800, 600)
+    assert walkthroughs.hotspot_in_frame({"x": 10, "y": 20, "width": 160, "height": 60}, (200, 150)) == {"x": 210, "y": 170, "width": 160, "height": 60}
+    assert walkthroughs.hotspot_in_frame(None, (200, 150)) is None
+    assert walkthroughs.hotspot_in_frame({"x": 1, "y": 2, "width": 8, "height": 8}, None) == {"x": 1, "y": 2, "width": 8, "height": 8}
+    assert not hasattr(walkthroughs, "FRAME_BACKGROUND"), "the padding is transparent: no colour to name"
+
+
+def test_a_frame_is_bounded_by_pixels_not_by_a_side(rig, monkeypatch):
+    """W2b fix round, F2: a frame of more than ``MAX_FRAME_PIXELS`` (the annotation decode's own cap, 100 M) is
+    refused with the reason and nothing written, whatever its sides; one AT the cap is drawn; a side outside
+    1..``MAX_FRAME_SIDE`` is refused as before. The rule is one pure function, read by the request model."""
+    c = rig["admin"]
+    rec = _imported(rig)
+    wid, sid = rec["id"], rec["steps"][1]["id"]
+    folder = rig["tmp"] / "walkthroughs" / wid
+    tiny = _still(rig, monkeypatch, 8, 8)
+    url = f"/api/walkthroughs/{wid}/steps/{sid}/picture"
+    assert walkthroughs.MAX_FRAME_PIXELS == captures.MAX_ANNOTATE_PIXELS == 100_000_000
+    # Over the cap by one pixel, with sides well inside the per-side bound: refused, readable, nothing written.
+    over = {"width": 10_001, "height": 10_000}
+    r = c.post(url, json={"capture_id": tiny, "frame": over})
+    assert r.status_code == 422, r.text
+    assert "at most 100,000,000 pixels" in r.text and "10001 x 10000 is 100,010,000" in r.text
+    assert c.get(f"/api/walkthroughs/{wid}").json()["revision"] == 1
+    assert sorted(p.name for p in folder.iterdir()) == ["walkthrough.json"]
+    # The old shape of the hole: 32,000 x 32,000 is inside the per-side bound and a 1,024 M-pixel canvas - refused now.
+    assert c.post(url, json={"capture_id": tiny, "frame": {"width": walkthroughs.MAX_FRAME_SIDE, "height": walkthroughs.MAX_FRAME_SIDE}}).status_code == 422
+    # A side outside the bound: refused as before.
+    assert c.post(url, json={"capture_id": tiny, "frame": {"width": 0, "height": 600}}).status_code == 422
+    assert c.post(url, json={"capture_id": tiny, "frame": {"width": 800, "height": walkthroughs.MAX_FRAME_SIDE + 1}}).status_code == 422
+    # AT the cap: drawn - 100 M transparent pixels with the 8 x 8 still at the centre.
+    at = {"width": 12_500, "height": 8_000}
+    r = c.post(url, json={"capture_id": tiny, "hotspot": None, "frame": at})
+    assert r.status_code == 200, r.text
+    step = r.json()["steps"][1]
+    assert (step["width"], step["height"]) == (12_500, 8_000)
+    # Reading the picture back: Pillow's own bomb limit (89.5 M) is below the frame's cap, so this test reads it at the cap
+    # (the server never opens the canvas - only the still it draws on it).
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", walkthroughs.MAX_FRAME_PIXELS)
+    with Image.open(folder / f"step-{sid}.png") as img:
+        assert img.size == (12_500, 8_000)
+        rgba = img.convert("RGBA")
+        assert rgba.getpixel((0, 0)) == (0, 0, 0, 0) and rgba.getpixel((6_246, 3_996)) == (200, 30, 30, 255)
+    # The rule itself, pure.
+    assert walkthroughs.frame_refusal(12_500, 8_000) is None
+    assert walkthroughs.frame_refusal(1, 1) is None
+    assert walkthroughs.frame_refusal(10_001, 10_000) == "A frame may hold at most 100,000,000 pixels: 10001 x 10000 is 100,010,000."
+    assert walkthroughs.frame_refusal(32_000, 32_000) is not None
+    assert walkthroughs.frame_refusal(0, 10) == "A frame's sides must be 1-32,000 pixels: 0 x 10 is not."
+    assert walkthroughs.frame_refusal(10, 32_001) is not None
+
+
 # -- the limits rows ---------------------------------------------------------------------------------
 
 def test_the_limits_rows_name_the_workshop_constants():

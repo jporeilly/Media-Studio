@@ -318,14 +318,18 @@ def create(name: str, owner_id: str | None, owner_name: str | None) -> dict:
     return record
 
 
-def _copy_file(wid: str, sid: str, src: Path, what: str) -> tuple[str, int, int]:
+def _copy_file(wid: str, sid: str, src: Path, what: str, frame: tuple[int, int] | None = None) -> tuple[str, int, int, Placement | None]:
     """THE one copy routine for a step's picture: ``src`` copied to a
     temporary file beside the step's, its PNG header read, the file published
-    atomically as ``step-<sid>.png``. Returns the file's name and its size.
-    ``ValueError`` (naming ``what``: "The capture's picture", "The guide's
-    picture x.png") when the file is not a PNG - the copy is removed again
-    and nothing is left behind. The caller has already proven ``src`` under
-    the folder it belongs to; this reads it and nothing else."""
+    atomically as ``step-<sid>.png``. Returns the file's name, its size and,
+    when ``frame`` was given and the picture is not that size already, how
+    the picture was placed on the frame (W2b: drawn centred on a canvas of the
+    frame's size by :func:`_draw_in_frame`, on the same temporary file before
+    it is published). ``ValueError`` (naming ``what``: "The capture's
+    picture", "The guide's picture x.png") when the file is not a PNG - the
+    copy is removed again and nothing is left behind. The caller has already
+    proven ``src`` under the folder it belongs to; this reads it and nothing
+    else."""
     d = _dir(wid)
     d.mkdir(parents=True, exist_ok=True)
     name = step_image_name(sid)
@@ -335,22 +339,35 @@ def _copy_file(wid: str, sid: str, src: Path, what: str) -> tuple[str, int, int]
     if size is None:
         tmp.unlink(missing_ok=True)
         raise ValueError(f"{what} is not a PNG; it cannot be a step.")
+    placement = None
+    if frame is not None and size != frame:
+        try:
+            placement = place_in_frame(size[0], size[1], frame[0], frame[1])
+            _draw_in_frame(tmp, frame, placement)
+        except ValueError:  # the still does not fit the frame: nothing is left behind
+            tmp.unlink(missing_ok=True)
+            raise
+        except Exception as exc:  # a picture Pillow cannot decode: nothing is left behind
+            tmp.unlink(missing_ok=True)
+            raise ValueError(f"{what} could not be drawn on the frame: {exc}") from None
+        size = frame
     replace_with_retry(tmp, d / name)
-    return name, size[0], size[1]
+    return name, size[0], size[1], placement
 
 
-def _copy_picture(wid: str, sid: str, cid: str) -> tuple[str, int, int, bool]:
+def _copy_picture(wid: str, sid: str, cid: str, frame: tuple[int, int] | None = None) -> tuple[str, int, int, bool, Placement | None]:
     """Copy the capture's CURRENT picture - the oracle's answer, the annotated
-    one when there is one - to ``step-<sid>.png`` through :func:`_copy_file`.
-    Returns the file's name, its size and whether the capture was annotated.
+    one when there is one - to ``step-<sid>.png`` through :func:`_copy_file`
+    (on ``frame`` when one is given, W2b). Returns the file's name, its size,
+    whether the capture was annotated and the placement on the frame, if any.
     ``LookupError`` when the capture or its picture is not there; ``ValueError``
     when the picture is not a PNG (the copy is removed again)."""
     rec = captures.get_capture(cid)
     src = captures.image_path(cid)
     if rec is None or src is None:
         raise LookupError("The capture's image is missing.")
-    name, width, height = _copy_file(wid, sid, src, "The capture's picture")
-    return name, width, height, bool(rec.get("annotated"))
+    name, width, height, placement = _copy_file(wid, sid, src, "The capture's picture", frame=frame)
+    return name, width, height, bool(rec.get("annotated")), placement
 
 
 def _new_step(sid: str, image: str, width: int, height: int, cid: str, annotated: bool) -> dict:
@@ -381,7 +398,7 @@ def add_step(wid: str, capture_id: str, after: str | None = None) -> tuple[dict,
                 raise NoSuchStep("No such step to insert after.")
             position = found[0] + 1
         sid = new_id()
-        image, width, height, annotated = _copy_picture(wid, sid, capture_id)
+        image, width, height, annotated, _ = _copy_picture(wid, sid, capture_id)
         steps.insert(position, _new_step(sid, image, width, height, capture_id, annotated))
         rec["steps"] = steps
         rec["revision"] = int(rec.get("revision") or 1) + 1
@@ -409,14 +426,70 @@ def clamp_hotspot(hotspot: dict | None, width: int, height: int) -> dict | None:
 #: ``replace_picture``'s "keep the step's own hotspot" (the default): a value no caller's hotspot can be.
 KEEP_HOTSPOT = object()
 
+#: W2b, the frame of a guided capture's run (Window kind: the widest width x the tallest height of its
+#: stills so far). A smaller still is drawn centred on a TRANSPARENT canvas of the frame's size (alpha 0
+#: outside the still, the still itself opaque), so the run's pictures are one size and the player's
+#: stage shows through in either theme; a still that does not fit is refused (the page never sends such
+#: a frame: a larger still grows the frame first). A side is bounded as a capture's is, and the whole by
+#: pixels - the canvas is allocated whole, so the cap is the one the annotation decode already uses.
+MAX_FRAME_SIDE = captures.capture.MAX_DIMENSION
+MAX_FRAME_PIXELS = captures.MAX_ANNOTATE_PIXELS
 
-def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT) -> dict:
+
+def frame_refusal(width: int, height: int) -> str | None:
+    """Why a ``width`` x ``height`` frame is refused, or None: a side outside
+    1..``MAX_FRAME_SIDE``, or more than ``MAX_FRAME_PIXELS`` pixels in all. Pure."""
+    if not (1 <= width <= MAX_FRAME_SIDE and 1 <= height <= MAX_FRAME_SIDE):
+        return f"A frame's sides must be 1-{MAX_FRAME_SIDE:,} pixels: {width} x {height} is not."
+    if width * height > MAX_FRAME_PIXELS:
+        return f"A frame may hold at most {MAX_FRAME_PIXELS:,} pixels: {width} x {height} is {width * height:,}."
+    return None
+
+
+#: Where a still sits on a frame: its top-left at ``dx``, ``dy`` (it is never scaled).
+Placement = tuple[int, int]
+
+
+def place_in_frame(width: int, height: int, frame_width: int, frame_height: int) -> Placement:
+    """Where a ``width`` x ``height`` still goes on a ``frame_width`` x
+    ``frame_height`` canvas it fits: centred, by whole pixels. ``ValueError``
+    when it does not fit (the page sends no such frame). Pure."""
+    if width > frame_width or height > frame_height:
+        raise ValueError(f"The frame ({frame_width} x {frame_height}) is smaller than the still ({width} x {height}).")
+    return (frame_width - width) // 2, (frame_height - height) // 2
+
+
+def hotspot_in_frame(hotspot: dict | None, placement: Placement | None) -> dict | None:
+    """The hotspot given in the still's pixels, moved with the still onto the
+    frame (``clamp_hotspot`` then keeps it inside). Pure."""
+    if not hotspot or placement is None:
+        return hotspot
+    dx, dy = placement
+    return {"x": dx + int(hotspot["x"]), "y": dy + int(hotspot["y"]), "width": int(hotspot["width"]), "height": int(hotspot["height"])}
+
+
+def _draw_in_frame(path: Path, frame: tuple[int, int], placement: Placement) -> None:
+    """Draw the PNG at ``path`` on a transparent canvas of the frame's size,
+    where :func:`place_in_frame` put it, and write the canvas back to ``path``."""
+    from PIL import Image  # the one picture-drawing routine of this module; Pillow is a requirement already
+
+    canvas = Image.new("RGBA", frame, (0, 0, 0, 0))
+    with Image.open(path) as still:
+        picture = still.convert("RGBA")
+    canvas.paste(picture, placement)
+    canvas.save(path, format="PNG")
+
+
+def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT, frame: tuple[int, int] | None = None) -> dict:
     """Replace a step's picture with the capture's current one (copied again
     through the oracle) - the FIRST picture of a step that had none; the
     hotspot is kept, clamped to the new size, unless ``hotspot`` is given (a
     rectangle, clamped into the new picture, or None for none - the guided
-    capture's pointer rule); the revision +1. ``LookupError`` for no such
-    walkthrough or picture, :class:`NoSuchStep` for no such step."""
+    capture's pointer rule); with ``frame`` (W2b) a smaller picture is drawn
+    centred on a transparent canvas of the frame's size and a given hotspot -
+    in the still's pixels - moves with it (a picture that does not fit is a
+    ``ValueError``, nothing written); the revision +1. ``LookupError`` for no
+    such walkthrough or picture, :class:`NoSuchStep` for no such step."""
     with _lock(wid):
         rec = get_walkthrough(wid)
         if rec is None:
@@ -425,8 +498,8 @@ def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT) -
         if found is None:
             raise NoSuchStep("No such step.")
         index, step = found
-        image, width, height, annotated = _copy_picture(wid, sid, capture_id)
-        wanted = step.get("hotspot") if hotspot is KEEP_HOTSPOT else hotspot
+        image, width, height, annotated, placement = _copy_picture(wid, sid, capture_id, frame=frame)
+        wanted = step.get("hotspot") if hotspot is KEEP_HOTSPOT else hotspot_in_frame(hotspot, placement)
         step = {**step, "image": image, "width": width, "height": height,
                 "hotspot": clamp_hotspot(wanted, width, height),
                 "source": {"capture_id": capture_id, "annotated": annotated}}
@@ -565,7 +638,7 @@ def create_from_workshop(name: str, owner_id: str | None, owner_name: str | None
             picture = parsed.get("picture")
             if picture is not None:
                 try:
-                    image, width, height = _copy_file(wid, sid, Path(picture), f"The guide's picture {Path(picture).name}")
+                    image, width, height, _ = _copy_file(wid, sid, Path(picture), f"The guide's picture {Path(picture).name}")
                 except (OSError, ValueError) as exc:
                     log.warning("Workshop import %s: step %d imports without its picture: %s", source.get("slug"), len(out) + 1, exc)
                     image, width, height = None, 0, 0

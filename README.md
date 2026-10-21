@@ -37,8 +37,8 @@ the whole app suite looks and feels the same.
   presents it, in the browser edition too, and the walkthrough reads as a transcript - the script
   of the narrated video to come. Or import a course workshop: its sections become the chapters,
   its numbered steps the steps with their instructions and the guide's screenshots, and the
-  desktop app captures the rest one key press per step as you perform them, placing each hotspot
-  where the pointer was.
+  desktop app captures the rest as you perform them - every click a step, Shift+F8 for a still
+  without one - placing each hotspot where you clicked or the pointer was.
 - **An AI assistant on the slides.** A local Ollama model writes and rewrites speaker
   notes, reviews them for grammar, tone, flow and transitions and fixes what it finds,
   adapts them to an audience, translates them, paces them, scores the deck for video and

@@ -576,6 +576,8 @@ describe("W2: a step without a picture, and the import's notice", () => {
     expect(q(`[data-step="${B}"] [data-step-no-picture]`)).toBeNull();
     expect(q(`[data-step="${A}"] img`)).toBeNull();
     expect(hotspotLine()).toContain("No picture yet, so no hotspot");
+    // In a browser there is no Capture steps…, so the line names no click (H4: the desktop app's line does).
+    expect(hotspotLine()).not.toContain("click through the step");
     expect(q("[data-step-size]")!.textContent).toContain("No picture yet");
     expect(q("[data-step-size]")!.textContent).toContain("from demo/01-first");
     expect(q("[data-step-size]")!.textContent).toContain("a note from the guide (14 characters");

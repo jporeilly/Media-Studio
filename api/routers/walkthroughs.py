@@ -20,7 +20,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
 
 from api.audit import (
     WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE, WALKTHROUGH_GUIDED_CAPTURE,
@@ -57,14 +57,39 @@ class AddStepIn(BaseModel):
     after: str | None = Field(None, min_length=12, max_length=12)
 
 
+class FrameIn(BaseModel):
+    """The frame of a guided capture's run (W2b, Window kind): the widest width × the tallest height of the run's
+    stills so far, as the page keeps it (``frameFor``). A still smaller than it on either side is drawn centred on a
+    transparent canvas of this size, so the run's pictures converge on one size. Bounded by pixels, not by a side: a
+    frame is a number the client sends, and the canvas it asks for is allocated whole - ``MAX_FRAME_PIXELS`` (the
+    annotation decode's own cap) refuses it with the reason."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    width: int = Field(ge=1, le=walkthroughs.MAX_FRAME_SIDE)
+    height: int = Field(ge=1, le=walkthroughs.MAX_FRAME_SIDE)
+
+    @model_validator(mode="after")
+    def _within_the_pixel_cap(self) -> "FrameIn":
+        refused = walkthroughs.frame_refusal(self.width, self.height)
+        if refused:
+            raise ValueError(refused)
+        return self
+
+
 class ReplacePictureIn(BaseModel):
     """The still whose picture the step takes; ``hotspot`` left out keeps the step's own (clamped into
-    the new picture), a rectangle sets it (clamped), null removes it - the guided capture's pointer rule."""
+    the new picture), a rectangle sets it (clamped), null removes it - the guided capture's pointer rule.
+    ``frame`` (W2b) draws the still, never scaled, centred on a transparent canvas of that size and moves the
+    hotspot with it (the hotspot is given in the STILL's pixels); a still larger than the frame on either side
+    does not fit and is refused with 400, nothing written - the page never sends such a frame (a larger still
+    grows the frame first, F7/G5)."""
 
     model_config = ConfigDict(extra="forbid")
 
     capture_id: str = Field(min_length=12, max_length=12)
     hotspot: HotspotIn | None = None
+    frame: FrameIn | None = None
 
 
 class ImportIn(BaseModel):
@@ -79,17 +104,41 @@ class ImportIn(BaseModel):
 
 
 class GuidedCaptureIn(BaseModel):
-    """The guided capture's two events (W2): its start (the kind, with or without the pointer) and its
-    end (how many steps were captured and skipped). The stills themselves are ``capture.still`` rows and
-    each picture attached a ``walkthrough.replace_picture`` row; this is the row that frames them."""
+    """The guided capture's two events (W2): its start (the kind, with or without the pointer, and since
+    W2b whether every click is a step) and its end (how many DISTINCT steps got a picture, how many were
+    skipped, and since W2b how many captures were made and how many of them by a click). The stills
+    themselves are ``capture.still`` rows and each picture attached a ``walkthrough.replace_picture``
+    row; this is the row that frames them. The W2b fields are optional: a page before them sends none,
+    and its rows read as they did."""
 
     model_config = ConfigDict(extra="forbid")
 
     event: Literal["start", "done"]
     kind: Literal["region", "window", "screen"] | None = None
     cursor: bool = False
+    clicks: StrictBool | None = None
     captured: int = Field(0, ge=0, le=10_000)
     skipped: int = Field(0, ge=0, le=10_000)
+    captures: int | None = Field(None, ge=0, le=10_000)
+    by_click: int | None = Field(None, ge=0, le=10_000)
+
+
+def guided_start_detail(kind: str | None, cursor: bool, clicks: bool | None) -> str:
+    """"start: region with pointer, on click" - the kind (``unknown`` when none was given, never guessed),
+    " with pointer" when the cursor is drawn, ", on click" when every click is a step (W2b)."""
+    return f"start: {kind or 'unknown'}{' with pointer' if cursor else ''}{', on click' if clicks else ''}"
+
+
+def guided_done_detail(captured: int, skipped: int, captures: int | None, by_click: int | None) -> str:
+    """"done: 3 captured (2 by click), 1 skipped" - ``captured`` the distinct steps that got a picture; when
+    the captures made differ from that (a retake after Back), "done: 3 captured, 5 captures (2 by click),
+    1 skipped"; without the W2b counts, "done: 3 captured, 1 skipped" as before."""
+    detail = f"{captured} captured"
+    if captures is not None and captures != captured:
+        detail += f", {captures} captures"
+    if by_click is not None:
+        detail += f" ({by_click} by click)"
+    return f"done: {detail}, {skipped} skipped"
 
 
 def _owned(wid: str, user: dict) -> dict:
@@ -232,8 +281,9 @@ def replace_picture(wid: str, sid: str, body: ReplacePictureIn, user: dict = Dep
     if not is_hex12(sid):
         raise HTTPException(status_code=404, detail="No such step.")
     hotspot = walkthroughs.KEEP_HOTSPOT if "hotspot" not in body.model_fields_set else (body.hotspot.model_dump() if body.hotspot else None)
+    frame = (body.frame.width, body.frame.height) if body.frame else None
     try:
-        rec = walkthroughs.replace_picture(wid, sid, body.capture_id, hotspot=hotspot)
+        rec = walkthroughs.replace_picture(wid, sid, body.capture_id, hotspot=hotspot, frame=frame)
     except walkthroughs.NoSuchStep as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except ValueError as exc:
@@ -241,20 +291,22 @@ def replace_picture(wid: str, sid: str, body: ReplacePictureIn, user: dict = Dep
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     spot = "" if hotspot is walkthroughs.KEEP_HOTSPOT else (", no hotspot" if hotspot is None else ", hotspot set")
-    audit(WALKTHROUGH_REPLACE_PICTURE, user=user, entity="walkthrough", entity_id=wid, detail=f"step {sid}: capture {body.capture_id}{spot}")
+    framed = f", framed {frame[0]}x{frame[1]}" if frame else ""
+    audit(WALKTHROUGH_REPLACE_PICTURE, user=user, entity="walkthrough", entity_id=wid, detail=f"step {sid}: capture {body.capture_id}{spot}{framed}")
     return rec
 
 
 @router.post("/{wid}/guided-capture", status_code=204)
 def guided_capture(wid: str, body: GuidedCaptureIn, user: dict = Depends(current_user)):
-    """The guided capture's audit row (W2): "start" with the kind (and whether the pointer is drawn),
-    "done" with how many steps were captured and skipped. The desktop app sends both; nothing is
-    written to the walkthrough here (each picture attached is a replace_picture of its own)."""
+    """The guided capture's audit row (W2): "start" with the kind (whether the pointer is drawn, and
+    since W2b whether every click is a step), "done" with how many distinct steps got a picture and how
+    many were skipped (and since W2b the captures made, how many by click). The desktop app sends both;
+    nothing is written to the walkthrough here (each picture attached is a replace_picture of its own)."""
     _owned(wid, user)
     if body.event == "start":
-        detail = f"start: {body.kind or 'unknown'}{' with pointer' if body.cursor else ''}"
+        detail = guided_start_detail(body.kind, body.cursor, body.clicks)
     else:
-        detail = f"done: {body.captured} captured, {body.skipped} skipped"
+        detail = guided_done_detail(body.captured, body.skipped, body.captures, body.by_click)
     audit(WALKTHROUGH_GUIDED_CAPTURE, user=user, entity="walkthrough", entity_id=wid, detail=detail)
 
 
