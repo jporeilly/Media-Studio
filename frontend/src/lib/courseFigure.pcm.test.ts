@@ -7,11 +7,10 @@
  * `ToolPanelProvider`, as the guide pane renders a guide. Without the checkout the block is skipped, and says why; a
  * checkout without the component or its packages fails, so a moved MarkdownBody cannot hide the contract as a skip.
  *
- * The TARGET - one numbered pin at the hotspot's centre (11.3 %, 8.9 %) and the caption, no visible hotspot list - is
- * a KNOWN FAILURE today (`it.fails`): the content manager's figure walk compares its children's types with "img" and
- * "figcaption" while react-markdown hands it its own `img` and `figcaption` overrides, so it draws a plain figure
- * (the picture, the pin's text as a numbered list, the caption). The day the content manager is fixed this test
- * goes red: take the `.fails` off.
+ * The TARGET - one numbered pin at the hotspot's centre (11.3 %, 8.9 %) and the caption, no visible hotspot list -
+ * renders since the content manager 0.7.42, whose figure walk recognises its own `img` and `figcaption` overrides
+ * (react-markdown hands it those overrides as the children's types, never the tag names). Before 0.7.42 it drew a
+ * plain figure - the picture, the pin's text as a numbered list, the caption - and this test failed on exactly that.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -91,9 +90,9 @@ describe.skipIf(!PCM_PRESENT)("the exported figure through the content manager's
     expect(html).not.toContain("media-studio: walkthrough");
   });
 
-  // KNOWN FAILURE until the content manager renders annotated figures (its figure walk matching its own `img` and
-  // `figcaption` overrides): then this passes, `it.fails` turns red, and the `.fails` comes off.
-  it.fails("draws one pin at the hotspot's centre and keeps the caption (the content manager's annotated image)", () => {
+  // The content manager's annotated image, as it renders since 0.7.42 (its figure walk matches its own `img` and
+  // `figcaption` overrides). Against an older checkout this fails: no pin, and the hotspot list shows.
+  it("draws one pin at the hotspot's centre and keeps the caption (the content manager's annotated image)", () => {
     const pins = [...html.matchAll(/class="pcm-annotated__pin[^"]*"[^>]*style="left:([0-9.]+)%;top:([0-9.]+)%"/g)].map((m) => [m[1], m[2]]);
     expect(pins).toEqual([["11.3", "8.9"]]);
     expect(html).toContain("<figcaption>3. Run it &amp; check</figcaption>");
