@@ -41,16 +41,23 @@ and a ``nn-slug/guide.md``.
   schema's own constants (``MAX_STEP_TEXT``, ``MAX_INSTRUCTION_CHARS``,
   ``MAX_CHAPTER_CHARS``, ``MAX_NOTE_CHARS``, ``MAX_SOURCE_PATH_CHARS``,
   ``MAX_ALT_CHARS``), so what the import writes the builder can save;
-- a step's **picture** is the first ``![alt](…png)`` image that follows the
-  item (or the launcher) before the next item, launcher or heading - a figure
-  after two items in a row belongs to the last of them; an image by URL (the
-  Vimeo placeholder) is never a picture; the alt text is kept;
+- a step's **picture** is the first figure that follows the item (or the
+  launcher) before the next item, launcher or heading - a Markdown image line
+  ``![alt](…png)``, or an ``<img src="…" alt="…">`` tag on its line, alone or
+  in its house ``<figure>`` (any attribute order, either quote or none,
+  self-closing or not; ``src`` and ``alt`` HTML-unescaped, other attributes
+  ignored) - a figure after two items in a row belongs to the last of them;
+  its path must name a PNG under the course's ``_assets/images``
+  (:func:`image_relative_path`), so an image by URL (the Vimeo placeholder), a
+  ``data:`` source, a ``<video>`` or an ``<iframe>`` is never a picture; the
+  alt text is kept;
 - **hints** (``>`` block quotes: Note, Tip, Warning, Critical, Key Takeaways)
   are not steps; an ``Under the hood`` hint is kept as the ``note`` of the
   step it follows (plain text, ``MAX_NOTE_CHARS``), for the narrated video to
   come;
 - ``<details>`` blocks, ``:::: tabs`` fences, HTML wrappers (``<figure>``,
-  ``<div>``, ``<figcaption>``), rules and anything else are skipped;
+  ``<div>``, ``<figcaption>``; the ``<img>`` inside a figure is read, above),
+  rules and anything else are skipped;
 - at most ``MAX_PARSE_STEPS`` steps are read (a bound on abuse; the
   walkthrough's own ``MAX_STEPS`` applies on import).
 
@@ -102,6 +109,8 @@ MANIFEST_FILE = "manifest.json"
 #: A course id or a workshop slug: a folder NAME, never a path.
 NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")
 IMAGE_SUFFIXES = (".png",)
+#: Where a guide's pictures live: the course's own images folder. A picture's path must resolve under it.
+IMAGE_FOLDER = "_assets/images/"
 NOT_SET_MESSAGE = "Set the Courses folder on the Settings page (Studio settings, an administrator) first."
 
 
@@ -386,21 +395,23 @@ def load_workshop(root: Path, course_id: str, slug: str) -> tuple[dict, dict, st
 
 def resolve_image(folder: Path, slug: str, image: str | None) -> Path | None:
     """The guide image, as the guide wrote it (``../_assets/images/x.png#w=520``), proven under the
-    COURSE folder; None for no image, a URL, a path that leaves the course, a link, or a missing file."""
+    COURSE folder; None for no image, a URL, a path outside the course's ``_assets/images``, a link, or a
+    missing file."""
     rel = image_relative_path(slug, image)
     return _own_file(folder, rel) if rel else None
 
 
 def image_relative_path(slug: str, image: str | None) -> str | None:
-    """The image's path relative to the course folder (``_assets/images/x.png``), or None for a URL, a
-    path that walks out of the course, or a file that is not a PNG."""
+    """The image's path relative to the course folder (``_assets/images/x.png``), or None for a URL (a
+    ``data:`` source included), a path that walks out of the course or is not under its ``_assets/images``
+    (``IMAGE_FOLDER``), or a file that is not a PNG."""
     if not image:
         return None
     target = image.split("#", 1)[0].split("?", 1)[0].strip()
     if not target or re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE) or target.startswith(("/", "\\")):
         return None
     joined = posixpath.normpath(posixpath.join(slug, target.replace("\\", "/")))
-    if joined.startswith("../") or joined == ".." or not joined.lower().endswith(IMAGE_SUFFIXES):
+    if not joined.lower().startswith(IMAGE_FOLDER) or not joined.lower().endswith(IMAGE_SUFFIXES):
         return None
     if len(joined) > rules.MAX_SOURCE_PATH_CHARS or rules.TEXT_CONTROL_RE.search(joined):
         return None
@@ -486,6 +497,13 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _ITEM = re.compile(r"^ {0,3}(\d+)[.)]\s+(.*)$")
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _IMAGE_LINE = re.compile(r"^\s*!\[" + _BRACKETED + r"\]\(([^)\s]+)[^)]*\)\s*$")
+#: A tag's attributes up to its ``>``: a ``>`` inside a quoted value does not end the tag.
+_TAG_ATTRS = r"""((?:[^>"']|"[^"]*"|'[^']*')*)"""
+#: The house figure's picture: an ``<img>`` tag at the start of its line, alone or after the opening tags of its
+#: ``<figure>``, ``<div>``, ``<p>`` or ``<a>`` (what follows it on the line - a caption, closing tags - is not read).
+_IMG_LINE = re.compile(r"^\s*(?:<(?:figure|div|p|a)\b" + _TAG_ATTRS + r">\s*)*<img\b" + _TAG_ATTRS + ">", re.I)
+#: One attribute of a tag: its name, and its value double-quoted, single-quoted, bare, or none.
+_TAG_ATTR = re.compile(r"""([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?""")
 _BUTTON = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.S | re.I)
 _ATTR = re.compile(r'\b(data-launch|data-path|data-graph)\s*=\s*"([^"]*)"', re.I)
 _FENCE = re.compile(r"^\s*(```|~~~)")
@@ -520,10 +538,26 @@ def _launcher_block(line: str) -> Block | None:
     return None
 
 
+def _img_block(line: str) -> Block | None:
+    """An ``<img>`` tag standing on the line (``_IMG_LINE``) as an image block: its ``src`` and its ``alt``,
+    HTML-unescaped (a repeated attribute: the first, as a browser reads it), the alt's control characters
+    stripped and its spaces collapsed. The path's rules are the Markdown image's (:func:`image_relative_path`)."""
+    match = _IMG_LINE.match(line)
+    if not match:
+        return None
+    attrs: dict[str, str] = {}
+    for attr in _TAG_ATTR.finditer(match.group(2)):
+        value = next((v for v in attr.group(2, 3, 4) if v is not None), "")
+        attrs.setdefault(attr.group(1).lower(), html.unescape(value))
+    alt = " ".join(rules.strip_control_characters(attrs.get("alt", "")).split())
+    return Block("image", text=alt, attrs={"path": attrs.get("src", "")})
+
+
 def blocks_of(text: str) -> list[Block]:
     """The guide's lines as blocks: headings, numbered items (with their continuation lines), bullet
-    lists, hints (block quotes), code fences, images, launchers, tables, prose paragraphs. ``<details>``
-    blocks, HTML wrappers, rules and ``:::`` fences yield nothing."""
+    lists, hints (block quotes), code fences, images (a Markdown image line, or an ``<img>`` tag on its line,
+    in its figure or alone), launchers, tables, prose paragraphs. ``<details>`` blocks, HTML wrappers, rules
+    and ``:::`` fences yield nothing."""
     lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out: list[Block] = []
     i = 0
@@ -613,6 +647,11 @@ def blocks_of(text: str) -> list[Block]:
         image = _IMAGE_LINE.match(line)
         if image:
             out.append(Block("image", text=plain_text(image.group(1)), attrs={"path": image.group(2)}))
+            i += 1
+            continue
+        figure = _img_block(line)
+        if figure:
+            out.append(figure)
             i += 1
             continue
         if _TABLE_ROW.match(line):

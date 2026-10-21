@@ -9,7 +9,10 @@ imported walkthrough.
   continuation lines joined, a bullet a line, the prose paragraph and the code
   block after an item appended, a table a line per row; the figure-to-step
   rule (the first figure after the item; after two items it is the last's; a
-  URL is never a picture); the hints (Note, Tip, Key Takeaways skipped; Under
+  URL is never a picture), for both picture forms - the Markdown image line
+  and the house figure's ``<img>`` tag (any attribute order, either quote,
+  self-closing or not, unescaped) - and the one path rule (under the course's
+  ``_assets/images``); the hints (Note, Tip, Key Takeaways skipped; Under
   the hood kept as the note of the step it follows); the skipped sections; the
   launcher as a step; the caps with a whole-sentence cut;
 - nothing outside the courses folder is read: a course id that is a path, a
@@ -60,24 +63,26 @@ LIMITS_MD = REPO_ROOT / "docs" / "reference" / "limits.md"
 COURSES_SRC = Path(os.environ.get("MEDIA_STUDIO_COURSES_SRC") or (REPO_ROOT.parent / "Pentaho-Content-Manager" / "courses"))
 LAB = "pdi-2hr-lab"
 
-#: What each guide of the lab parses to: steps, chapter names, pictures found, launchers, notes.
+#: What each guide of the lab parses to: steps, chapter names, pictures found, launchers, notes. Measured on the
+#: course as it is now (0.1.25): its pictures are house figures (``<figure>`` + ``<img src alt>``) since the
+#: content manager's S303 sweep, its section headings carry their number since "labs 01-04 as steps".
 GUIDES = {
     "00-before-you-start": (1, ["Start Pentaho Data Integration"], 1, 1, 0),
-    "01-first-win": (10, ["Open the pipeline", "Preview the valid rows", "Preview the rejects", "Look inside a step"], 2, 1, 3),
-    "02-build-the-pipeline": (23, ["Read the file", "Validate the keys", "Send the rejects to a file", "Run it"], 9, 0, 2),
-    "03-enrich-and-join": (27, ["Read the customer master (JSON)", "Read the product catalogue", "Enrich with two lookups",
-                                "Compute revenue and margin", "Join the region reference (a merge join)", "Dummy Step", "Run it"], 15, 0, 2),
-    "04-track-history-scd": (20, ["Connect to the database", "Configure the dimension step", "First load", "Now change history"], 9, 0, 1),
+    "01-first-win": (10, ["1. Open the pipeline", "2. Preview the valid rows", "3. Preview the rejects", "4. Look inside a step"], 2, 1, 3),
+    "02-build-the-pipeline": (23, ["2. Read the file", "3. Validate the keys", "4. Send the rejects to a file", "5. Run it"], 9, 0, 2),
+    "03-enrich-and-join": (28, ["1. Read the customer master (JSON)", "2. Read the product catalog", "3. Enrich with two lookups",
+                                "4. Compute revenue and margin", "5. Join the region reference (a merge join)", "6. Dummy Step", "7. Run it"], 15, 0, 2),
+    "04-track-history-scd": (20, ["1. Connect to the database", "2. Configure the dimension step", "3. First load", "4. Now change history"], 9, 0, 1),
     "05-metadata-injection": (21, ["1. The template", "2. The injector", "3. The driver job", "4. Run and extend"], 13, 0, 2),
     "09-bring-your-own-data": (5, ["Read your file"], 0, 0, 0),
     "10-from-lab-to-production": (7, ["Watch: the production shape", "Where does it hurt?", "Before you go"], 0, 2, 0),
 }
 
 FIRST_WIN_FIRST = "Open win_preview.ktr in Pentaho Data Integration."
-FIRST_WIN_LAST = "Close the dialog with Cancel (so nothing changes)."
+FIRST_WIN_LAST = "Select Cancel to close the dialog (so nothing changes)."
 #: The code block stays between its ``` fences (R6): the narration round skips what is between them.
 FIRST_WIN_SECOND = (
-    "If the pipeline - win_preview.ktr - has not displayed in PDI, then: File -> Open and browse:\n\n"
+    "If the pipeline - win_preview.ktr - has not displayed in Pentaho Data Integration, select File > Open (Ctrl+O) and open:\n\n"
     "Path to Transformation:\n\n"
     "```\nC:\\Workshop\\pdi-2hr\\02-see-it-work\\01-your-first-win\\win_preview.ktr\n```\n\n"
     "You should see three connected steps on the canvas: a file reader, a filter, and two end points — one for valid rows, one for rejects."
@@ -207,31 +212,37 @@ def test_the_lab_lists_its_eight_workshops_in_summary_order(lab):
     assert [s["title"] for s in course["sections"]] == ["Get Ready", "See It Work", "Make It Yours", "See It Scale", "Make It Real"]
     assert [w["slug"] for s in course["sections"] for w in s["workshops"]] == list(GUIDES)
     first = course["sections"][1]["workshops"][0]
-    assert first == {"slug": "01-first-win", "title": "Your First Win", "description": first["description"], "estimatedMinutes": 10, "stepCount": 6}
+    assert first == {"slug": "01-first-win", "title": "Your First Win", "description": first["description"], "estimatedMinutes": 10, "stepCount": 5}
     assert "launchers" not in workshops.public_course(course)
 
 
 def test_the_first_and_last_instruction_of_first_win_spelled_out(lab):
     course, workshop, text, folder = workshops.load_workshop(lab, LAB, "01-first-win")
+    # The guide writes its pictures as house figures only (``<figure>`` + ``<img src alt>``), no Markdown image: its
+    # two pictures below are read from ``<img>`` tags (the third figure is in a section with no step).
+    assert "![" not in text and text.count("<img ") == 3 and text.count("<figure>") == 4
     parsed = workshops.parse_guide(text, course["launchers"])
     first, second, last = parsed.steps[0], parsed.steps[1], parsed.steps[-1]
     # The launcher button, placed where it stands: the file's name and the launcher's label from course.json.
     assert first.instruction == FIRST_WIN_FIRST and first.text == FIRST_WIN_FIRST
     assert first.launcher == {"id": "spoon", "path": "files/win_preview.ktr", "label": "Open in Pentaho Data Integration"}
-    assert first.chapter == "Open the pipeline" and first.image is None, "the figure after item 1 is item 1's"
+    assert first.chapter == "1. Open the pipeline" and first.image is None, "the figure after item 1 is item 1's"
     # Item 1: the bold and code marks dropped, the prose, the code block and the prose after the figure appended.
     assert second.instruction == FIRST_WIN_SECOND
-    assert second.text == "If the pipeline - win_preview.ktr - has not displayed in PDI, then: File -> Open and browse:"
-    assert second.image == "../_assets/images/1788268810024.png" and second.alt.startswith("win_preview open in Spoon")
-    # The last step: the Under the hood that follows it is its note; the Key Takeaways note is not.
-    assert last.instruction == FIRST_WIN_LAST and last.text == FIRST_WIN_LAST and last.chapter == ""
-    assert last.note.startswith("The Dialog is the Source Code\n\nNothing was generated from what you just looked at.")
-    assert "Key Takeaways" not in last.note and "version-controlled" not in last.note
-    assert last.note.endswith("the thing you tested is literally the thing that ships.")
-    # Step 4 ("Choose Preview, then Quick Launch."): its picture, the prose after the figure, its note.
+    assert second.text == "If the pipeline - win_preview.ktr - has not displayed in Pentaho Data Integration, select File > Open (Ctrl+O) and open:"
+    assert second.image == "../_assets/images/1788268810024.png" and second.alt.startswith("win_preview open in Spoon: Read yesterday's sales")
+    # The last step has no hint after it; the Under the hood before it (after item 3 of its section) is that
+    # item's note; the Key Takeaways note is no one's.
+    assert last.instruction == FIRST_WIN_LAST and last.text == FIRST_WIN_LAST and last.chapter == "" and last.note == ""
+    inside = parsed.steps[-2]
+    assert inside.text == "Double-click Keys present?."
+    assert inside.note.startswith("The Dialog is the Source Code\n\nNothing was generated from what you just looked at.")
+    assert "Key Takeaways" not in inside.note and "version-controlled" not in inside.note
+    assert inside.note.endswith("the thing you tested is literally the thing that ships.")
+    # Step 4 ("Select Quick Launch."): its picture, the prose after the figure, its note.
     fourth = parsed.steps[3]
-    assert fourth.text == "Choose Preview, then Quick Launch."
-    assert fourth.instruction.startswith("Choose Preview, then Quick Launch.\n\nA grid appears with 37 of yesterday's orders")
+    assert fourth.text == "Select Quick Launch."
+    assert fourth.instruction.startswith("Select Quick Launch.\n\nA grid appears with 37 of yesterday's orders")
     assert fourth.image == "../_assets/images/1788269301694.png"
     assert fourth.note.startswith("Preview is the real engine, not a simulation\n\nThree words first")
     assert parsed.title == "Your First Win"
@@ -372,6 +383,166 @@ def test_the_parser_rules_on_an_inline_guide():
     assert len(parsed.steps) == 4, "the section with only prose, the Troubleshooting and the Lab Files make no steps"
 
 
+#: Both picture forms in one guide: the Markdown image line and the house figure's ``<img>`` tag, by ONE rule.
+BOTH_FORMS = """# Both forms
+
+## One
+
+1. Markdown figure.
+
+![Markdown alt](../_assets/images/md.png#w=400)
+
+2. House figure.
+
+<div align="center">
+<figure>
+<img src="../_assets/images/house.png" alt="House &amp; alt" width="800">
+<figcaption>House caption</figcaption>
+</figure>
+</div>
+
+The prose after the figure is still the step's.
+
+3. One-line figure.
+
+<figure><img alt='One line' src='../_assets/images/line.png' /><figcaption>Cap</figcaption></figure>
+
+4. Two items in a row.
+5. The figure is the last one's.
+
+<figure>
+<img src="../_assets/images/last.png" alt="Last">
+</figure>
+
+6. The first figure wins, whichever its form.
+
+<img src="../_assets/images/first.png" alt="First">
+
+![Second](../_assets/images/second.png)
+
+7. Markdown first, then a house figure.
+
+![Md first](../_assets/images/mdfirst.png)
+
+<figure>
+<img src="../_assets/images/notthis.png" alt="Not this">
+</figure>
+
+8. A refused figure does not take the place of the next one.
+
+<figure>
+<img src="data:image/png;base64,iVBORw0KGgo=" alt="Inline data">
+</figure>
+
+<figure>
+<img src="../_assets/images/after-refused.png" alt="After the refused one">
+</figure>
+
+## Two
+
+<figure>
+<img src="../_assets/images/orphan.png" alt="No step before it in this section">
+</figure>
+
+1. After an orphan figure.
+"""
+
+
+def test_a_picture_is_a_markdown_image_line_or_an_img_tag_by_one_rule():
+    parsed = _parse(BOTH_FORMS)
+    assert [(s.image, s.alt) for s in parsed.steps] == [
+        ("../_assets/images/md.png#w=400", "Markdown alt"),
+        ("../_assets/images/house.png", "House & alt"),
+        ("../_assets/images/line.png", "One line"),
+        (None, ""),
+        ("../_assets/images/last.png", "Last"),
+        ("../_assets/images/first.png", "First"),
+        ("../_assets/images/mdfirst.png", "Md first"),
+        ("../_assets/images/after-refused.png", "After the refused one"),
+        (None, ""),
+    ], "the first accepted figure after the item, either form; after two items it is the last's; a section's figure before any step is no one's"
+    assert parsed.chapters == ["One", "Two"]
+    # A figure between the item and its prose does not end the step's content; the caption and the alt are no text.
+    assert parsed.steps[1].instruction == "House figure.\n\nThe prose after the figure is still the step's."
+    for step in parsed.steps:
+        assert "<" not in step.instruction and "Caption" not in step.instruction and "Cap" not in step.instruction
+        assert "alt" not in step.instruction.lower(), step.instruction
+
+
+def _img(tag: str, after: str = "") -> tuple[str | None, str]:
+    """The picture and the alt the parser takes from ``tag`` on its own line after one item."""
+    step = _parse(f"## S\n\n1. Step.\n\n{tag}\n{after}").steps[0]
+    return step.image, step.alt
+
+
+def test_an_img_tag_is_read_in_any_attribute_order_quoting_and_closing():
+    picture = "../_assets/images/a.png"
+    for tag in (
+        f'<img src="{picture}" alt="A">',
+        f'<img alt="A" src="{picture}">',
+        f"<img src='{picture}' alt='A'>",
+        f'<img src="{picture}" alt="A"/>',
+        f'<img src="{picture}" alt="A" />',
+        f"<img src={picture} alt=A>",
+        f'<IMG SRC="{picture}" ALT="A">',
+        f'<img  src = "{picture}"  alt = "A" >',
+        # Other attributes are ignored - a data-src, a srcset, and a src= INSIDE another attribute's value are not the src.
+        f'<img width="800" data-src="../_assets/images/no.png" title="src=../_assets/images/no.png" src="{picture}" srcset="x.png 2x" alt="A" loading="lazy">',
+        # A duplicate attribute: the first wins, as in a browser.
+        f'<img src="{picture}" src="../_assets/images/second.png" alt="A" alt="B">',
+        # Inside the house figure on one line, and inside its <div>, and as a link's content.
+        f'<div align="center"><figure><img src="{picture}" alt="A"><figcaption>Cap</figcaption></figure></div>',
+        f'<a href="../_assets/images/big.png"><img src="{picture}" alt="A"></a>',
+        f'<p><img src="{picture}" alt="A"></p>',
+    ):
+        assert _img(tag) == (picture, "A"), tag
+    # No alt: the picture with an empty alt.
+    assert _img(f'<img src="{picture}">') == (picture, "")
+    # The src and the alt are HTML-unescaped; a ">" inside a quoted value does not end the tag.
+    assert _img('<img src="../_assets/images/a&amp;b.png" alt="Fish &amp; chips &quot;x&quot; &#8594; File &gt; Open">') == (
+        "../_assets/images/a&b.png", 'Fish & chips "x" → File > Open')
+    assert _img(f'<img alt="File > Open" src="{picture}">') == (picture, "File > Open")
+    # The alt obeys the save's rules: control characters stripped (an entity-encoded one too), spaces collapsed, capped.
+    assert _img(f'<img src="{picture}" alt="a&#12;b \x07c   d">') == (picture, "ab c d")
+    image, alt = _img(f'<img src="{picture}" alt="{"w" * 2500}">')
+    assert image == picture and alt == "w" * walkthroughs.MAX_ALT_CHARS
+
+
+def test_a_refused_src_and_what_is_never_a_picture():
+    for tag in (
+        '<img src="pics/x.png" alt="the workshop folder: outside _assets">',
+        '<img src="../files/x.png" alt="the course, outside _assets">',
+        '<img src="_assets/images/x.png" alt="a workshop-local _assets is not the course\'s">',
+        '<img src="../../outside/x.png" alt="outside the course">',
+        '<img src="../_assets/images/../../../x.png" alt="walks out through _assets">',
+        '<img src="data:image/png;base64,iVBORw0KGgo=" alt="inline data">',
+        '<img src="https://example.com/x.png" alt="by URL">',
+        '<img src="//example.com/x.png" alt="protocol-relative">',
+        '<img src="/etc/x.png" alt="absolute">',
+        '<img src="../_assets/images/x.jpg" alt="not a PNG">',
+        '<img src="../_assets/images/a&#12;b.png" alt="a control character, entity-encoded">',
+        '<img src="../_assets/images/' + "i" * 400 + '.png" alt="over MAX_SOURCE_PATH_CHARS">',
+        '<img src="" alt="empty">',
+        '<img alt="no src at all">',
+        '<video src="../_assets/images/x.png" controls></video>',
+        '<iframe src="../_assets/images/x.png"></iframe>',
+        '<source src="../_assets/images/x.png">',
+        '<image src="../_assets/images/x.png">',
+        '<imgx src="../_assets/images/x.png">',
+    ):
+        assert _img(tag) == (None, ""), tag
+    # Where the Markdown form would not be a picture, the tag is not either: inside a code block, inside <details>,
+    # in a table cell, inside a prose line.
+    fenced = '```html\n<img src="../_assets/images/x.png" alt="code">\n```'
+    assert _img(fenced) == (None, "")
+    assert _parse(f"## S\n\n1. Step.\n\n{fenced}\n").steps[0].instruction == 'Step.\n\n```\n<img src="../_assets/images/x.png" alt="code">\n```'
+    assert _img('<details>\n<summary>More</summary>\n<img src="../_assets/images/x.png" alt="hidden">\n</details>') == (None, "")
+    assert _img('| <figure><img src="../_assets/images/x.png" alt="cell"></figure> | Text |') == (None, "")
+    assert _img("| ![cell](../_assets/images/x.png) | Text |") == (None, ""), "the Markdown form in a cell: the same"
+    prose = _parse('## S\n\n1. Step.\n\nClick <img src="../_assets/images/x.png" alt="icon"> here.\n').steps[0]
+    assert (prose.image, prose.instruction) == (None, "Step.\n\nClick here.")
+
+
 def test_plain_text_rules():
     plain = workshops.plain_text
     assert plain("**bold** and *em* and _under_ and `code` and [a link](http://x) and ![pic](a.png)") == "bold and em and under and code and a link and pic"
@@ -442,10 +613,18 @@ def test_the_parse_is_bounded(monkeypatch):
     assert workshops.MAX_PARSE_STEPS == 3
 
 
-def test_images_resolve_only_inside_the_course_and_only_png():
+def test_images_resolve_only_under_the_courses_assets_and_only_png():
     assert workshops.image_relative_path("01-a", "../_assets/images/x.png#w=200") == "_assets/images/x.png"
-    assert workshops.image_relative_path("01-a", "pics/x.png") == "01-a/pics/x.png"
+    assert workshops.image_relative_path("01-a", "../_assets/images/sub/x.png") == "_assets/images/sub/x.png"
+    assert workshops.image_relative_path("01-a", "./../_assets/images/x.PNG") == "_assets/images/x.PNG"
+    # Inside the course but outside its _assets/images: the workshop's own folder, the lab files, a local _assets.
+    assert workshops.image_relative_path("01-a", "pics/x.png") is None
+    assert workshops.image_relative_path("01-a", "../files/x.png") is None
+    assert workshops.image_relative_path("01-a", "_assets/images/x.png") is None
+    assert workshops.image_relative_path("01-a", "../_assets/x.png") is None
+    assert workshops.image_relative_path("01-a", "../_assets/images") is None
     assert workshops.image_relative_path("01-a", "https://vimeo.com/x") is None
+    assert workshops.image_relative_path("01-a", "data:image/png;base64,iVBORw0KGgo=") is None
     assert workshops.image_relative_path("01-a", "../../outside/x.png") is None
     assert workshops.image_relative_path("01-a", "/etc/x.png") is None
     assert workshops.image_relative_path("01-a", "C:\\x.png") is None
@@ -674,6 +853,31 @@ def test_a_missing_or_outside_image_imports_the_step_without_a_picture(rig, tmp_
     assert sorted(p.name for p in (rig["tmp"] / "walkthroughs" / rec["id"]).iterdir()) == [a["image"], "walkthrough.json"], "no copy of the bad PNG is left behind"
     assert c.get(f"/api/walkthroughs/{rec['id']}/steps/{b['id']}/image").status_code == 404
     assert c.get("/api/walkthroughs").json()["walkthroughs"][0]["first_step_id"] == a["id"]
+
+
+def test_a_house_figure_previews_and_imports_its_picture_and_a_figure_outside_assets_does_not(rig):
+    root = rig["courses"]
+    folder = _course(root, "demo")
+    guide = (
+        '## S\n\n1. Click Run.\n\n<div align="center">\n<figure>\n'
+        '<img src="../_assets/images/run.png" alt="The Run &amp; Preview dialog" width="800">\n'
+        "<figcaption>Run</figcaption>\n</figure>\n</div>\n\n"
+        '2. A picture among the lab files.\n\n<figure>\n<img src="../files/run.png" alt="Not in _assets">\n</figure>\n'
+    )
+    _workshop(folder, "01-first", guide, images={"run.png": _png((12, 7))})
+    (folder / "files").mkdir()
+    (folder / "files" / "run.png").write_bytes(_png((5, 5)))
+    owner = rig["owner"]
+    preview = owner.get("/api/courses/demo/workshops/01-first/preview").json()
+    assert preview["counts"] == {"steps": 2, "chapters": 1, "pictures": 1, "to_capture": 1} and preview["message"] is None
+    assert [(s["picture"], s["image"], s["alt"]) for s in preview["steps"]] == [
+        (True, "run.png", "The Run & Preview dialog"), (False, None, "")]
+    r = owner.post("/api/walkthroughs/import", json={"course": "demo", "slug": "01-first"})
+    assert r.status_code == 200, r.text
+    run, among = r.json()["steps"]
+    assert (run["image"], run["width"], run["height"]) == (f"step-{run['id']}.png", 12, 7)
+    assert run["source"] == {"course": "demo", "slug": "01-first", "image": "_assets/images/run.png", "alt": "The Run & Preview dialog", "launcher": None}
+    assert among["image"] is None and among["source"]["image"] is None, "a PNG in the course but outside _assets/images is no picture"
 
 
 # -- the routes --------------------------------------------------------------------------------------
