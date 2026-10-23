@@ -61,6 +61,15 @@ and a ``nn-slug/guide.md``.
 - at most ``MAX_PARSE_STEPS`` steps are read (a bound on abuse; the
   walkthrough's own ``MAX_STEPS`` applies on import).
 
+**Several workshops, chosen sections** (W2e). One import may take up to ``MAX_WORKSHOPS``
+workshops of ONE course (:func:`load_workshops` hands them back in the course's
+order whatever the order asked), each with the chapters to leave out by name
+(:func:`import_plan` with ``skip_chapters``; :func:`running_chapters` says which
+chapter a step is in, the preview's ``in_chapter``); their steps are joined as one
+walkthrough's by :func:`combine_steps` (with several workshops every workshop starts
+a chapter, "<workshop title> · <section>"), the record's ``source`` by
+:func:`import_source`, and the name when none is given by :func:`default_name`.
+
 **Nothing outside the folder is read.** A course id and a slug are names
 (``NAME_RE``: no separator, no ``..``), the course folder must be a real
 folder under the courses folder and not a link, every file is proven under
@@ -99,6 +108,8 @@ MAX_GUIDE_BYTES = 2 * 1024 * 1024
 MAX_PARSE_STEPS = 500
 #: Characters of a step's text made from its instruction's first sentence (the tooltip).
 TOOLTIP_CHARS = 140
+#: Workshops of one course that ONE import may take (W2e); the walkthrough's own ``MAX_STEPS`` bounds their steps together.
+MAX_WORKSHOPS = 50
 #: Sections that are never chapters, by their heading (case-insensitive, the ``<!-- -->`` comment dropped).
 SKIPPED_SECTIONS = ("troubleshooting", "lab files", "solution")
 #: The one hint kept (as the step's note); every other hint kind is skipped.
@@ -373,25 +384,41 @@ def find_workshop(course: dict, slug: str) -> dict | None:
     return None
 
 
-def load_workshop(root: Path, course_id: str, slug: str) -> tuple[dict, dict, str, Path]:
-    """The course, the workshop (as listed), the guide's text and the course's folder. ``LookupError``
-    for no such course or workshop; ``UnreadableCourse`` (``GuideTooLarge`` for a file over the cap) with the
-    reason for a course or workshop the list left out."""
+def load_workshops(root: Path, course_id: str, slugs: list[str]) -> tuple[dict, list[tuple[dict, str]], Path]:
+    """The course, each named workshop (as listed, with its section) with its guide's text - IN THE COURSE'S ORDER,
+    whatever the order of ``slugs`` - and the course's folder (W2e). ``LookupError`` for no such course or for a
+    workshop that is not there (named); ``UnreadableCourse`` (``GuideTooLarge`` for a file over the cap) with the
+    reason for a course or workshop the list left out (the workshop named). Nothing is half-done: one workshop
+    refused refuses the lot before any guide is handed back."""
     course, reason = _course_or_reason(root, course_id)
     if reason:
         raise UnreadableCourse(f"{course_id}/{reason}")
     if course is None:
         raise LookupError("No such course.")
-    workshop = find_workshop(course, slug)
-    if workshop is None:
-        if slug in course["left_out"]:
-            raise UnreadableCourse(f"{course_id}/{course['left_out'][slug]}")
-        raise LookupError("No such workshop in that course.")
+    listed = {w["slug"]: {**w, "section": section["title"]} for section in course["sections"] for w in section["workshops"]}
+    for slug in slugs:
+        if slug not in listed:
+            if slug in course["left_out"]:
+                raise UnreadableCourse(f"{course_id}/{course['left_out'][slug]}")
+            raise LookupError(f"No such workshop in that course: {slug}.")
     folder = root / course_id
-    guide = _own_file(folder, f"{slug}/{GUIDE_FILE}")
-    if guide is None:
-        raise LookupError("The workshop's guide cannot be read.")
-    return course, workshop, _read_text_strict(guide), folder
+    wanted = set(slugs)
+    out: list[tuple[dict, str]] = []
+    for slug, workshop in listed.items():
+        if slug not in wanted:
+            continue
+        guide = _own_file(folder, f"{slug}/{GUIDE_FILE}")
+        if guide is None:
+            raise LookupError(f"The workshop's guide cannot be read: {slug}.")
+        out.append((workshop, _read_text_strict(guide)))
+    return course, out, folder
+
+
+def load_workshop(root: Path, course_id: str, slug: str) -> tuple[dict, dict, str, Path]:
+    """The course, the workshop (as listed), the guide's text and the course's folder: :func:`load_workshops` for one."""
+    course, parts, folder = load_workshops(root, course_id, [slug])
+    workshop, text = parts[0]
+    return course, workshop, text, folder
 
 
 def resolve_image(folder: Path, slug: str, image: str | None) -> Path | None:
@@ -964,7 +991,7 @@ def preview(course: dict, workshop: dict, parsed: ParsedGuide, folder: Path) -> 
     whether a note was kept; the counts; a message when there are no steps or pictures are missing."""
     missing: list[str] = []
     rows = []
-    for number, step in enumerate(parsed.steps, start=1):
+    for number, (step, in_chapter) in enumerate(zip(parsed.steps, running_chapters(parsed.steps)), start=1):
         rel = image_relative_path(workshop["slug"], step.image)
         found = resolve_image(folder, workshop["slug"], step.image) is not None if rel else False
         if rel and not found:
@@ -973,6 +1000,8 @@ def preview(course: dict, workshop: dict, parsed: ParsedGuide, folder: Path) -> 
             "number": number, "chapter": step.chapter, "instruction": step.instruction, "text": step.text,
             "picture": found, "image": posixpath.basename(rel) if rel else None, "alt": step.alt,
             "launcher": step.launcher, "note": bool(step.note),
+            # W2e: the chapter the step is IN (the dialog's ticks; ``skip_chapters`` names these).
+            "in_chapter": in_chapter,
         })
     pictures = sum(1 for r in rows if r["picture"])
     counts = {"steps": len(rows), "chapters": len(parsed.chapters), "pictures": pictures, "to_capture": len(rows) - pictures}
@@ -994,12 +1023,28 @@ def preview(course: dict, workshop: dict, parsed: ParsedGuide, folder: Path) -> 
     }
 
 
-def import_plan(course: dict, workshop: dict, parsed: ParsedGuide, folder: Path) -> tuple[dict, list[dict]]:
-    """The walkthrough's ``source`` and the steps ``services.walkthroughs.create_from_workshop`` takes:
-    each with its picture as a path proven under the course (or None) and its own ``source``."""
-    source = {"course": course["id"], "slug": workshop["slug"], "title": course["title"], "version": course["version"]}
+def running_chapters(steps: list[ParsedStep]) -> list[str]:
+    """The chapter each step is IN (W2e): the name of the latest step at or before it that starts one - "" for the
+    steps before the first heading. What the preview answers as ``in_chapter`` and what ``skip_chapters`` names. Pure."""
+    out: list[str] = []
+    current = ""
+    for step in steps:
+        current = step.chapter or current
+        out.append(current)
+    return out
+
+
+def import_plan(course: dict, workshop: dict, parsed: ParsedGuide, folder: Path, skip_chapters=()) -> list[dict]:
+    """The steps ``services.walkthroughs.create_from_workshop`` takes for one workshop: each with its picture as a
+    path proven under the course (or None), its own ``source`` and its anchor. The steps of the chapters named in
+    ``skip_chapters`` are left out (W2e: by the chapter's name as :func:`running_chapters` gives it - "" the steps
+    before the first heading; a name the guide has no chapter of is ignored, so an edited guide gives more steps
+    rather than fewer); a kept step's anchor is its place in the FULL guide, so the export still finds it. Pure."""
+    skip = set(skip_chapters or ())
     steps = []
-    for step in parsed.steps:
+    for step, in_chapter in zip(parsed.steps, running_chapters(parsed.steps)):
+        if in_chapter in skip:
+            continue
         rel = image_relative_path(workshop["slug"], step.image)
         picture = resolve_image(folder, workshop["slug"], step.image) if rel else None
         steps.append({
@@ -1009,4 +1054,60 @@ def import_plan(course: dict, workshop: dict, parsed: ParsedGuide, folder: Path)
                        "alt": rules.strip_control_characters(step.alt)[: rules.MAX_ALT_CHARS],
                        "launcher": source_path((step.launcher or {}).get("path"))},
         })
-    return source, steps
+    return steps
+
+
+def import_source(course: dict, workshops: list[dict]) -> dict:
+    """The record's ``source`` (W2e): ``{course, slug, title, version}`` as before - ``slug`` the FIRST workshop's, for
+    any reader before this - and ``workshops``, ``[{slug, title}, …]`` in the course's order (``workshops`` as
+    :func:`load_workshops` lists them)."""
+    return {
+        "course": course["id"], "slug": workshops[0]["slug"], "title": course["title"], "version": course["version"],
+        "workshops": [{"slug": w["slug"], "title": (w.get("title") or w["slug"]).strip()[: rules.MAX_NAME_CHARS]} for w in workshops],
+    }
+
+
+def chapter_across(title: str, chapter: str) -> str:
+    """A step's chapter in a walkthrough of several workshops (W2e): "<workshop title> · <section>", or the title
+    alone for a step that starts no section's chapter, cut at a word to ``MAX_CHAPTER_CHARS``. Pure."""
+    return cut_at_word(f"{title} · {chapter}" if chapter else title, rules.MAX_CHAPTER_CHARS)
+
+
+def combine_steps(parts: list[tuple[dict, list[dict]]]) -> list[dict]:
+    """The steps of the chosen workshops as ONE walkthrough's (W2e): ``parts`` is ``(workshop, its planned steps)`` in
+    the course's order. With one workshop the steps are as they are; with several, a step that starts a chapter
+    starts "<workshop title> · <section>" (:func:`chapter_across`) and the first step of each workshop starts a
+    chapter named by the workshop when it starts none - so every workshop starts a chapter and the player's Chapters
+    menu reads like the course. The parts are not changed. Pure."""
+    if len(parts) <= 1:
+        return [dict(step) for _workshop, steps in parts for step in steps]
+    out: list[dict] = []
+    for workshop, steps in parts:
+        title = (workshop.get("title") or workshop["slug"]).strip()
+        for index, step in enumerate(steps):
+            chapter = step.get("chapter") or ""
+            if chapter or index == 0:
+                chapter = chapter_across(title, chapter)
+            out.append({**step, "chapter": chapter})
+    return out
+
+
+def default_name(course: dict, slugs: list[str]) -> str:
+    """The walkthrough's name when none is given (W2e, E1) - the dialog's ``defaultName`` (``lib/workshops.ts``) on
+    the server, ONE rule: one workshop, its title; every workshop of the course, the course's title; every workshop
+    of exactly one section (that has a title), the section's title; otherwise "<first workshop's title> + N more" -
+    the first in the COURSE's order, whatever order the workshops were named in. "" for none. Pure."""
+    chosen = set(slugs)
+    every = [w for section in course["sections"] for w in section["workshops"]]
+    picked = [w for w in every if w["slug"] in chosen]
+    if not picked:
+        return ""
+    if len(picked) == 1:
+        return picked[0]["title"]
+    if len(picked) == len(every):
+        return course["title"]
+    for section in course["sections"]:
+        own = [w["slug"] for w in section["workshops"]]
+        if own and section["title"] and len(own) == len(picked) and all(slug in chosen for slug in own):
+            return section["title"]
+    return f"{picked[0]['title']} + {len(picked) - 1} more"

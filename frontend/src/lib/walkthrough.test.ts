@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  type Step, type WalkthroughDocument, MAX_STEPS, MIN_HOTSPOT_SIDE, backIndex, canAddStep, chapterAt, chapterCount, chapterStart, chapters,
+  type Step, type WalkthroughDocument, type WalkthroughSource, MAX_STEPS, MIN_HOTSPOT_SIDE, backIndex, canAddStep, chapterAt, chapterCount, chapterStart, chapters,
   clampHotspot, clampIndex, countsLine, deleteStep, displayedRect, documentOf, endIndex, fitRect, hasPicture, homeIndex, imagesOf, insertStep,
   moveStep, namesOnly, narrationOf, nextIndex, normaliseStep, playUrl, putBody, reorderStep, safeFileStem, sameDocument, serialiseDocument,
   setHotspot, shownAsModal, stepById, stepImageUrl, stepIndex, stepLabel, stepsToCapture, tooltipPlacement, transcript, transcriptFileName,
@@ -24,6 +24,13 @@ describe("the document", () => {
   it("normalises a step to exactly the server's fields, the hotspot in whole pixels, and compares by content", () => {
     const s = normaliseStep({ ...step(A), hotspot: { x: 1.4, y: 2.6, width: 10.2, height: 9.9 }, extra: "dropped" } as Step);
     expect(Object.keys(s)).toEqual(["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "note", "source"]);
+    // W2e: the record's own `source` (its workshops among it) is the server's - never sent, as a step's anchor is not.
+    const put = putBody({ name: "N", steps: [step("aaaaaaaaaaaa", { anchor: { key: "k", ordinal: 1 } })] }, 3) as unknown as Record<string, unknown>;
+    expect(Object.keys(put)).toEqual(["version", "name", "revision", "steps"]);
+    expect("source" in put).toBe(false);
+    expect("anchor" in (put.steps as Record<string, unknown>[])[0]).toBe(false);
+    const source: WalkthroughSource = { course: "c", slug: "a", title: "T", version: "1", workshops: [{ slug: "a", title: "A" }, { slug: "b", title: "B" }] };
+    expect(source.workshops?.map((w) => w.slug)).toEqual(["a", "b"]);
     expect(s.hotspot).toEqual({ x: 1, y: 3, width: 10, height: 10 });
     const a = doc(step(A, { text: "x" })), b = doc({ ...step(A, { text: "x" }) });
     expect(sameDocument(a, b)).toBe(true);

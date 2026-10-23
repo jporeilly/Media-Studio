@@ -508,7 +508,7 @@ def test_a_guide_changed_since_the_preview_is_refused_with_409_and_nothing_is_wr
     s["guide"].write_bytes(s["guide"].read_bytes() + b"An edit in the Content Editor.\r\n")
     before = _snapshot(s["folder"])
     r = _write(c, rec["id"], plan["guide_sha256"])
-    assert r.status_code == 409 and r.json()["detail"] == "The guide changed since the preview: preview again."
+    assert r.status_code == 409 and r.json()["detail"] == "The guide demo/01-first/guide.md changed since the preview: preview again."
     assert _snapshot(s["folder"]) == before, "nothing written: not a picture, not the guide"
     assert auth_store.list_audit(action="walkthrough.export_course") == []
     # Previewed again, it goes through.
@@ -756,7 +756,7 @@ def test_the_guide_changed_while_the_pictures_are_written_is_refused_and_rolled_
 
     monkeypatch.setattr(course_export, "write_file", save_midway)
     r = _write(c, rec["id"], plan["guide_sha256"])
-    assert r.status_code == 409 and r.json()["detail"] == course_export.CHANGED_MESSAGE
+    assert r.status_code == 409 and r.json()["detail"] == course_export.changed_message("demo/01-first/guide.md")
     assert guide.read_bytes() == edited, "their save stands"
     assert _contents(folder) == {**before, "01-first/guide.md": hashlib.sha256(edited).hexdigest()}, "our pictures taken back"
     assert auth_store.list_audit(action="walkthrough.export_course") == []
@@ -1036,4 +1036,345 @@ def test_the_real_first_win_exports_and_still_parses_the_same(lab, rig, monkeypa
     for st in after.steps:
         marker = next((i for i in range(st.start_line, st.end_line) if lines[i].startswith("<!-- media-studio:")), None)
         assert (marker is not None) == ("_assets/images/wt-" in (st.image or "")), st.text
+    assert _plan(c, rec["id"])["changed"] is False
+
+
+# -- W2e (E4): several workshops - a plan per guide, one write under one journal, one zip ---------------------------
+
+TWO_SUMMARY = "# T\n\n## Part\n\n* [First](01-first/guide.md)\n* [Second](02-second/guide.md)\n"
+SECOND_GUIDE = (
+    "# Second workshop\n\n"
+    "## 1. Build\n\n"
+    "1. Drag **Text file input** onto the canvas.\n"
+    "2. Press **Run**.\n\n"
+    "## Lab Files\n\n"
+    "[x.ktr](./files/x.ktr)\n"
+)
+EXPORT_BODY = "/api/walkthroughs/{wid}/export/course"
+
+
+def _setup_two(rig, monkeypatch, *, picture=(2, 5, 6, 7), hotspots=(2, 6), who="admin") -> dict:
+    """The demo course with TWO workshops - ``GUIDE`` as 01-first (five steps, the third with the guide's own picture)
+    and ``SECOND_GUIDE`` as 02-second (two steps) - imported together, named in the OTHER order (the course's order
+    rules), CRLF as the content manager's guides are; the steps numbered in ``picture`` (over the whole walkthrough)
+    given a still of 400 x 300, a hotspot for those in ``hotspots``."""
+    folder = _course(rig["courses"], "demo", summary=TWO_SUMMARY)
+    _workshop(folder, "01-first", "", images={"authored.png": _png((40, 30), (0, 128, 0))})
+    (folder / "01-first" / "guide.md").write_bytes(_crlf(GUIDE).encode("utf-8"))
+    _workshop(folder, "02-second", "")
+    (folder / "02-second" / "guide.md").write_bytes(_crlf(SECOND_GUIDE).encode("utf-8"))
+    c = rig[who]
+    r = c.post("/api/walkthroughs/import", json={"course": "demo", "workshops": [{"slug": "02-second"}, {"slug": "01-first"}]})
+    assert r.status_code == 200, r.text
+    rec = r.json()
+    assert [st["source"]["slug"] for st in rec["steps"]] == ["01-first"] * 5 + ["02-second"] * 2, "the course's order"
+    for number in picture:
+        sid = rec["steps"][number - 1]["id"]
+        cid = _still(rig, monkeypatch, 400, 300, who=who)
+        r = c.post(f"/api/walkthroughs/{rec['id']}/steps/{sid}/picture", json={"capture_id": cid, "hotspot": HOTSPOT if number in hotspots else None})
+        assert r.status_code == 200, r.text
+        rec = r.json()
+    guides = {slug: folder / slug / "guide.md" for slug in ("01-first", "02-second")}
+    return {"rec": rec, "folder": folder, "guides": guides, "images": folder / "_assets" / "images", "c": c}
+
+
+def _write_guides(c, wid, plan, player=False):
+    """The write with every guide's sha256 from the plan (E4's body)."""
+    body = {"guides": [{"slug": g["slug"], "sha256": g["guide_sha256"]} for g in plan["guides"]], "player": player}
+    return c.post(EXPORT_BODY.format(wid=wid), json=body)
+
+
+def test_the_plan_is_per_guide_and_each_step_goes_into_its_own_workshop(rig, monkeypatch):
+    """E4: one guide read, parsed and planned per workshop of the record; the steps grouped by their own slug; the
+    figures, the skipped, the diff per guide; the pictures in the one ``_assets/images``, each named by its slug; the
+    flat lists (and the one-guide fields) kept for a page before this; nothing written."""
+    s = _setup_two(rig, monkeypatch)
+    c, rec = s["c"], s["rec"]
+    wid, steps = rec["id"], rec["steps"]
+    before = _snapshot(s["folder"])
+    plan = _plan(c, wid)
+    assert _snapshot(s["folder"]) == before, "the plan writes nothing"
+    first, second = plan["guides"]
+    assert (first["slug"], first["title"], first["guide"]) == ("01-first", "First", "demo/01-first/guide.md")
+    assert (second["slug"], second["title"], second["guide"]) == ("02-second", "Second", "demo/02-second/guide.md")
+    assert first["guide_sha256"] == hashlib.sha256(s["guides"]["01-first"].read_bytes()).hexdigest()
+    assert second["guide_sha256"] == hashlib.sha256(s["guides"]["02-second"].read_bytes()).hexdigest()
+    assert [(p["number"], p["text"], p["image"], p["hotspot"], p["how"]) for p in first["placed"]] == [
+        (2, "Right-click Valid rows and select Preview.", f"wt-01-first-{wid}-{steps[1]['id']}.png", {"x": "45.0", "y": "23.3"}, "new"),
+        (5, "Select Cancel.", f"wt-01-first-{wid}-{steps[4]['id']}.png", None, "new"),
+    ]
+    assert [(p["number"], p["text"], p["image"], p["hotspot"], p["how"]) for p in second["placed"]] == [
+        (6, "Drag Text file input onto the canvas.", f"wt-02-second-{wid}-{steps[5]['id']}.png", {"x": "45.0", "y": "23.3"}, "new"),
+        (7, "Press Run.", f"wt-02-second-{wid}-{steps[6]['id']}.png", None, "new"),
+    ]
+    assert [(k["number"], k["reason"]) for k in first["skipped"]] == [
+        (1, course_export.NO_PICTURE_REASON), (3, course_export.GUIDE_PICTURE_REASON), (4, course_export.NO_PICTURE_REASON)]
+    assert second["skipped"] == [] and first["not_placed"] == [] and second["not_placed"] == []
+    assert (first["figures"], second["figures"], plan["figures"]) == (2, 2, 4)
+    assert plan["placed"] == first["placed"] + second["placed"] and plan["skipped"] == first["skipped"] and plan["not_placed"] == []
+    assert plan["workshop"] == {"slug": "01-first", "title": "First"} and plan["guide"] == "demo/01-first/guide.md"
+    assert plan["guide_sha256"] == first["guide_sha256"]
+    assert first["diff"].startswith("--- a/01-first/guide.md\n+++ b/01-first/guide.md\n@@ ")
+    assert second["diff"].startswith("--- a/02-second/guide.md\n+++ b/02-second/guide.md\n@@ ")
+    assert plan["diff"] == first["diff"] + "\n" + second["diff"]
+    assert first["diff"].count("+<!-- media-studio: walkthrough") == 2 and second["diff"].count("+<!-- media-studio: walkthrough") == 2
+    assert "+<figcaption>Second · 1. Build</figcaption>" in second["diff"], "the caption is the step's chapter, named by its workshop"
+    assert {f["path"]: f["action"] for f in plan["files"]} == {
+        "01-first/guide.md": "write", "02-second/guide.md": "write",
+        **{f"_assets/images/{p['image']}": "write" for p in plan["placed"]},
+    }
+    assert plan["changed"] is True and plan["kept"] == [] and plan["debris"] == [] and plan["allowed"] is False
+
+
+def test_the_write_puts_each_guide_in_place_under_one_journal_and_the_zip_holds_every_guide(rig, monkeypatch):
+    """E4: ``guides: [{slug, sha256}]`` writes every guide (CRLF kept, each step's figure in ITS guide), one audit row
+    naming the guides; a second export writes nothing; the old ``sha256`` alone is refused for a record of several
+    workshops; the zip holds every guide and the pictures; the player goes into the FIRST workshop's folder with the
+    guide line in THAT guide only."""
+    s = _setup_two(rig, monkeypatch)
+    c, rec, guides = s["c"], s["rec"], s["guides"]
+    wid = rec["id"]
+    config._config["courses_export"] = True
+    originals = {slug: path.read_bytes() for slug, path in guides.items()}
+    plan = _plan(c, wid)
+    r = _write_guides(c, wid, plan)
+    assert r.status_code == 200, r.text
+    result = r.json()
+    assert result["message"] == "Wrote 4 figures into 2 guides of demo (01-first, 02-second). Review and publish them in the Content Editor."
+    assert (result["figures"], result["images"], result["guide_written"], result["player"]) == (4, 4, True, False)
+    assert [(g["slug"], g["guide"], g["figures"], g["guide_written"]) for g in result["guides"]] == [
+        ("01-first", "demo/01-first/guide.md", 2, True), ("02-second", "demo/02-second/guide.md", 2, True)]
+    assert (result["slug"], result["guide"]) == ("01-first", "demo/01-first/guide.md"), "the one-guide fields name the first"
+    assert sorted(result["written"]) == sorted(["01-first/guide.md", "02-second/guide.md"] + [f"_assets/images/{p['image']}" for p in plan["placed"]])
+    for slug, path in guides.items():
+        raw = path.read_bytes()
+        assert raw.count(b"\r\n") == raw.count(b"\n") and raw.count(b"\r\n") > originals[slug].count(b"\r\n"), "CRLF stays CRLF, new lines too"
+        text = raw.decode("utf-8")
+        assert _without_blocks(text) == originals[slug].decode("utf-8"), "the rest of each guide byte for byte"
+        other = {"01-first": "wt-02-second-", "02-second": "wt-01-first-"}[slug]
+        assert f"wt-{slug}-{wid}-" in text and other not in text, "each step's figure is in ITS workshop's guide"
+    assert [g["guide_sha256"] for g in result["guides"]] == [hashlib.sha256(guides[slug].read_bytes()).hexdigest() for slug in ("01-first", "02-second")]
+    assert result["guide_sha256"] == result["guides"][0]["guide_sha256"]
+    for p in plan["placed"]:
+        assert (s["images"] / p["image"]).read_bytes() == (rig["tmp"] / "walkthroughs" / wid / f"step-{p['step_id']}.png").read_bytes()
+    rows = auth_store.list_audit(action="walkthrough.export_course")
+    assert [(row["entity_id"], row["detail"]) for row in rows] == [(wid, "demo: 4 figures, 4 images into 2 guides (01-first, 02-second)")]
+    # Each guide still parses to its own steps, the figure now each step's picture.
+    for slug, texts in (("01-first", [st["text"] for st in rec["steps"][:5]]), ("02-second", [st["text"] for st in rec["steps"][5:]])):
+        again = workshops.parse_guide(guides[slug].read_bytes().decode("utf-8"), {"spoon": "Pentaho Data Integration"})
+        assert [st.text for st in again.steps] == texts
+    # A second export: nothing to write in either guide, byte for byte and time for time.
+    snap = _snapshot(s["folder"])
+    second = _plan(c, wid)
+    assert second["changed"] is False and [g["diff"] for g in second["guides"]] == ["", ""] and second["diff"] == ""
+    assert [p["how"] for p in second["placed"]] == ["unchanged"] * 4
+    r = _write_guides(c, wid, second)
+    assert r.status_code == 200 and r.json()["written"] == [] and r.json()["removed"] == []
+    assert r.json()["message"] == "Nothing to write: the 2 guides of demo (01-first, 02-second) already hold 4 figures of this walkthrough."
+    assert _snapshot(s["folder"]) == snap
+    # The body before W2e - one sha256 - cannot vouch for two guides: refused, nothing written.
+    r = _write(c, wid, second["guide_sha256"])
+    assert r.status_code == 400 and "preview again" in r.json()["detail"] and "02-second" in r.json()["detail"], r.text
+    assert _snapshot(s["folder"]) == snap
+    # The zip: every guide and the pictures, laid out like the course.
+    zf = zipfile.ZipFile(io.BytesIO(c.get(f"/api/walkthroughs/{wid}/export/course.zip").content))
+    assert zf.namelist() == sorted(["01-first/guide.md", "02-second/guide.md"] + [f"_assets/images/{p['image']}" for p in plan["placed"]])
+    assert zf.read("01-first/guide.md") == guides["01-first"].read_bytes() and zf.read("02-second/guide.md") == guides["02-second"].read_bytes()
+    _needs_player()
+    names = zipfile.ZipFile(io.BytesIO(c.get(f"/api/walkthroughs/{wid}/export/course.zip?player=1").content)).namelist()
+    assert "01-first/walkthrough/index.html" in names and not any(n.startswith("02-second/walkthrough/") for n in names)
+    # The player written: into the FIRST workshop's folder, the guide line in THAT guide only.
+    third = _plan(c, wid, player=True)
+    assert [g["diff"] != "" for g in third["guides"]] == [True, False]
+    r = _write_guides(c, wid, third, player=True)
+    assert r.status_code == 200, r.text
+    assert (s["folder"] / "01-first" / "walkthrough" / "index.html").is_file() and not (s["folder"] / "02-second" / "walkthrough").exists()
+    assert f"<!-- media-studio: walkthrough {wid} player -->" in guides["01-first"].read_bytes().decode("utf-8")
+    assert "player -->" not in guides["02-second"].read_bytes().decode("utf-8")
+    assert auth_store.list_audit(action="walkthrough.export_course")[0]["detail"] == "demo: 4 figures, 0 images into 2 guides (01-first, 02-second), player"
+
+
+def test_a_changed_guide_among_several_is_refused_with_409_naming_it_and_nothing_is_written(rig, monkeypatch):
+    """E4: EVERY guide's sha256 is checked before the first byte - one changed is a 409 naming it, nothing written in
+    either guide; a guide left out of the body is refused too; the body takes one form or the other."""
+    s = _setup_two(rig, monkeypatch)
+    c, rec, guides = s["c"], s["rec"], s["guides"]
+    wid = rec["id"]
+    config._config["courses_export"] = True
+    plan = _plan(c, wid)
+    guides["02-second"].write_bytes(guides["02-second"].read_bytes() + b"An edit in the Content Editor.\r\n")
+    before = _snapshot(s["folder"])
+    r = _write_guides(c, wid, plan)
+    assert r.status_code == 409 and r.json()["detail"] == "The guide demo/02-second/guide.md changed since the preview: preview again.", r.text
+    assert _snapshot(s["folder"]) == before, "nothing written: not a picture, not the first guide"
+    assert auth_store.list_audit(action="walkthrough.export_course") == []
+    only_first = {"guides": [{"slug": "01-first", "sha256": plan["guides"][0]["guide_sha256"]}], "player": False}
+    r = c.post(EXPORT_BODY.format(wid=wid), json=only_first)
+    assert r.status_code == 400 and "02-second" in r.json()["detail"] and "preview again" in r.json()["detail"], r.text
+    assert _snapshot(s["folder"]) == before
+    sha = plan["guides"][0]["guide_sha256"]
+    for bad in (
+        {"guide_sha256": sha, "guides": [{"slug": "01-first", "sha256": sha}]},
+        {"player": False},
+        {"guides": []},
+        {"guides": [{"slug": "01-first", "sha256": "nope"}]},
+        {"guides": [{"slug": "01-first", "sha256": sha}, {"slug": "01-first", "sha256": sha}]},
+        {"guides": [{"slug": "01-first", "sha256": sha, "extra": 1}]},
+    ):
+        assert c.post(EXPORT_BODY.format(wid=wid), json=bad).status_code == 422, bad
+    assert _snapshot(s["folder"]) == before
+    # Previewed again, it goes through.
+    assert _write_guides(c, wid, _plan(c, wid)).status_code == 200
+
+
+def test_a_failure_in_the_second_guide_rolls_back_the_first_guide_and_every_picture(rig, monkeypatch):
+    """E4: one journal for the whole export - the second guide's write failing part-way puts the first guide and
+    every picture back as they were, no backup or temporary file left, no audit row."""
+    s = _setup_two(rig, monkeypatch)
+    c, rec, folder = s["c"], s["rec"], s["folder"]
+    wid = rec["id"]
+    config._config["courses_export"] = True
+    plan = _plan(c, wid)
+    before = _contents(folder)
+    real_write = course_export.write_file
+    images = sorted(p["image"] for p in plan["placed"])
+
+    def failing(target_folder, file_name, data):
+        if file_name == "guide.md" and target_folder.name == "02-second":
+            # X3: at this moment the export HAS written - guide A holds the walkthrough's two blocks and every picture
+            # is on disk - so the rollback below has something to take back (the test cannot pass by never reaching A).
+            text = s["guides"]["01-first"].read_bytes().decode("utf-8")
+            assert text.count(f"<!-- media-studio: walkthrough {wid} step ") == 2, "guide A was written before guide B failed"
+            assert sorted(p.name for p in s["images"].iterdir() if p.name.startswith("wt-")) == images, "every picture was written first"
+            raise PermissionError(13, "Access is denied")
+        return real_write(target_folder, file_name, data)
+
+    monkeypatch.setattr(course_export, "write_file", failing)
+    r = _write_guides(c, wid, plan)
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Could not write demo/02-second/guide.md into the course: Access is denied. Nothing was changed: download the zip instead."
+    assert _contents(folder) == before, "the first guide restored, every picture taken back, nothing left behind"
+    assert auth_store.list_audit(action="walkthrough.export_course") == []
+    monkeypatch.setattr(course_export, "write_file", real_write)
+    assert _write_guides(c, wid, plan).status_code == 200
+    assert _contents(folder) != before
+
+
+def test_a_read_only_second_guide_is_refused_before_a_byte_naming_it(rig, monkeypatch):
+    """X3: ``check_writable`` covers every guide's target - a read-only ``02-second/guide.md`` is refused with 400
+    naming it before anything is written (guide A untouched, no picture, no audit row); writable again, the same
+    plan writes both guides."""
+    s = _setup_two(rig, monkeypatch)
+    c, rec, guides, folder = s["c"], s["rec"], s["guides"], s["folder"]
+    wid = rec["id"]
+    config._config["courses_export"] = True
+    plan = _plan(c, wid)
+    before = _contents(folder)
+    os.chmod(guides["02-second"], stat.S_IREAD)
+    try:
+        r = _write_guides(c, wid, plan)
+    finally:
+        os.chmod(guides["02-second"], stat.S_IREAD | stat.S_IWRITE)
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Could not write demo/02-second/guide.md into the course: it is read-only. Nothing was changed: download the zip instead."
+    assert _contents(folder) == before, "nothing written: not guide A, not a picture"
+    assert auth_store.list_audit(action="walkthrough.export_course") == []
+    r = _write_guides(c, wid, plan)
+    assert r.status_code == 200, r.text
+    assert {"01-first/guide.md", "02-second/guide.md"} <= set(r.json()["written"])
+    assert len(auth_store.list_audit(action="walkthrough.export_course")) == 1
+
+
+def test_a_step_of_no_workshop_of_the_record_is_not_placed_and_says_why(rig, monkeypatch):
+    """E4: a step whose slug names none of the record's workshops is not placed, with the reason; in a walkthrough
+    of several workshops a step with no workshop at all (added from a still) is not placed either - nothing is
+    guessed - where a walkthrough of one workshop still places it by its text."""
+    s = _setup_two(rig, monkeypatch, picture=(2, 6), hotspots=(2, 6))
+    c, rec = s["c"], s["rec"]
+    wid = rec["id"]
+    cid = _still(rig, monkeypatch, 300, 200)
+    rec = c.post(f"/api/walkthroughs/{wid}/steps", json={"capture_id": cid}).json()
+    assert "slug" not in (rec["steps"][-1]["source"] or {})
+    stored_path = rig["tmp"] / "walkthroughs" / wid / "walkthrough.json"
+    stored = json.loads(stored_path.read_text(encoding="utf-8"))
+    stored["steps"][5]["source"]["slug"] = "09-elsewhere"
+    stored_path.write_text(json.dumps(stored), encoding="utf-8")
+    plan = _plan(c, wid)
+    assert [(n["number"], n["reason"]) for n in plan["not_placed"]] == [
+        (6, course_export.FOREIGN_WORKSHOP_REASON), (8, course_export.NO_WORKSHOP_REASON)]
+    assert all(g["not_placed"] == [] for g in plan["guides"]), "neither belongs to a guide"
+    assert [p["number"] for p in plan["placed"]] == [2] and plan["figures"] == 1
+    assert course_export.FOREIGN_WORKSHOP_REASON == "Its workshop is not one this walkthrough was imported from."
+    assert "guessed" in course_export.NO_WORKSHOP_REASON or "no workshop" in course_export.NO_WORKSHOP_REASON.lower()
+    # The same step without a picture is skipped (no picture), not "not placed".
+    rec = c.get(f"/api/walkthroughs/{wid}").json()
+    gone = [st for st in rec["steps"] if st["id"] != rec["steps"][-1]["id"]]
+    c.put(f"/api/walkthroughs/{wid}", json={"version": 1, "name": rec["name"], "revision": rec["revision"], "steps": gone})
+    plan = _plan(c, wid)
+    assert [(n["number"], n["reason"]) for n in plan["not_placed"]] == [(6, course_export.FOREIGN_WORKSHOP_REASON)]
+    assert (7, course_export.NO_PICTURE_REASON) in [(k["number"], k["reason"]) for k in plan["skipped"]]
+
+
+def test_a_picture_named_by_one_of_the_walkthroughs_own_other_guides_is_kept(rig, monkeypatch):
+    """E4: ``used_elsewhere`` looks across the course's other workshops - one of the walkthrough's OWN other guides
+    among them: a picture an author reused there is "used", never removed, and the plan says so."""
+    s = _setup_two(rig, monkeypatch, picture=(2, 6), hotspots=(2, 6))
+    c, rec, guides, images = s["c"], s["rec"], s["guides"], s["images"]
+    wid = rec["id"]
+    config._config["courses_export"] = True
+    assert _write_guides(c, wid, _plan(c, wid)).status_code == 200
+    sid = rec["steps"][5]["id"]
+    name = f"wt-02-second-{wid}-{sid}.png"
+    first = guides["01-first"]
+    first.write_bytes(first.read_bytes() + f'\r\n<img src="../_assets/images/{name}" alt="Reused by an author">\r\n'.encode("utf-8"))
+    rec = c.get(f"/api/walkthroughs/{wid}").json()
+    rec = c.put(f"/api/walkthroughs/{wid}", json={"version": 1, "name": rec["name"], "revision": rec["revision"],
+                                                   "steps": [st for st in rec["steps"] if st["id"] != sid]}).json()
+    plan = _plan(c, wid)
+    assert [rm["step_id"] for rm in plan["guides"][1]["removed"]] == [sid] and plan["guides"][0]["removed"] == []
+    assert plan["kept"] == [{"path": f"_assets/images/{name}", "reason": "still used by 01-first"}] and plan["guides"][1]["kept"] == plan["kept"]
+    assert f"_assets/images/{name}" not in {f["path"] for f in plan["files"] if f["action"] == "remove"}
+    r = _write_guides(c, wid, plan)
+    assert r.status_code == 200 and r.json()["removed"] == [] and (images / name).is_file()
+    assert sid not in guides["02-second"].read_bytes().decode("utf-8")
+
+
+def test_the_real_lab_two_workshops_export_each_into_its_own_guide(lab, rig, monkeypatch):
+    """The course the parser was designed against, COPIED: two workshops of one section imported as one walkthrough,
+    every step without a picture captured, the export written - each figure after its own item in ITS guide, both
+    guides CRLF and parsing as before."""
+    shutil.copytree(lab / LAB, rig["courses"] / LAB)
+    c = rig["admin"]
+    slugs = ["01-first-win", "02-build-the-pipeline"]
+    r = c.post("/api/walkthroughs/import", json={"course": LAB, "workshops": [{"slug": slugs[1]}, {"slug": slugs[0]}]})
+    assert r.status_code == 200, r.text
+    rec = r.json()
+    assert rec["name"] == "See It Work" and [w["slug"] for w in rec["source"]["workshops"]] == slugs
+    assert len(rec["steps"]) == GUIDES[slugs[0]][0] + GUIDES[slugs[1]][0]
+    assert rec["steps"][0]["chapter"] == "Your First Win · 1. Open the pipeline"
+    for step in rec["steps"]:
+        if not step["image"]:
+            cid = _still(rig, monkeypatch, 1600, 900)
+            rec = c.post(f"/api/walkthroughs/{rec['id']}/steps/{step['id']}/picture", json={"capture_id": cid, "hotspot": HOTSPOT}).json()
+    paths = {slug: rig["courses"] / LAB / slug / "guide.md" for slug in slugs}
+    originals = {slug: path.read_bytes() for slug, path in paths.items()}
+    plan = _plan(c, rec["id"])
+    captured = [GUIDES[slug][0] - GUIDES[slug][2] for slug in slugs]
+    assert [g["figures"] for g in plan["guides"]] == captured and plan["not_placed"] == []
+    assert len(plan["skipped"]) == GUIDES[slugs[0]][2] + GUIDES[slugs[1]][2]
+    config._config["courses_export"] = True
+    assert _write_guides(c, rec["id"], plan).status_code == 200
+    for slug, path in paths.items():
+        raw = path.read_bytes()
+        assert raw.count(b"\r\n") == raw.count(b"\n"), "the guide stays CRLF"
+        text = raw.decode("utf-8")
+        assert _without_blocks(text) == originals[slug].decode("utf-8")
+        before = workshops.parse_guide(originals[slug].decode("utf-8"), {"spoon": "Pentaho Data Integration"})
+        after = workshops.parse_guide(text, {"spoon": "Pentaho Data Integration"})
+        assert [(st.text, st.instruction, st.chapter, st.note, st.key, st.ordinal) for st in after.steps] == [
+            (st.text, st.instruction, st.chapter, st.note, st.key, st.ordinal) for st in before.steps]
+        lines = workshops.guide_lines(text)
+        for st in after.steps:
+            marker = next((i for i in range(st.start_line, st.end_line) if lines[i].startswith("<!-- media-studio:")), None)
+            assert (marker is not None) == (f"_assets/images/wt-{slug}-" in (st.image or "")), (slug, st.text)
     assert _plan(c, rec["id"])["changed"] is False

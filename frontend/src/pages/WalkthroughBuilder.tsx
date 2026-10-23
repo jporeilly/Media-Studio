@@ -51,7 +51,7 @@ import { StillPicker } from "../components/walkthrough/StillPicker";
 import { useGuidedCapture } from "../components/walkthrough/useGuidedCapture";
 import { fitZoom } from "../lib/annotate";
 import type { Capture } from "../lib/capture";
-import { SAVE_BEFORE_EXPORT } from "../lib/courseExport";
+import { SAVE_BEFORE_EXPORT, exportTitle } from "../lib/courseExport";
 import { copyText, downloadText } from "../lib/files";
 import { type GuidedOptions, CLICK_HINT, capturedSteps } from "../lib/guided";
 import { type History, canRedo, canUndo, commit, history, prune, redo, undo } from "../lib/history";
@@ -365,7 +365,7 @@ export default function WalkthroughBuilderPage() {
           <Button size="sm" variant="primary" icon={<Save size={14} />} onClick={() => void save()} disabled={!dirty || saving} title="Save (Ctrl+S)">Save</Button>
           <Button size="sm" icon={<Play size={14} />} onClick={() => void play()} disabled={doc.steps.length === 0} title="Play from the selected step">Play</Button>
           <Button size="sm" icon={<FileText size={14} />} onClick={() => setTranscriptOpen((o) => !o)} aria-expanded={transcriptOpen} title="The walkthrough as a transcript: what is said at each step" data-transcript-toggle="">Transcript</Button>
-          <Button size="sm" icon={<Share size={14} />} onClick={() => void openExport()} disabled={saving || capturing} title={rec.source ? `Write the figures into ${rec.source.course}/${rec.source.slug}, or download them; or download the interactive player` : "Download the interactive player (the walkthrough was not imported from a course workshop)"} data-export-course="">Export to course…</Button>
+          <Button size="sm" icon={<Share size={14} />} onClick={() => void openExport()} disabled={saving || capturing} title={exportTitle(rec.source)} data-export-course="">Export to course…</Button>
           {canCapture && (
             <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={doc.steps.length === 0 || capturing || saving} title={missingCount ? `${missingCount} step${missingCount === 1 ? " has" : "s have"} no picture yet: capture them in order` : "Capture every step again, in order"} data-capture-steps="">Capture steps…</Button>
           )}

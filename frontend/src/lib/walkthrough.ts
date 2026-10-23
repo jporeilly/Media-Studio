@@ -69,8 +69,12 @@ export interface WorkshopSource { course: string; slug: string; image: string | 
 export type StepSource = CaptureSource | WorkshopSource;
 /** Where an imported step is in its guide (W2c): set by the import, kept by the server through every save. */
 export interface StepAnchor { key: string; ordinal: number }
-/** The workshop a walkthrough was imported from (W2), on the record. */
-export interface WalkthroughSource { course: string; slug: string; title: string; version: string }
+/**
+ * The workshop a walkthrough was imported from (W2), on the record - since W2e the workshops: `workshops` lists them
+ * all in the course's order (`slug` is the first's, for a reader before this; absent on a record before W2e). The
+ * server's own: the builder never sends `source` (`putBody` carries the name and the steps), as a step's `anchor`.
+ */
+export interface WalkthroughSource { course: string; slug: string; title: string; version: string; workshops?: { slug: string; title: string }[] }
 
 export interface Step {
   id: string;

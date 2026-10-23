@@ -24,30 +24,60 @@ vi.mock("../../api/client", async (importOriginal) => {
 
 const WID = "abc123abc123";
 const SHA = "a".repeat(64);
-const PLAN: ExportPlan = {
-  course: { id: "demo", title: "Demo", version: "1.0" },
-  workshop: { slug: "01-first", title: "First" },
-  guide: "demo/01-first/guide.md",
-  guide_sha256: SHA,
+const SHA2 = "c".repeat(64);
+const FIRST = {
+  slug: "01-first", title: "First", guide: "demo/01-first/guide.md", guide_sha256: SHA,
   placed: [
-    { number: 2, step_id: "s2s2s2s2s2s2", text: "Right-click Valid rows.", image: "wt-01-first-02-s2s2s2s2s2s2.png", hotspot: { x: "45.0", y: "23.3" }, line: 9, how: "new" },
-    { number: 4, step_id: "s4s4s4s4s4s4", text: "Select Cancel.", image: "wt-01-first-04-s4s4s4s4s4s4.png", hotspot: null, line: 30, how: "unchanged" },
+    { number: 2, step_id: "s2s2s2s2s2s2", text: "Right-click Valid rows.", image: "wt-01-first-02-s2s2s2s2s2s2.png", hotspot: { x: "45.0", y: "23.3" }, line: 9, how: "new" as const },
+    { number: 4, step_id: "s4s4s4s4s4s4", text: "Select Cancel.", image: "wt-01-first-04-s4s4s4s4s4s4.png", hotspot: null, line: 30, how: "unchanged" as const },
   ],
   not_placed: [{ number: 5, step_id: "s5s5s5s5s5s5", text: "Select Close.", reason: "Its text is not in the guide any more (the item was reworded, moved or removed)." }],
   skipped: [{ number: 1, step_id: "s1s1s1s1s1s1", text: "Open it.", reason: "No picture yet." }],
   removed: [{ step_id: "s9s9s9s9s9s9", line: 40, reason: "The step is no longer in the walkthrough." }],
   new_in_guide: [{ text: "Press Cancel to leave.", line: 33 }],
   kept: [{ path: "_assets/images/wt-01-first-abc123abc123-s9s9s9s9s9s9.png", reason: "still used by 02-other" }],
+  figures: 2,
+  changed: true,
+  diff: "--- a/01-first/guide.md\n+++ b/01-first/guide.md\n@@ -9,0 +10,3 @@\n+<!-- media-studio -->",
+};
+const PLAN: ExportPlan = {
+  course: { id: "demo", title: "Demo", version: "1.0" },
+  workshop: { slug: "01-first", title: "First" },
+  guide: "demo/01-first/guide.md",
+  guide_sha256: SHA,
+  guides: [FIRST],
+  placed: FIRST.placed,
+  not_placed: FIRST.not_placed,
+  skipped: FIRST.skipped,
+  removed: FIRST.removed,
+  new_in_guide: FIRST.new_in_guide,
+  kept: FIRST.kept,
   debris: [{ path: "01-first/.guide.md.1234abcd.keep", reason: "left by an interrupted export" }],
   files: [{ path: "01-first/guide.md", action: "write" }, { path: "_assets/images/wt-01-first-02-s2s2s2s2s2s2.png", action: "write" }],
   changed: true,
   figures: 2,
   player: false,
-  diff: "--- a/01-first/guide.md\n+++ b/01-first/guide.md\n@@ -9,0 +10,3 @@\n+<!-- media-studio -->",
+  diff: FIRST.diff,
   allowed: false,
+};
+/** W2e: a walkthrough of two workshops - a block per guide, and a step of no guide (added from a still). */
+const SECOND = {
+  slug: "02-second", title: "Second", guide: "demo/02-second/guide.md", guide_sha256: SHA2,
+  placed: [{ number: 6, step_id: "s6s6s6s6s6s6", text: "Drag Text file input.", image: "wt-02-second-abc123abc123-s6s6s6s6s6s6.png", hotspot: { x: "45.0", y: "23.3" }, line: 5, how: "new" as const }],
+  not_placed: [], skipped: [], removed: [], new_in_guide: [], kept: [], figures: 1, changed: true,
+  diff: "--- a/02-second/guide.md\n+++ b/02-second/guide.md\n@@ -5,0 +6,3 @@\n+<!-- media-studio -->",
+};
+const HOMELESS = { number: 9, step_id: "s9s9s9s9s9s9", text: "Added later.", reason: "Added in the walkthrough, not imported: with several workshops it names no guide to go into, and none is guessed." };
+/** X5: a step of no guide WITHOUT a picture: skipped (counted in the first line), in no guide's own list. */
+const HOMELESS_SKIPPED = { number: 10, step_id: "sasasasasasa", text: "Nothing yet.", reason: "No picture yet." };
+const PLAN2: ExportPlan = {
+  ...PLAN, guides: [FIRST, SECOND], placed: [...FIRST.placed, ...SECOND.placed], not_placed: [...FIRST.not_placed, HOMELESS],
+  skipped: [...FIRST.skipped, HOMELESS_SKIPPED], figures: 3,
+  files: [...PLAN.files, { path: "02-second/guide.md", action: "write" }], diff: `${FIRST.diff}\n${SECOND.diff}`,
 };
 const WRITTEN: ExportResult = {
   course: "demo", slug: "01-first", guide: "demo/01-first/guide.md", figures: 2, images: 1, player: false, guide_written: true,
+  guides: [{ slug: "01-first", guide: "demo/01-first/guide.md", figures: 2, guide_written: true, guide_sha256: "b".repeat(64) }],
   written: ["_assets/images/wt-01-first-02-s2s2s2s2s2s2.png", "01-first/guide.md"], removed: [], guide_sha256: "b".repeat(64),
   message: "Wrote 2 figures into demo/01-first/guide.md. Review and publish it in the Content Editor.",
 };
@@ -133,6 +163,42 @@ describe("the preview", () => {
     expect(q("[data-export-zip]")!.getAttribute("href")).toBe(`/api/walkthroughs/${WID}/export/course.zip?player=1`);
   });
 
+  it("W2e: a walkthrough of two workshops - the combined line, a block per guide with its own line, lists and diff folded, the step of no guide", async () => {
+    vi.mocked(api.post).mockImplementation(async (path: string) => {
+      if (path.endsWith("/export/course/plan")) return { ...PLAN2, allowed: true } as never;
+      if (path.endsWith("/export/course")) return { ...WRITTEN, figures: 3 } as never;
+      throw new Error(`unexpected ${path}`);
+    });
+    await mount();
+    expect(text("[data-export-line]")).toBe("3 figures into 2 guides; 2 steps not placed; 2 skipped");
+    const blocks = [...document.querySelectorAll("[data-export-guide]")];
+    expect(blocks.map((b) => b.getAttribute("data-export-guide"))).toEqual(["01-first", "02-second"]);
+    expect(text('[data-export-guide="01-first"] [data-export-guide-line]')).toBe("2 figures into demo/01-first/guide.md; 1 step not placed; 1 skipped");
+    expect(text('[data-export-guide="02-second"] [data-export-guide-line]')).toBe("1 figure into demo/02-second/guide.md");
+    expect([...document.querySelectorAll('[data-export-guide="02-second"] [data-export-placed] li')].map((li) => (li.textContent || "").replace(/\s+/g, " ").trim())).toEqual([
+      "Step 6Drag Text file input.pin at 45.0 %, 23.3 % · after line 5",
+    ]);
+    expect(text('[data-export-guide="01-first"] [data-export-not-placed]')).toContain("Step 5: Select Close.");
+    expect(text('[data-export-guide="01-first"] [data-export-kept]')).toContain("still used by 02-other");
+    // The step of no guide is listed once, above the guides, with its reason.
+    expect(text("[data-export-homeless]")).toContain("Step 9: Added later. - Added in the walkthrough, not imported");
+    expect(q('[data-export-guide="01-first"] [data-export-not-placed]')!.textContent).not.toContain("Added later");
+    // X5: a step of no guide without a picture is listed there too, as skipped, with its reason - and in no guide's own list.
+    expect(text("[data-export-homeless-skipped]")).toContain("Step 10: Nothing yet. - No picture yet.");
+    expect(text("[data-export-homeless-skipped]")).not.toContain("Added later");
+    expect([...document.querySelectorAll("[data-export-guide] [data-export-skipped]")].map((el) => el.textContent || "").join(" ")).not.toContain("Nothing yet");
+    // Each guide's diff, folded.
+    const diffs = [...document.querySelectorAll("[data-export-guide] [data-export-diff]")] as HTMLDetailsElement[];
+    expect(diffs.map((d) => d.open)).toEqual([false, false]);
+    expect(diffs.map((d) => d.querySelector("pre")!.textContent)).toEqual([FIRST.diff, SECOND.diff]);
+    // The write sends every guide's sha256 from the preview.
+    await act(async () => { (q("[data-export-write]") as HTMLButtonElement).click(); });
+    await settle();
+    expect(posts().filter(([path]) => String(path).endsWith("/export/course"))).toEqual([
+      [`/api/walkthroughs/${WID}/export/course`, { guides: [{ slug: "01-first", sha256: SHA }, { slug: "02-second", sha256: SHA2 }], player: false }],
+    ]);
+  });
+
   it("a walkthrough that was not imported says so and offers only its player", async () => {
     vi.mocked(api.post).mockImplementation(async () => {
       throw new ApiError(400, "This walkthrough was not imported from a course workshop: only the player can be exported.");
@@ -164,7 +230,7 @@ describe("the write", () => {
     expect(write.disabled).toBe(false);
     await act(async () => { write.click(); });
     await settle();
-    expect(posts().filter(([path]) => String(path).endsWith("/export/course"))).toEqual([[`/api/walkthroughs/${WID}/export/course`, { guide_sha256: SHA, player: false }]]);
+    expect(posts().filter(([path]) => String(path).endsWith("/export/course"))).toEqual([[`/api/walkthroughs/${WID}/export/course`, { guides: [{ slug: "01-first", sha256: SHA }], player: false }]]);
     expect(text("[data-export-written]")).toBe(WRITTEN.message);
     expect(posts().filter(([path]) => String(path).endsWith("/plan")).length).toBe(2);
     expect((q("[data-export-write]") as HTMLButtonElement).disabled).toBe(true);
@@ -173,15 +239,15 @@ describe("the write", () => {
   it("a guide changed since the preview: the server's line, and Preview again reads it afresh", async () => {
     vi.mocked(api.post).mockImplementation(async (path: string) => {
       if (path.endsWith("/export/course/plan")) return { ...PLAN, allowed: true } as never;
-      throw new ApiError(409, "The guide changed since the preview: preview again.");
+      throw new ApiError(409, "The guide demo/01-first/guide.md changed since the preview: preview again.");
     });
     await mount();
     await act(async () => { (q("[data-export-write]") as HTMLButtonElement).click(); });
     await settle();
-    expect(document.body.textContent).toContain("The guide changed since the preview: preview again.");
+    expect(document.body.textContent).toContain("The guide demo/01-first/guide.md changed since the preview: preview again.");
     await act(async () => { (q("[data-export-again]") as HTMLButtonElement).click(); });
     await settle();
-    expect(document.body.textContent).not.toContain("The guide changed since the preview");
+    expect(document.body.textContent).not.toContain("changed since the preview");
     expect(posts().filter(([path]) => String(path).endsWith("/plan")).length).toBe(2);
   });
 });

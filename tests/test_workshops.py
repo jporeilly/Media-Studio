@@ -925,8 +925,8 @@ def test_the_list_and_the_preview(rig):
     assert preview["workshop"] == {"slug": "01-first", "title": "First Workshop", "section": "Part one", "estimatedMinutes": 7, "stepCount": 2}
     assert preview["name"] == "First Workshop" and preview["chapters"] == ["Open"]
     assert preview["steps"] == [
-        {"number": 1, "chapter": "Open", "instruction": "One.", "text": "One.", "picture": False, "image": None, "alt": "", "launcher": None, "note": False},
-        {"number": 2, "chapter": "", "instruction": "Two.", "text": "Two.", "picture": True, "image": "p.png", "alt": "p", "launcher": None, "note": False},
+        {"number": 1, "chapter": "Open", "instruction": "One.", "text": "One.", "picture": False, "image": None, "alt": "", "launcher": None, "note": False, "in_chapter": "Open"},
+        {"number": 2, "chapter": "", "instruction": "Two.", "text": "Two.", "picture": True, "image": "p.png", "alt": "p", "launcher": None, "note": False, "in_chapter": "Open"},
     ]
     assert preview["counts"] == {"steps": 2, "chapters": 1, "pictures": 1, "to_capture": 1} and preview["message"] is None
     assert c.get("/api/walkthroughs").json()["walkthroughs"] == [], "a preview writes nothing"
@@ -957,7 +957,8 @@ def test_the_import_makes_the_walkthrough_from_the_parse(rig):
     assert r.status_code == 200, r.text
     rec = r.json()
     assert rec["name"] == "The Workshop" and rec["revision"] == 1 and rec["version"] == 1
-    assert rec["source"] == {"course": "demo", "slug": "01-first", "title": "Demo course", "version": "1.2.3"}
+    assert rec["source"] == {"course": "demo", "slug": "01-first", "title": "Demo course", "version": "1.2.3",
+                             "workshops": [{"slug": "01-first", "title": "The Workshop"}]}
     assert rec["owner_name"] == "Olive Owner"
     launcher, click, done = rec["steps"]
     assert launcher["chapter"] == "Open it" and launcher["instruction"] == "Open win.ktr in Pentaho Data Integration." and launcher["image"] is None
@@ -1073,7 +1074,7 @@ def test_the_belt_refuses_a_plan_the_save_would_refuse_and_writes_nothing(rig, m
     assert not folder.exists() or list(folder.iterdir()) == []
     # Through the route, the plan stood in for (the parser never makes one): 400 with the reason, nothing written.
     _workshop(_course(rig["courses"], "demo"), "01-first", "## S\n\n1. Fine.\n")
-    monkeypatch.setattr(workshops, "import_plan", lambda *a, **k: (source, [planned]))
+    monkeypatch.setattr(workshops, "import_plan", lambda *a, **k: [planned])
     r = rig["owner"].post("/api/walkthroughs/import", json={"course": "demo", "slug": "01-first"})
     assert r.status_code == 400 and "not valid" in r.json()["detail"] and "control" in r.json()["detail"], r.text
     assert rig["owner"].get("/api/walkthroughs").json()["walkthroughs"] == []
@@ -1115,7 +1116,7 @@ def test_an_empty_workshop_imports_as_an_empty_walkthrough_and_the_cap_refuses(r
     assert r.json()["steps"] == [] and r.json()["name"] == "First"
     monkeypatch.setattr(walkthroughs, "MAX_STEPS", 4)
     r = c.post("/api/walkthroughs/import", json={"course": "demo", "slug": "02-many"})
-    assert r.status_code == 400 and r.json()["detail"] == "The workshop has 5 steps; a walkthrough can hold at most 4."
+    assert r.status_code == 400 and r.json()["detail"] == "The workshop has more steps than a walkthrough holds (5 of 4)."
     assert len(c.get("/api/walkthroughs").json()["walkthroughs"]) == 1, "nothing written past the cap"
     assert len(list((rig["tmp"] / "walkthroughs").iterdir())) == 1
     monkeypatch.setattr(walkthroughs, "MAX_STEPS", 5)
@@ -1428,3 +1429,205 @@ def test_the_limits_rows_name_the_workshop_constants():
     assert f"{walkthroughs.MAX_ALT_CHARS:,} of the figure's alt text (`MAX_ALT_CHARS`)" in rows["Workshop step source"]
     assert "`TEXT_CONTROL_RE`" in rows["Workshop step source"]
     assert "`MAX_GUIDE_BYTES`, `MAX_PARSE_STEPS` and `TOOLTIP_CHARS`" in text, "the constants sentence"
+    # W2e: the workshops one import takes, and the walkthrough's own bound over their steps together.
+    assert "Workshop import" in rows, "no 'Workshop import' row in docs/reference/limits.md"
+    assert f"{workshops.MAX_WORKSHOPS} workshops" in rows["Workshop import"] and "`MAX_WORKSHOPS`" in rows["Workshop import"]
+    assert f"{walkthroughs.MAX_STEPS}" in rows["Workshop import"] and "`MAX_STEPS`" in rows["Workshop import"]
+    assert "`MAX_WORKSHOPS`" in text.split("The constants behind", 1)[1], "the constants sentence names it"
+
+
+# -- W2e: several workshops, the guide's sections, the import body and the record --------------------
+
+THREE_SUMMARY = "# T\n\n## Part one\n\n* [First](01-first/guide.md)\n* [Second](02-second/guide.md)\n\n## Part two\n\n* [Third](03-third/guide.md)\n"
+FIRST_GUIDE = "# One\n\n1. Before any heading.\n\n## Open it\n\n1. Open.\n2. Click.\n\n## Troubleshooting a bad file\n\n1. Fix it.\n\n## Run it\n\n1. Run.\n"
+IMPORT = "/api/walkthroughs/import"
+
+
+def _three(rig) -> Path:
+    """A course of three workshops in two sections: the first with a step before its first heading and a chapter to
+    leave out, the second with a picture, the third one step."""
+    folder = _course(rig["courses"], "demo", summary=THREE_SUMMARY)
+    _workshop(folder, "01-first", FIRST_GUIDE, manifest={"title": "Your First Win", "estimatedMinutes": 10, "stepCount": 4})
+    _workshop(folder, "02-second", "## Build\n\n1. Build it.\n\n![p](../_assets/images/p.png)\n\n2. Save it.\n",
+              manifest={"title": "Build the Pipeline Yourself"}, images={"p.png": _png()})
+    _workshop(folder, "03-third", "## Join\n\n1. Join.\n", manifest={"title": "Enrich and Join"})
+    return folder
+
+
+def test_the_chapter_filter_leaves_out_named_chapters_and_keeps_the_anchors_of_the_full_guide():
+    """E2: a step is IN the chapter of the latest step at or before it that starts one ("" before the first heading);
+    ``import_plan`` leaves out the steps of the chapters named - "" names the steps before the first heading, a name
+    the guide no longer has is ignored - and the kept steps' anchors are those of the FULL guide (the export finds
+    them by their place in the guide as it is)."""
+    parsed = _parse(FIRST_GUIDE + "2. Run again.\n")
+    assert workshops.running_chapters(parsed.steps) == ["", "Open it", "Open it", "Troubleshooting a bad file", "Run it", "Run it"]
+    course = {"id": "demo", "title": "Demo", "version": "1", "launchers": {}}
+    workshop = {"slug": "01-first", "title": "First"}
+    full = workshops.import_plan(course, workshop, parsed, Path("."))
+    assert [s["text"] for s in full] == ["Before any heading.", "Open.", "Click.", "Fix it.", "Run.", "Run again."]
+    kept = workshops.import_plan(course, workshop, parsed, Path("."), skip_chapters=["Troubleshooting a bad file", "", "Not a chapter"])
+    assert [s["text"] for s in kept] == ["Open.", "Click.", "Run.", "Run again."]
+    assert [s["chapter"] for s in kept] == ["Open it", "", "Run it", ""]
+    by_text = {s["text"]: s["anchor"] for s in full}
+    assert [s["anchor"] for s in kept] == [by_text[s["text"]] for s in kept], "the anchors are the full guide's"
+    assert kept[2]["anchor"] == {"key": "run it :: run.", "ordinal": 1}
+    assert [s["source"]["slug"] for s in kept] == ["01-first"] * 4
+    assert workshops.import_plan(course, workshop, parsed, Path("."), skip_chapters=["", "Open it", "Troubleshooting a bad file", "Run it"]) == []
+    assert workshops.running_chapters([]) == []
+
+
+def test_chapters_across_workshops_name_the_workshop_and_one_workshop_is_as_today():
+    """E3: with several workshops a step's chapter is "<workshop title> · <section>" cut at a word to
+    ``MAX_CHAPTER_CHARS``, and the first step of a workshop that starts no chapter carries the workshop's title, so
+    every workshop starts a chapter; with one workshop nothing changes."""
+    assert workshops.chapter_across("Your First Win", "2. Preview the valid rows") == "Your First Win · 2. Preview the valid rows"
+    assert workshops.chapter_across("Your First Win", "") == "Your First Win"
+    long = workshops.chapter_across("Your First Win", "a very long section name " * 6)
+    assert len(long) <= walkthroughs.MAX_CHAPTER_CHARS and long.endswith("…") and not long[:-1].endswith(" ")
+    assert len(workshops.chapter_across("w" * 100, "")) == walkthroughs.MAX_CHAPTER_CHARS
+
+    def step(chapter, text):
+        return {"chapter": chapter, "text": text, "instruction": text}
+
+    a = ({"slug": "a", "title": "A"}, [step("", "x"), step("S", "y"), step("", "z")])
+    b = ({"slug": "b", "title": "B"}, [step("", "p"), step("", "q"), step("T", "r")])
+    c = ({"slug": "c", "title": "C"}, [step("U", "s")])
+    assert workshops.combine_steps([a]) == a[1], "one workshop: as today"
+    combined = workshops.combine_steps([a, b, c])
+    assert [(s["chapter"], s["text"]) for s in combined] == [
+        ("A", "x"), ("A · S", "y"), ("", "z"), ("B", "p"), ("", "q"), ("B · T", "r"), ("C · U", "s")]
+    assert a[1][0]["chapter"] == "", "the parts are not changed in place"
+    assert workshops.combine_steps([]) == []
+
+
+def test_the_default_name_rule():
+    """E1: one workshop -> its title; every workshop of the course -> the course's title; every workshop of exactly one
+    section -> the section's title; otherwise "<first ticked workshop's title> + N more" - the first in the COURSE's
+    order, whatever the order they were named in."""
+    course = {"title": "PDI in 2 Hours", "sections": [
+        {"title": "Get Ready", "workshops": [{"slug": "00", "title": "Before You Start"}]},
+        {"title": "See It Work", "workshops": [{"slug": "01", "title": "Your First Win"}, {"slug": "02", "title": "Build the Pipeline Yourself"}]},
+        {"title": "", "workshops": [{"slug": "09", "title": "Bring Your Own Data"}]},
+    ]}
+    name = workshops.default_name
+    assert name(course, ["01"]) == "Your First Win"
+    assert name(course, ["02", "01"]) == "See It Work"
+    assert name(course, ["09", "02", "01", "00"]) == "PDI in 2 Hours"
+    assert name(course, ["01", "00"]) == "Before You Start + 1 more", "the course's order, not the tick order"
+    assert name(course, ["09"]) == "Bring Your Own Data"
+    assert name(course, ["00", "09"]) == "Before You Start + 1 more", "a section without a title cannot name the walkthrough"
+    # A course of one section holding every workshop: the course's title, not the section's.
+    small = {"title": "Small", "sections": [{"title": "All", "workshops": [{"slug": "a", "title": "A"}, {"slug": "b", "title": "B"}]}]}
+    assert name(small, ["a", "b"]) == "Small" and name(small, ["a"]) == "A"
+    assert name(course, []) == "" and name(course, ["nope"]) == ""
+    # The step bound's two wordings (``services.walkthroughs``).
+    assert walkthroughs.too_many_steps_message(250, 1) == "The workshop has more steps than a walkthrough holds (250 of 200)."
+    assert walkthroughs.too_many_steps_message(250, 3) == "The 3 workshops together have more steps than a walkthrough holds (250 of 200)."
+
+
+def test_the_import_of_several_workshops_in_course_order_with_one_source_and_chapters_named_by_workshop(rig):
+    """E3: ``workshops: [{slug, skip_chapters?}]`` in any order makes ONE walkthrough in the COURSE's order; the record's
+    ``source`` keeps ``{course, title, version, slug}`` (the first workshop's) and gains ``workshops``; each step's own
+    ``source.slug`` is its workshop's; the audit row names the workshops; the old one-workshop body still works and
+    gains ``workshops`` too; a save (which never sends ``source``) and a duplicate keep it; the name follows the rule."""
+    _three(rig)
+    c = rig["owner"]
+    # The old body: one workshop, as before - its source now says which workshops, one.
+    r = c.post(IMPORT, json={"course": "demo", "slug": "02-second"})
+    assert r.status_code == 200, r.text
+    one = r.json()
+    assert one["name"] == "Build the Pipeline Yourself"
+    assert one["source"] == {"course": "demo", "slug": "02-second", "title": "Demo course", "version": "1.2.3",
+                             "workshops": [{"slug": "02-second", "title": "Build the Pipeline Yourself"}]}
+    assert [s["chapter"] for s in one["steps"]] == ["Build", ""], "one workshop: the chapters as today"
+    # The new body with one workshop: the same walkthrough.
+    r = c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "02-second"}]})
+    assert r.status_code == 200 and r.json()["source"] == one["source"] and [s["chapter"] for s in r.json()["steps"]] == ["Build", ""]
+    # Three, named in any order, one with a chapter left out (and a name the guide does not have, ignored).
+    body = {"course": "demo", "workshops": [{"slug": "03-third"}, {"slug": "01-first", "skip_chapters": ["Troubleshooting a bad file", "Gone"]}, {"slug": "02-second"}]}
+    r = c.post(IMPORT, json=body)
+    assert r.status_code == 200, r.text
+    rec = r.json()
+    assert rec["name"] == "Demo course", "every workshop of the course: the course's title"
+    assert rec["source"] == {"course": "demo", "slug": "01-first", "title": "Demo course", "version": "1.2.3", "workshops": [
+        {"slug": "01-first", "title": "Your First Win"}, {"slug": "02-second", "title": "Build the Pipeline Yourself"}, {"slug": "03-third", "title": "Enrich and Join"}]}
+    assert [(s["text"], s["chapter"], s["source"]["slug"]) for s in rec["steps"]] == [
+        ("Before any heading.", "Your First Win", "01-first"),
+        ("Open.", "Your First Win · Open it", "01-first"),
+        ("Click.", "", "01-first"),
+        ("Run.", "Your First Win · Run it", "01-first"),
+        ("Build it.", "Build the Pipeline Yourself · Build", "02-second"),
+        ("Save it.", "", "02-second"),
+        ("Join.", "Enrich and Join · Join", "03-third"),
+    ], "the course's order; every workshop starts a chapter; the chapter left out is gone"
+    assert rec["steps"][3]["anchor"] == {"key": "run it :: run.", "ordinal": 1}, "the anchor is the full guide's"
+    build = rec["steps"][4]
+    assert build["image"] == f"step-{build['id']}.png" and build["source"]["image"] == "_assets/images/p.png"
+    assert build["anchor"] == {"key": "build :: build it.", "ordinal": 1}
+    rows = auth_store.list_audit(action="walkthrough.import")
+    assert [row["detail"] for row in rows] == [
+        "demo: 3 workshops (01-first, 02-second, 03-third): 7 steps, 5 chapters, 1 picture",
+        "demo/02-second: 2 steps, 1 chapter, 1 picture",
+        "demo/02-second: 2 steps, 1 chapter, 1 picture",
+    ]
+    # The builder's save sends no source: the record's own stays, workshops and all; a duplicate keeps it.
+    saved = _put(c, rec["id"], _body(rec)).json()
+    assert saved["source"] == rec["source"] and saved["revision"] == 2
+    assert c.post(f"/api/walkthroughs/{rec['id']}/duplicate").json()["source"] == rec["source"]
+    # The name rule on the server, the same as the dialog's: a section's workshops, a pair across sections, a name given.
+    assert c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "02-second"}, {"slug": "01-first"}]}).json()["name"] == "Part one"
+    assert c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "03-third"}, {"slug": "01-first"}]}).json()["name"] == "Your First Win + 1 more"
+    assert c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "03-third"}, {"slug": "01-first"}], "name": " Mine "}).json()["name"] == "Mine"
+    # The preview says which chapter each step is in, so the dialog can offer the ticks.
+    preview = c.get("/api/courses/demo/workshops/01-first/preview").json()
+    assert [s["in_chapter"] for s in preview["steps"]] == ["", "Open it", "Open it", "Troubleshooting a bad file", "Run it"]
+
+
+def test_an_unreadable_missing_or_doubled_workshop_refuses_the_whole_import_and_writes_nothing(rig):
+    """E3: an unreadable workshop -> 400 naming it; a missing one -> 404 naming it; a body with both forms, neither,
+    no workshop, a workshop twice, an unknown key or more than ``MAX_WORKSHOPS`` -> 422; nothing written in any."""
+    folder = _three(rig)
+    (folder / "02-second" / "guide.md").write_bytes(b"## S\n\n1. Not \xff\xfe UTF-8.\n")
+    c = rig["owner"]
+    r = c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "01-first"}, {"slug": "02-second"}, {"slug": "03-third"}]})
+    assert r.status_code == 400 and r.json()["detail"] == "demo/02-second/guide.md cannot be read as UTF-8 text.", r.text
+    r = c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "01-first"}, {"slug": "09-nope"}]})
+    assert r.status_code == 404 and "09-nope" in r.json()["detail"], r.text
+    assert c.post(IMPORT, json={"course": "nope", "workshops": [{"slug": "01-first"}]}).status_code == 404
+    many = [{"slug": f"{i:02d}-w"} for i in range(workshops.MAX_WORKSHOPS + 1)]
+    for bad in (
+        {"course": "demo"},
+        {"course": "demo", "slug": "01-first", "workshops": [{"slug": "01-first"}]},
+        {"course": "demo", "workshops": []},
+        {"course": "demo", "workshops": [{"slug": "01-first"}, {"slug": "01-first"}]},
+        {"course": "demo", "workshops": [{"slug": "01-first", "skip": []}]},
+        {"course": "demo", "workshops": [{"slug": "01-first", "skip_chapters": "Open it"}]},
+        {"course": "demo", "workshops": [{"slug": "01-first", "skip_chapters": ["c" * (walkthroughs.MAX_CHAPTER_CHARS + 1)]}]},
+        {"course": "demo", "workshops": many},
+    ):
+        assert c.post(IMPORT, json=bad).status_code == 422, bad
+    assert workshops.MAX_WORKSHOPS == 50
+    assert c.get("/api/walkthroughs").json()["walkthroughs"] == []
+    made = rig["tmp"] / "walkthroughs"
+    assert not made.exists() or list(made.iterdir()) == []
+
+
+def test_the_step_bound_applies_to_the_workshops_together_before_anything_is_written(rig, monkeypatch):
+    """E3: ``MAX_STEPS`` bounds the steps of every chosen workshop together - 400 "… has more steps than a walkthrough
+    holds (N of 200)" with nothing written; a chapter left out counts no more; one workshop is worded for one."""
+    folder = _course(rig["courses"], "demo", summary="# T\n\n## P\n\n* [A](01-a/guide.md)\n* [B](02-b/guide.md)\n")
+    _workshop(folder, "01-a", "## S\n\n1. One.\n2. Two.\n3. Three.\n")
+    _workshop(folder, "02-b", "## S\n\n1. Four.\n2. Five.\n")
+    monkeypatch.setattr(walkthroughs, "MAX_STEPS", 4)
+    c = rig["admin"]
+    r = c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "01-a"}, {"slug": "02-b"}]})
+    assert r.status_code == 400 and r.json()["detail"] == "The 2 workshops together have more steps than a walkthrough holds (5 of 4).", r.text
+    made = rig["tmp"] / "walkthroughs"
+    assert not made.exists() or list(made.iterdir()) == []
+    monkeypatch.setattr(walkthroughs, "MAX_STEPS", 2)
+    r = c.post(IMPORT, json={"course": "demo", "slug": "01-a"})
+    assert r.status_code == 400 and r.json()["detail"] == "The workshop has more steps than a walkthrough holds (3 of 2).", r.text
+    r = c.post(IMPORT, json={"course": "demo", "workshops": [{"slug": "01-a", "skip_chapters": ["S"]}, {"slug": "02-b"}]})
+    assert r.status_code == 200, r.text
+    assert [s["text"] for s in r.json()["steps"]] == ["Four.", "Five."], "the chapter left out counts no more"
+    assert r.json()["source"]["workshops"] == [{"slug": "01-a", "title": "A"}, {"slug": "02-b", "title": "B"}]
