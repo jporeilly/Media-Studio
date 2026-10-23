@@ -22,20 +22,29 @@
   with ?mode=steps, the same window shows the walkthrough's name, "Step 3 of
   12", the step's text and, smaller, its instruction, with Capture (also the
   global key Shift+F8, which the shell raises WITH the pointer's position),
-  Skip, Back and Done:
-    main -> bar   capture:state   { mode: "steps", phase, name, label, text, instruction, remaining, canBack, canCapture, message, clicks }
-    bar  -> main  capture:control { action: "hello" | "capture" | "skip" | "back" | "done" }
+  Next / Skip (one button, W2d: "Next" when the step got a still this run,
+  "Skip" otherwise; also the global key Shift+F9), Back and Done:
+    main -> bar   capture:state   { mode: "steps", phase, name, label, text, instruction, remaining, canBack, canCapture, message, clicks, typing, stillsThisStep, lastStill }
+    bar  -> main  capture:control { action: "hello" | "capture" | "next" | "back" | "done" }
   The main window sends the state on every change, so this page asks for the
   current one with "hello" as soon as its listener is up (the first state was
   sent before the page had loaded, and missed, without it). A refusal the
-  capture goes on under - the key taken by another program, a Windows that
+  capture goes on under - the keys taken by another program, a Windows that
   cannot hide the bar from the picture - comes as `message` and is shown in
   red under the step; so does one capture's refusal (no window under the
   pointer, a click outside the frame), which the next state clears. With
   `clicks` (W2b, Capture on click: every click in the frame is a step) a
   second small line reads "Click to capture · Shift+F8 captures without a
-  click". A capture from the button carries no pointer, so it places no
-  hotspot; the bar says so in Capture's title.
+  click", and with `typing` (W2d: a still a second after you stop typing) it
+  gains " · typing captures a second after you stop". A capture from the
+  button carries no pointer, so it places no hotspot; the bar says so in
+  Capture's title. THE BAR SHOWS WHAT IT GOT (W2d, R4): `stillsThisStep` is
+  how many stills landed on the shown step this run - "2 stills this step"
+  under the step's text past one - and `lastStill` the last still of the run,
+  whichever step: its number and a thumbnail as a data URL made by the main
+  window, shown in the 150 x 84 box at the left with "step 3" under it; this
+  page fetches nothing. Next stays enabled while a still is in flight (the
+  attach lands on the step it was taken for); Back and Done wait.
 -->
 <style>
   :root { color-scheme: dark; }
@@ -52,6 +61,11 @@
   .steps .instruction { color: #cbd5e1; font-size: 11.5px; line-height: 1.3; max-height: 2.6em; overflow: hidden; white-space: pre-line; }
   .steps .hint { color: #94a3b8; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .steps .hint:empty { display: none; }
+  .steps .stills { color: #94a3b8; font-size: 11px; white-space: nowrap; }
+  .steps .stills:empty { display: none; }
+  .steps .still { flex: none; width: 150px; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+  .steps .still img { width: 150px; height: 84px; object-fit: contain; background: rgba(255,255,255,.06); border-radius: 4px; }
+  .steps .still .caption { color: #94a3b8; font-size: 11px; white-space: nowrap; }
   .steps .message { color: #fca5a5; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .steps .message:empty { display: none; }
   .steps .buttons { display: flex; align-items: center; gap: 6px; }
@@ -84,17 +98,19 @@
 </div>
 <div class="steps" id="steps">
   <div class="grip" data-tauri-drag-region title="Drag">&#8942;&#8942;</div>
+  <div class="still" id="s-still" style="display:none"><img id="s-thumb" alt="" title="The last still of this run"><span class="caption" id="s-thumb-caption"></span></div>
   <div class="text">
     <div class="head"><b id="s-label">Step 1 of 1</b><span id="s-name"></span><span id="s-remaining"></span></div>
     <div class="line" id="s-text"></div>
+    <div class="stills" id="s-stills"></div>
     <div class="instruction" id="s-instruction"></div>
     <div class="hint" id="s-hint"></div>
     <div class="message" id="s-message" role="status"></div>
   </div>
   <div class="buttons">
-    <button id="s-capture" class="capture" title="Capture this step (a click in the frame, or Shift+F8 with the pointer on the control, places the hotspot; from this button there is no hotspot)">Capture</button>
-    <button id="s-skip" title="Leave this step for later">Skip</button>
-    <button id="s-back" title="Back to the step before">Back</button>
+    <button id="s-capture" class="capture" title="Take this step's still now (a click in the frame, a typed pause, or Shift+F8 with the pointer on the control places the hotspot; from this button there is no hotspot)">Capture</button>
+    <button id="s-next" title="Leave this step for later and move on (Shift+F9)">Skip</button>
+    <button id="s-back" title="Back to the step before: a capture there replaces its picture">Back</button>
     <button id="s-done" class="stop" title="Close the bar and go back to the builder">Done</button>
   </div>
 </div>
@@ -107,10 +123,13 @@
   if (stepsMode) { document.body.classList.add("mode-steps"); document.title = "Capture steps"; }
   const sLabel = document.getElementById("s-label"), sName = document.getElementById("s-name"), sRemaining = document.getElementById("s-remaining");
   const sText = document.getElementById("s-text"), sInstruction = document.getElementById("s-instruction"), sMessage = document.getElementById("s-message");
-  const sHint = document.getElementById("s-hint");
-  const sCapture = document.getElementById("s-capture"), sSkip = document.getElementById("s-skip"), sBack = document.getElementById("s-back"), sDone = document.getElementById("s-done");
-  // The second line in click mode (W2b); the same words as lib/guided.ts CLICK_HINT.
+  const sHint = document.getElementById("s-hint"), sStills = document.getElementById("s-stills");
+  const sStill = document.getElementById("s-still"), sThumb = document.getElementById("s-thumb"), sThumbCaption = document.getElementById("s-thumb-caption");
+  const sCapture = document.getElementById("s-capture"), sNext = document.getElementById("s-next"), sBack = document.getElementById("s-back"), sDone = document.getElementById("s-done");
+  // The second line by what is live (W2b, W2d); the same words as lib/guided.ts CLICK_HINT, TYPING_HINT and hintLine.
   const CLICK_HINT = "Click to capture · Shift+F8 captures without a click";
+  const TYPING_HINT = "typing captures a second after you stop";
+  const hintOf = (clicks, typing) => (clicks ? (typing ? `${CLICK_HINT} · ${TYPING_HINT}` : CLICK_HINT) : typing ? `Shift+F8 captures · ${TYPING_HINT}` : "");
   const showSteps = (p) => {
     document.body.classList.add("mode-steps");
     sLabel.textContent = p.label || "";
@@ -118,11 +137,28 @@
     sRemaining.textContent = p.remaining ? `${p.remaining} to go` : "";
     sText.textContent = p.text || "";
     sInstruction.textContent = p.instruction || "";
-    sHint.textContent = p.clicks && p.phase !== "finished" ? CLICK_HINT : "";
+    sHint.textContent = p.phase !== "finished" ? hintOf(!!p.clicks, !!p.typing) : "";
     sMessage.textContent = p.message || "";
+    // What the bar got (W2d, R4): the stills landed on this step (one is the normal case: nothing said), the last still's thumbnail.
+    const stills = p.stillsThisStep || 0;
+    sStills.textContent = stills > 1 ? `${stills} stills this step` : "";
+    if (p.lastStill && p.lastStill.thumb) {
+      sThumb.setAttribute("src", p.lastStill.thumb);
+      sThumbCaption.textContent = `step ${p.lastStill.step}`;
+      sStill.style.display = "flex";
+    } else {
+      sThumb.setAttribute("src", "");
+      sThumbCaption.textContent = "";
+      sStill.style.display = "none";
+    }
     sCapture.disabled = !p.canCapture;
     sCapture.textContent = p.phase === "capturing" ? "Capturing…" : "Capture";
-    sSkip.disabled = !(p.phase === "ready");
+    // ONE button where Skip was (W2d, R1): Next when the step got a still this run, Skip otherwise - the one rule
+    // (`advance(s, "next")`) on the main window's side; enabled while a still is in flight, as the attach lands on its
+    // claimed step whatever Next does meanwhile. Back and Done wait.
+    sNext.textContent = stills > 0 ? "Next" : "Skip";
+    sNext.title = stills > 0 ? "Move on to the next step (Shift+F9): the last still stands" : "Leave this step for later and move on (Shift+F9)";
+    sNext.disabled = !(p.phase === "ready" || p.phase === "capturing") || !p.remaining;
     sBack.disabled = !p.canBack || p.phase === "capturing";
     sDone.disabled = p.phase === "capturing";
   };
@@ -138,7 +174,7 @@
   pauseBtn.onclick = () => send(state === "paused" ? "resume" : "pause");
   stopBtn.onclick = () => send(state === "countdown" ? "cancel" : "stop");
   sCapture.onclick = () => send("capture");
-  sSkip.onclick = () => send("skip");
+  sNext.onclick = () => send("next");
   sBack.onclick = () => send("back");
   sDone.onclick = () => send("done");
   const show = (p) => {
@@ -159,7 +195,7 @@
       label.textContent = state === "paused" ? "Paused  (Shift+F9 resumes)" : state === "saving" ? "Saving…" : state === "recording" ? "Recording  (Shift+F10 stops)" : state;
     }
   };
-  if (stepsMode) showSteps({ label: "Starting…", name: "", text: "", instruction: "", message: "", phase: "starting", remaining: 0, canBack: false, canCapture: false, clicks: false });
+  if (stepsMode) showSteps({ label: "Starting…", name: "", text: "", instruction: "", message: "", phase: "starting", remaining: 0, canBack: false, canCapture: false, clicks: false, typing: false, stillsThisStep: 0, lastStill: null });
   else show({ state: "countdown", elapsedMs: 0, countdown: "" });
   if (t && t.event) await t.event.listen("capture:state", (e) => show(e.payload || {}));
   // The listener is up: ask for the state as it stands (the main window sends it on change only).

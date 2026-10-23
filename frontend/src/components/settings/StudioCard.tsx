@@ -112,7 +112,7 @@ export function StudioCard() {
             <Field label="Courses folder" hint="The folder Walkthroughs › Import workshop… reads: one folder per course, each with a course.json. An existing folder on the server; read, and written only by Export to course while the box below is ticked. Leave it empty to turn the import off.">
               <Input value={form.courses_folder ?? ""} disabled={readOnly} placeholder="(not set)" onChange={(e) => update({ courses_folder: e.target.value })} data-courses-folder="" />
             </Field>
-            <Field label="Export to course" hint="Ticked, a walkthrough's owner (or an administrator) may write its figures into its course workshop, inside that course's own folder. Unticked, Export to course previews and offers a zip to copy in by hand. Keep it off for a published course until the Content Manager renders annotated figures (until then a guide shows the pin's text, not the pin).">
+            <Field label="Export to course" hint="Ticked, a walkthrough's owner (or an administrator) may write its figures into its course workshop, inside that course's own folder. Unticked, Export to course previews and offers a zip to copy in by hand. Keep it off for a published course until its readers have a Content Manager from 0.7.42, which draws the pins (an older one shows the pin's text, not the pin).">
               <label className="os-row" style={{ gap: 8, alignItems: "center" }}>
                 <input type="checkbox" checked={!!form.courses_export} disabled={readOnly} onChange={(e) => update({ courses_export: e.target.checked })} data-courses-export="" />
                 <span>Allow export into the Courses folder</span>

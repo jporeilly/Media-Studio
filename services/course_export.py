@@ -3,10 +3,10 @@
 Each step with a picture Media Studio took (a capture: never the guide's own picture, which is "already in the
 guide") becomes a FIGURE in the workshop's ``guide.md``, right after the step it belongs to, and its picture a
 PNG in the course's ``_assets/images``. The figure is the content manager's documented annotated image - the
-picture with a numbered pin where the hotspot is, the step's text behind the pin (``AnnotatedImage.tsx``) - but
-its ``MarkdownBody`` does not render that form yet (its figure walk misses its own ``img`` and ``figcaption``
-overrides): until the content manager is fixed a guide shows the picture, the pin's text as a numbered line and
-the caption, so an export into a PUBLISHED course waits for that fix (the studio setting stays off by default).
+picture with a numbered pin where the hotspot is, the step's text behind the pin (``AnnotatedImage.tsx``) - which
+a Content Manager from 0.7.42 (a Content Editor from 1.30.0) renders as such; an older one shows the picture, the
+pin's text as a numbered line and the caption. The studio setting that allows the write still defaults to off: an
+export into a published course is an administrator's decision, made once the course's readers have that version.
 
 **Where a figure goes** (C1). An imported step carries its ``anchor`` (``{key, ordinal}``,
 ``services.workshops.anchor_key``), kept through every replaced picture and save. The export re-parses the

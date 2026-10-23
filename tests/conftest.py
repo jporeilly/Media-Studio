@@ -69,6 +69,40 @@ def routes() -> list[RouteInfo]:
     return api_routes(app)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _app_log_under_basetemp(tmp_path_factory):
+    """The checkout's ``data/logs/app.log`` is left as a test run found it (W2d, R7). ``utils.logger`` opens ONE
+    file handler at import - every ``get_logger`` logger holds it, and the root's forwarder writes through it - and
+    the workshop parser's warnings landed in the real file on every run. For the session the handler is pointed at
+    a file under the basetemp: its own file, so its rotation and every logger that holds it are untouched (the
+    stream is closed and ``baseFilename`` moved; the next record reopens it there), and the module's ``LOG_FILE`` and
+    ``LOG_DIR`` follow, so the logging tests read what was written. Put back when the session ends."""
+    from utils import logger as app_logging
+
+    handler = app_logging._file
+    real = (app_logging.LOG_FILE, app_logging.LOG_DIR, handler.baseFilename)
+    folder = tmp_path_factory.mktemp("app-log")
+
+    def point_at(path: str) -> None:
+        handler.acquire()
+        try:
+            handler.flush()
+            stream, handler.stream = handler.stream, None
+            if stream is not None:
+                stream.close()
+            handler.baseFilename = path
+        finally:
+            handler.release()
+
+    point_at(str(folder / "app.log"))
+    app_logging.LOG_FILE, app_logging.LOG_DIR = folder / "app.log", folder
+    try:
+        yield
+    finally:
+        point_at(real[2])
+        app_logging.LOG_FILE, app_logging.LOG_DIR = real[0], real[1]
+
+
 @pytest.fixture(autouse=True)
 def _capture_dirs(tmp_path_factory, monkeypatch):
     """The app's startup clears the frozen screen frames and resets recording

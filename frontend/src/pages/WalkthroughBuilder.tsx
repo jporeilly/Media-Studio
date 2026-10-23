@@ -28,8 +28,9 @@
  * W2: a step without a picture yet (one imported from a course workshop) shows a placeholder on the stage and a
  * mark in the list; **Capture steps…** (desktop app only, behind `useCaptureAvailable` like the Capture tile)
  * saves first, then runs the guided capture (`useGuidedCapture`): the shell's capture bar follows the steps, each
- * Shift+F8 takes a still, attaches it and places the hotspot round the pointer, and Done reloads the builder from
- * the server - every record the server answers during the capture is the saved baseline, so nothing is "unsaved".
+ * click, typed pause or Shift+F8 takes a still, attaches it and places the hotspot round the click or the pointer,
+ * Next (the capture line's button, the bar's, Shift+F9) moves on (W2d), and Done reloads the builder from the
+ * server - every record the server answers during the capture is the saved baseline, so nothing is "unsaved".
  * A fresh import opens with a notice on the status line ("Imported …: 12 steps in 4 chapters; …").
  *
  * W2c: **Export to course…** (saving first, asked as Play asks) opens `ExportCourseDialog`: the preview of the
@@ -53,7 +54,7 @@ import { fitZoom } from "../lib/annotate";
 import type { Capture } from "../lib/capture";
 import { SAVE_BEFORE_EXPORT } from "../lib/courseExport";
 import { copyText, downloadText } from "../lib/files";
-import { type GuidedOptions, CLICK_HINT, capturedSteps } from "../lib/guided";
+import { type GuidedOptions, capturedSteps, hintLine, nextLabel } from "../lib/guided";
 import { type History, canRedo, canUndo, commit, history, prune, redo, undo } from "../lib/history";
 import { useCaptureAvailable } from "../lib/useCaptureAvailable";
 import {
@@ -379,7 +380,8 @@ export default function WalkthroughBuilderPage() {
                 <Camera size={14} />
                 <strong data-capture-label="">{guided.bar.label}</strong>
                 <span className="os-truncate" style={{ flex: 1 }}>{guided.bar.text}</span>
-                <span className="os-muted">{guided.phase === "finished" ? "All steps visited." : guided.bar.clicks ? `${CLICK_HINT}; the bar has Capture, Skip, Back and Done.` : "Shift+F8 captures; the bar has Capture, Skip, Back and Done."}</span>
+                <span className="os-muted">{guided.phase === "finished" ? "All steps visited." : `${hintLine(guided.bar.clicks, guided.bar.typing) || "Shift+F8 captures"}; the bar has Capture, Next, Back and Done.`}</span>
+                <Button size="sm" onClick={guided.next} disabled={guided.phase !== "ready" && guided.phase !== "capturing"} title="Move on to the next step (Shift+F9): a step with no still yet is left for later" data-capture-next="">{guided.session ? nextLabel(guided.session) : "Next"}</Button>
                 <Button size="sm" onClick={() => void guided.done()} disabled={guided.phase === "capturing"} data-capture-done="">Done</Button>
               </>
             )}

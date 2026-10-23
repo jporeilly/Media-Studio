@@ -111,13 +111,19 @@ class ImportIn(BaseModel):
     name: WalkthroughName | None = None
 
 
+"""The most a page may wait after a click before its still, in ms (W2d, R2: the page's own choice is 500)."""
+MAX_SETTLE_MS = 5000
+
+
 class GuidedCaptureIn(BaseModel):
-    """The guided capture's two events (W2): its start (the kind, with or without the pointer, and since
-    W2b whether every click is a step) and its end (how many DISTINCT steps got a picture, how many were
-    skipped, and since W2b how many captures were made and how many of them by a click). The stills
+    """The guided capture's two events (W2): its start (the kind, with or without the pointer, since W2b
+    whether every click is a step, and since W2d whether a typed pause is a step, how long after a click
+    its still is taken - 0 for at the press - and when the session moves on: at Next, or after each capture)
+    and its end (how many DISTINCT steps got a picture, how many were skipped, since W2b how many captures
+    were made and how many of them by a click, and since W2d how many a typed pause made). The stills
     themselves are ``capture.still`` rows and each picture attached a ``walkthrough.replace_picture``
-    row; this is the row that frames them. The W2b fields are optional: a page before them sends none,
-    and its rows read as they did."""
+    row; this is the row that frames them. The W2b and W2d fields are optional: a page before them sends
+    none, and its rows read as they did."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -125,27 +131,54 @@ class GuidedCaptureIn(BaseModel):
     kind: Literal["region", "window", "screen"] | None = None
     cursor: bool = False
     clicks: StrictBool | None = None
+    typing: StrictBool | None = None
+    settle_ms: int | None = Field(None, ge=0, le=MAX_SETTLE_MS)
+    advance: Literal["next", "capture"] | None = None
     captured: int = Field(0, ge=0, le=10_000)
     skipped: int = Field(0, ge=0, le=10_000)
     captures: int | None = Field(None, ge=0, le=10_000)
     by_click: int | None = Field(None, ge=0, le=10_000)
+    by_typing: int | None = Field(None, ge=0, le=10_000)
 
 
-def guided_start_detail(kind: str | None, cursor: bool, clicks: bool | None) -> str:
-    """"start: region with pointer, on click" - the kind (``unknown`` when none was given, never guessed),
-    " with pointer" when the cursor is drawn, ", on click" when every click is a step (W2b)."""
-    return f"start: {kind or 'unknown'}{' with pointer' if cursor else ''}{', on click' if clicks else ''}"
+def guided_start_detail(
+    kind: str | None, cursor: bool, clicks: bool | None, typing: bool | None = None, settle_ms: int | None = None, advance: str | None = None,
+) -> str:
+    """"start: region with pointer, on click, on typing, still 0.5 s after the click, moves on at Next" - the kind
+    (``unknown`` when none was given, never guessed), " with pointer" when the cursor is drawn, then each part only
+    when so: ", on click" when every click is a step (W2b), ", on typing" when a typed pause is (W2d), ", still N s
+    after the click" when the still waits for the click to settle, and ", moves on at Next" or ", moves on at each
+    capture" by the mode - nothing for a page that sent no ``advance``. The row says what is LIVE: the page sends
+    the hooks that went up, not the ticks."""
+    parts = [f"{kind or 'unknown'}{' with pointer' if cursor else ''}"]
+    if clicks:
+        parts.append("on click")
+    if typing:
+        parts.append("on typing")
+    if settle_ms:
+        parts.append(f"still {settle_ms / 1000:g} s after the click")
+    if advance == "next":
+        parts.append("moves on at Next")
+    elif advance == "capture":
+        parts.append("moves on at each capture")
+    return f"start: {', '.join(parts)}"
 
 
-def guided_done_detail(captured: int, skipped: int, captures: int | None, by_click: int | None) -> str:
+def guided_done_detail(captured: int, skipped: int, captures: int | None, by_click: int | None, by_typing: int | None = None) -> str:
     """"done: 3 captured (2 by click), 1 skipped" - ``captured`` the distinct steps that got a picture; when
-    the captures made differ from that (a retake after Back), "done: 3 captured, 5 captures (2 by click),
-    1 skipped"; without the W2b counts, "done: 3 captured, 1 skipped" as before."""
+    the captures made differ from that (a retake after Back, or a step held until Next), "done: 3 captured,
+    5 captures (2 by click), 1 skipped"; ", 2 typed" inside the brackets when typed captures were sent and
+    made (W2d); without the W2b counts, "done: 3 captured, 1 skipped" as before."""
     detail = f"{captured} captured"
     if captures is not None and captures != captured:
         detail += f", {captures} captures"
+    made = []
     if by_click is not None:
-        detail += f" ({by_click} by click)"
+        made.append(f"{by_click} by click")
+    if by_typing:
+        made.append(f"{by_typing} typed")
+    if made:
+        detail += f" ({', '.join(made)})"
     return f"done: {detail}, {skipped} skipped"
 
 
@@ -306,15 +339,16 @@ def replace_picture(wid: str, sid: str, body: ReplacePictureIn, user: dict = Dep
 
 @router.post("/{wid}/guided-capture", status_code=204)
 def guided_capture(wid: str, body: GuidedCaptureIn, user: dict = Depends(current_user)):
-    """The guided capture's audit row (W2): "start" with the kind (whether the pointer is drawn, and
-    since W2b whether every click is a step), "done" with how many distinct steps got a picture and how
-    many were skipped (and since W2b the captures made, how many by click). The desktop app sends both;
-    nothing is written to the walkthrough here (each picture attached is a replace_picture of its own)."""
+    """The guided capture's audit row (W2): "start" with the kind (whether the pointer is drawn, since W2b
+    whether every click is a step, and since W2d whether typing is, the still after the click and the mode),
+    "done" with how many distinct steps got a picture and how many were skipped (since W2b the captures made
+    and how many by click, since W2d how many typed). The desktop app sends both; nothing is written to the
+    walkthrough here (each picture attached is a replace_picture of its own)."""
     _owned(wid, user)
     if body.event == "start":
-        detail = guided_start_detail(body.kind, body.cursor, body.clicks)
+        detail = guided_start_detail(body.kind, body.cursor, body.clicks, body.typing, body.settle_ms, body.advance)
     else:
-        detail = guided_done_detail(body.captured, body.skipped, body.captures, body.by_click)
+        detail = guided_done_detail(body.captured, body.skipped, body.captures, body.by_click, body.by_typing)
     audit(WALKTHROUGH_GUIDED_CAPTURE, user=user, entity="walkthrough", entity_id=wid, detail=detail)
 
 

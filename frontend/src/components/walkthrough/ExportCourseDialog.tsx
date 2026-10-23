@@ -84,8 +84,8 @@ function ExportCourseBody({ wid, onClose }: Props) {
         guide's own is already there. Nothing is written until you press Write to the course.
       </p>
       <p className="os-muted os-small" style={{ marginTop: 0 }} data-export-caveat="">
-        The Content Manager does not draw the pins yet: until it renders annotated figures, a guide shows the picture, the pin's text as a numbered
-        line and the caption. Export into a course that is published only after that.
+        The pins show in a Content Manager from 0.7.42 (a Content Editor from 1.30.0); an older one shows the picture, the pin's text as a numbered
+        line and the caption. Export into a published course once its readers have that version.
       </p>
       <label className="os-row" style={{ gap: 8, alignItems: "center", marginBottom: 10 }}>
         <input type="checkbox" checked={player} onChange={(e) => { setPlayer(e.target.checked); setWritten(null); write.reset(); }} data-export-with-player="" />

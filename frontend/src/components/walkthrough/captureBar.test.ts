@@ -75,24 +75,25 @@ describe("the capture bar page in its steps mode", () => {
     await load("steps");
     tell(ready);
     expect([text("s-label"), text("s-name"), text("s-remaining"), text("s-text"), text("s-instruction")]).toEqual(["Step 2 of 3", "Tour", "2 to go", "Text b", "Do b"]);
-    expect([disabled("s-capture"), disabled("s-skip"), disabled("s-back"), disabled("s-done")]).toEqual([false, false, true, false]);
+    expect([disabled("s-capture"), disabled("s-next"), disabled("s-back"), disabled("s-done")]).toEqual([false, false, true, false]);
     expect(text("s-capture")).toBe("Capture");
     // An empty message leaves the line empty (the page's `.message:empty` rule hides it).
     expect(text("s-message")).toBe("");
-    tell({ ...ready, message: "Shift+F8 is taken by another program: use Capture on the bar." });
-    expect(text("s-message")).toBe("Shift+F8 is taken by another program: use Capture on the bar.");
+    tell({ ...ready, message: "Shift+F8 or Shift+F9 is taken by another program: use Capture and Next on the bar." });
+    expect(text("s-message")).toBe("Shift+F8 or Shift+F9 is taken by another program: use Capture and Next on the bar.");
     expect(disabled("s-capture")).toBe(false);
-    // The next state without a message clears it.
+    // The next state without a message clears it. While a still is in flight Next stays enabled (W2d, R1: the attach lands
+    // on its claimed step whatever Next does meanwhile); Back and Done wait.
     tell({ ...ready, phase: "capturing", canCapture: false });
     expect(text("s-message")).toBe("");
     expect(text("s-capture")).toBe("Capturing…");
-    expect([disabled("s-capture"), disabled("s-skip"), disabled("s-back"), disabled("s-done")]).toEqual([true, true, true, true]);
+    expect([disabled("s-capture"), disabled("s-next"), disabled("s-back"), disabled("s-done")]).toEqual([true, false, true, true]);
     tell({ ...ready, phase: "finished", label: "All steps visited", text: "Press Done to close the bar and go back to the builder.", instruction: "", remaining: 0, canBack: true, canCapture: false });
     expect([text("s-label"), text("s-remaining"), text("s-instruction")]).toEqual(["All steps visited", "", ""]);
-    expect([disabled("s-capture"), disabled("s-skip"), disabled("s-back"), disabled("s-done")]).toEqual([true, true, false, false]);
+    expect([disabled("s-capture"), disabled("s-next"), disabled("s-back"), disabled("s-done")]).toEqual([true, true, false, false]);
   });
 
-  it("in click mode a second small line says so under the instruction, until every step is visited (W2b)", async () => {
+  it("in click mode a second small line says so under the instruction, with typing when that is live, until every step is visited (W2b, W2d)", async () => {
     await load("steps");
     tell(ready);
     expect(text("s-hint")).toBe("");
@@ -104,21 +105,61 @@ describe("the capture bar page in its steps mode", () => {
     expect([text("s-hint"), text("s-message")]).toEqual(["Click to capture · Shift+F8 captures without a click", "Click inside the frame to capture this step."]);
     tell({ ...ready, clicks: true, phase: "capturing", canCapture: false });
     expect([text("s-hint"), text("s-message")]).toEqual(["Click to capture · Shift+F8 captures without a click", ""]);
+    // Typing live (R3): the clause is added; typing alone names the key; the same words as lib/guided.ts hintLine.
+    tell({ ...ready, clicks: true, typing: true });
+    expect(text("s-hint")).toBe("Click to capture · Shift+F8 captures without a click · typing captures a second after you stop");
+    tell({ ...ready, clicks: false, typing: true });
+    expect(text("s-hint")).toBe("Shift+F8 captures · typing captures a second after you stop");
     // Off by the tick: no line. Every step visited: nothing left to click for.
     tell({ ...ready, clicks: false });
     expect(text("s-hint")).toBe("");
-    tell({ ...ready, clicks: true, phase: "finished", label: "All steps visited", canCapture: false });
+    tell({ ...ready, clicks: true, typing: true, phase: "finished", label: "All steps visited", canCapture: false });
     expect(text("s-hint")).toBe("");
+  });
+
+  it("the one button reads Skip with no still this step and Next with one; \"2 stills this step\" past one; the last still's thumbnail at the left, captioned, and nothing without one (W2d, R1, R4, R5)", async () => {
+    await load("steps");
+    const still = () => document.getElementById("s-still") as HTMLElement;
+    const thumb = () => document.getElementById("s-thumb") as HTMLImageElement;
+    tell(ready);
+    expect(text("s-next")).toBe("Skip");
+    expect(document.getElementById("s-next")!.title).toBe("Leave this step for later and move on (Shift+F9)");
+    expect(text("s-stills")).toBe("");
+    expect(still().style.display).toBe("none");
+    // One still landed on the step: Next, and nothing said about the count (one is the normal case).
+    tell({ ...ready, stillsThisStep: 1 });
+    expect(text("s-next")).toBe("Next");
+    expect(document.getElementById("s-next")!.title).toBe("Move on to the next step (Shift+F9): the last still stands");
+    expect(text("s-stills")).toBe("");
+    // Two: said under the step's text.
+    tell({ ...ready, stillsThisStep: 2 });
+    expect([text("s-next"), text("s-stills")]).toEqual(["Next", "2 stills this step"]);
+    tell({ ...ready, stillsThisStep: 3 });
+    expect(text("s-stills")).toBe("3 stills this step");
+    // The last still of the run, whichever step: the thumbnail in the payload (a data URL: the bar fetches nothing) with its caption.
+    const last = { step: 3, thumb: "data:image/jpeg;base64,abc" };
+    tell({ ...ready, lastStill: last });
+    expect(still().style.display).not.toBe("none");
+    expect(thumb().getAttribute("src")).toBe(last.thumb);
+    expect(text("s-thumb-caption")).toBe("step 3");
+    // A payload without one shows nothing (and drops the picture).
+    tell({ ...ready, lastStill: null });
+    expect(still().style.display).toBe("none");
+    expect(thumb().getAttribute("src")).toBe("");
+    // The titles say what each button does now.
+    expect(document.getElementById("s-capture")!.title).toContain("no hotspot");
+    expect(document.getElementById("s-back")!.title).toBe("Back to the step before: a capture there replaces its picture");
+    expect(document.getElementById("s-done")!.title).toBe("Close the bar and go back to the builder");
   });
 
   it("the buttons send their actions to the main window", async () => {
     await load("steps");
     tell({ ...ready, canBack: true });
     fake.emitted.length = 0;
-    for (const id of ["s-capture", "s-skip", "s-back", "s-done"]) document.getElementById(id)!.click();
+    for (const id of ["s-capture", "s-next", "s-back", "s-done"]) document.getElementById(id)!.click();
     await new Promise((r) => setTimeout(r, 0));
     expect(fake.emitted.map((e) => [e.target, e.name, (e.payload as { action: string }).action])).toEqual([
-      ["main", "capture:control", "capture"], ["main", "capture:control", "skip"], ["main", "capture:control", "back"], ["main", "capture:control", "done"],
+      ["main", "capture:control", "capture"], ["main", "capture:control", "next"], ["main", "capture:control", "back"], ["main", "capture:control", "done"],
     ]);
   });
 });

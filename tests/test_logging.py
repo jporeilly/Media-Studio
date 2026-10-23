@@ -15,10 +15,32 @@ Read back from the real ``data/logs/app.log``: that file is the claim.
 import io
 import logging
 import uuid
+from pathlib import Path
 
 import pytest
 
 from utils import logger as app_logging
+
+
+def test_the_test_session_writes_app_log_under_its_basetemp_and_not_the_checkouts(tmp_path_factory):
+    """W2d (R7): the session-scoped conftest fixture points the ONE file handler at a file under the test session's
+    basetemp, so a test run leaves the checkout's ``data/logs/app.log`` exactly as it found it (the workshop parser's
+    warnings used to land there on every run). The redirect is the handler's own file - one handler object, its
+    rotation, every logger that holds it and the root's forwarder untouched - and the module's ``LOG_FILE`` and
+    ``LOG_DIR`` follow, which is how the tests below read what was written."""
+    base = Path(str(tmp_path_factory.getbasetemp())).resolve()
+    redirected = Path(app_logging._file.baseFilename).resolve()
+    assert redirected.is_relative_to(base), f"{redirected} is not under the basetemp {base}"
+    assert app_logging.LOG_FILE.resolve() == redirected
+    assert app_logging.LOG_DIR.resolve() == redirected.parent
+    marker = f"e7-redirect-{uuid.uuid4().hex}"
+    app_logging.get_logger("WORKSHOPS").warning("Course demo is left out of the list (%s)", marker)
+    assert _occurrences(marker) == 1, "written where the module now points"
+    from utils import config as cfg
+
+    real = cfg.CONFIG_DIR / "logs" / "app.log"
+    if real.is_file():
+        assert marker not in real.read_text(encoding="utf-8", errors="replace"), "and not in the checkout's app.log"
 
 
 def _flush() -> None:

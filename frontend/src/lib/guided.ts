@@ -22,9 +22,28 @@
  * without a click. A click while a still is being taken is NOT lost: the step is claimed at once (`claimStep`:
  * the session moves on, the bar follows), its still is taken at once beside the first, and the attaches land in
  * click order; up to `MAX_IN_FLIGHT` stills may be in flight, a click past that is dropped with `TOO_FAST`.
- * The counts: `captured` is every capture that landed (a key, a click or the bar's button), `taken` the DISTINCT
- * steps that got a picture this run (a retake is not a second step - `capturedSteps`), `byClick` the captures the
- * hook made, `skipped` the DISTINCT steps skipped and not captured since (`passed` holds their ids).
+ * The counts: `captured` is every capture that landed (a key, a click, a typed pause or the bar's button), `taken` the
+ * DISTINCT steps that got a picture this run (a retake is not a second step - `capturedSteps`), `byClick` the captures
+ * the click hook made, `byTyping` those a typed pause made, `skipped` the DISTINCT steps skipped and not captured since
+ * (`passed` holds their ids), `landed` how many captures landed on each step this run (`stillsThisStep`).
+ *
+ * THE STEP IS YOURS UNTIL NEXT (W2d, R1). A step is seldom one click: "right-click Valid rows and choose Preview rows"
+ * is two, and any click on the way (focusing a window, an OK) used to drift the run by a step. So by default
+ * (`advance: "next"`) a capture lands on the CURRENT step and the session does not move on - `claimStep` keeps `at`,
+ * the id being claimed at the moment of the capture so a still in flight lands on the step it was taken for whatever
+ * Next does meanwhile - and every capture until Next re-takes the step's picture through the replace-picture path, the
+ * chain keeping the order, so the last still stands (the hook removes a superseded still from Captures). Next - the
+ * bar's button, Shift+F9 (`STEP_NEXT_EVENT`, `nextHotkey`), the builder's line - moves on (`advance(s, "next")`): the
+ * step is passed (skipped) only when it got no picture this run, and the one button reads Next or Skip by that
+ * (`nextLabel`). `advance: "capture"` is 0.18.0's one capture per step: the session moves on at the claim.
+ *
+ * THE STILL AFTER THE CLICK (R2): with `settleMs` > 0 a CLICK's still is taken that long after the press (the hook
+ * waits `delay`; the step is claimed and the in-flight count taken at once), so the picture shows what the click did -
+ * a menu, a dialog - with the hotspot where you clicked. The key, the bar's button and a typed pause take it at once.
+ *
+ * TYPING TAKES A STILL (R3): with `typing` the shell's keyboard hook raises `capture:step-typed` a second after the
+ * last typing key, with the pointer - and nothing about any key: which keys you press is never recorded. The hook
+ * captures with the step's last click point this run as the hotspot (in `next` mode; the event's pointer otherwise).
  */
 import type { Size } from "./annotate";
 import { type CaptureKind, type MonitorInfo, type Region, type WindowInfo, monitorFor } from "./capture";
@@ -35,18 +54,27 @@ export interface Rect { x: number; y: number; width: number; height: number }
 
 /** The hotspot a guided capture draws round the pointer, in picture pixels (the server clamps it again). */
 export const HOTSPOT_DEFAULT: Size = { width: 160, height: 60 };
-/** The capture bar's size in its second mode, physical pixels at scale 1 (the recorder's is 300 x 56). */
-export const STEPS_BAR_WIDTH = 600;
+/** The capture bar's size in its second mode, physical pixels at scale 1 (the recorder's is 300 x 56): the thumbnail box at the left (W2d). */
+export const STEPS_BAR_WIDTH = 760;
 export const STEPS_BAR_HEIGHT = 112;
-/** The shell's events: the key press with the pointer (`{x, y}`), a click (`{x, y, button}`), and the bar's buttons (`{action}`). */
+/** How long after a click its still is taken when "the still after the click" is ticked (R2), ms. */
+export const SETTLE_MS = 500;
+/**
+ * The shell's events: the key press with the pointer (`{x, y}`), a click (`{x, y, button}`), Next (Shift+F9, no
+ * payload), a typed pause (`{x, y, window}`: the pointer and the foreground window's frame - never a key), and the bar's buttons (`{action}`).
+ */
 export const STEP_KEY_EVENT = "capture:step-key";
 export const STEP_CLICK_EVENT = "capture:step-click";
+export const STEP_NEXT_EVENT = "capture:step-next";
+export const STEP_TYPED_EVENT = "capture:step-typed";
 export const CONTROL_EVENT = "capture:control";
 export const STATE_EVENT = "capture:state";
 /** The bar's second mode, as `capture_bar_open` and the state payload name it. */
 export const BAR_MODE = "steps";
-/** The key set `capture_hotkeys_start` is asked for: Shift+F8 alone. */
+/** The key set `capture_hotkeys_start` is asked for: Shift+F8 (capture) and Shift+F9 (next), each registered on its own (F3). */
 export const KEYS_MODE = "steps";
+/** The shell's pause after the last typing key before its still (`TYPING_PAUSE_MS` in capture.rs), mirrored for the page's own rule (G2). */
+export const TYPING_PAUSE_MS = 1000;
 export const RECORDING_IN_PROGRESS = "A recording is in progress: stop it first (Shift+F10, or Stop on the recorder bar), then capture the steps.";
 export const NEEDS_DESKTOP = "Capturing the steps needs the desktop app on the machine whose screen it is.";
 export const NOTHING_TO_CAPTURE = "Every step has a picture already. Choose \"Every step\" to capture them again.";
@@ -60,12 +88,28 @@ export function noWindowLine(clicks: boolean): string {
 /** How many stills may be in flight at once (F8): a click while the first still is taken is captured beside it; one more is `TOO_FAST`. */
 export const MAX_IN_FLIGHT = 2;
 export const TOO_FAST = "Too fast: wait for the still.";
+/** Shift+F8 taken by another program (the keys are registered one by one, F3: each is named on its own). */
 export const KEY_TAKEN = "Shift+F8 is taken by another program: use Capture on the bar (a capture from the bar has no hotspot).";
-/** The same refusal when the clicks are live (H1): a click captures whoever holds Shift+F8. */
+/** The same refusal when the clicks are live (H1): a click captures whoever holds the key. */
 export const KEY_TAKEN_CLICK = "Shift+F8 is taken by another program: click to capture, or use Capture on the bar.";
-/** Both off with the tick on (H1): ONE line naming both - the bar's Capture is the one way left. */
+/** Shift+F9 taken (F3): Next is on the bar. */
+export const NEXT_KEY_TAKEN = "Shift+F9 is taken by another program: use Next on the bar.";
+/** Both keys taken: one line naming both, by whether the clicks are live. */
+export const KEYS_TAKEN = "Shift+F8 and Shift+F9 are taken by another program: use Capture and Next on the bar (a capture from the bar has no hotspot).";
+export const KEYS_TAKEN_CLICK = "Shift+F8 and Shift+F9 are taken by another program: click to capture, or use Capture and Next on the bar.";
+/** Shift+F8 taken and the clicks off with the tick on (H1): ONE line naming both - the bar's Capture is the one way left. */
 export const KEYS_AND_CLICKS_OFF =
   "Shift+F8 is taken by another program and clicks could not be captured on this computer: use Capture on the bar (a capture from the bar has no hotspot).";
+/** Shift+F8 taken and both hooks off (W2d): still one line. */
+export const KEYS_AND_HOOKS_OFF =
+  "Shift+F8 is taken by another program and clicks and typing could not be captured on this computer: use Capture on the bar (a capture from the bar has no hotspot).";
+/** The keyboard hook asked for and not up (R3): a typed step is captured by a click, the key or the button. */
+export const TYPING_OFF = "Typing could not be captured on this computer: click, press Shift+F8 or use the bar's Capture for a typed step.";
+/** The same beside a line that says Shift+F8 is taken (G5): never "press Shift+F8" there - a click, or the bar's Capture. */
+export const TYPING_OFF_CLICK = "Typing could not be captured on this computer: click, or use the bar's Capture for a typed step.";
+export const TYPING_OFF_BAR = "Typing could not be captured on this computer: use the bar's Capture for a typed step.";
+/** Both hooks asked for and neither up: one line. */
+export const HOOKS_OFF = "Clicks and typing could not be captured on this computer: capture with Shift+F8 or the bar's Capture.";
 export const BAR_NOT_HIDDEN = "This Windows cannot hide the capture bar from the picture; keep it off the captured area.";
 /** The shell could not open the bar at all: the start is given up (the reason follows the colon). */
 export const BAR_NOT_OPENED = "The capture bar could not be opened";
@@ -73,6 +117,17 @@ export const BAR_NOT_OPENED = "The capture bar could not be opened";
 export const CLICK_OUTSIDE_FRAME = "Click inside the frame to capture this step.";
 /** A click off the chosen monitor in Full screen (W2b-2): no step; shown on the bar until the next payload. */
 export const CLICK_OUTSIDE_SCREEN = "Click on the captured screen to capture this step.";
+/**
+ * A typed pause whose window (the one typed into) is off a Region's frame, off the Full screen's monitor, or - in the
+ * Window kind (G1) - off the rectangle of the step's last still this run: no still.
+ */
+export const TYPED_OUTSIDE_FRAME = "Typing outside the frame takes no still.";
+export const TYPED_OUTSIDE_SCREEN = "Typing off the captured screen takes no still.";
+export const TYPED_OUTSIDE_WINDOW = "Typing outside the step's window takes no still.";
+/** The bar's line for a typed pause outside the kind's area. */
+export function typedOutsideLine(kind: CaptureKind): string {
+  return kind === "screen" ? TYPED_OUTSIDE_SCREEN : kind === "window" ? TYPED_OUTSIDE_WINDOW : TYPED_OUTSIDE_FRAME;
+}
 /**
  * A step whose still failed while a later click's still was in flight (G2): it is left without a new picture, and
  * the bar and the builder say so - a STANDING line, until that step gets a picture or the session ends. A step
@@ -92,45 +147,73 @@ export function missedLine(steps: MissedStep[]): string | null {
   return sorted.length ? sorted.map((s) => (s.kept ? keptPictureLine(s.number) : noPictureLine(s.number))).join(" ") : null;
 }
 
-/** Whether Shift+F8 and the click hook went up (H1): what `capture_hotkeys_start` answers. */
-export interface KeysUp { key: boolean; clicks: boolean }
+/** Whether Shift+F8, Shift+F9, the click hook and the keyboard hook went up (H1, W2d, F3): what `capture_hotkeys_start` answers. */
+export interface KeysUp { key: boolean; next: boolean; clicks: boolean; typing: boolean }
 
 /**
- * Any shell's answer to `capture_hotkeys_start`, read: `{key, clicks}` from a shell since H1; a boolean from the W2b
- * shell before it (true: everything asked is up; false: the key up, the hook refused); nothing (`undefined`) from the
- * 0.17.0 shell, which has no click hook at all - the key up, the clicks off (the in-app updater refreshes the page,
- * never the shell, so a newer page can meet that shell); a refusal (`refused`) from a shell before H1 whose key was
- * taken - it installed no hook either - or from any shell while the other key set is held: both off.
+ * Any shell's answer to `capture_hotkeys_start`, read: `{key, next, clicks, typing}` from a shell since the W2d fix
+ * round (the two keys registered one by one, F3); `{key, clicks, typing}` from the W2d shell before it, whose keys
+ * were one set (`next` follows `key`); `{key, clicks}` from one since H1 (no keyboard hook: the typing off); a boolean
+ * from the W2b shell before it (true: everything asked is up; false: the key up, the hook refused); nothing
+ * (`undefined`) from the 0.17.0 shell, which has no hook at all - the key up, the clicks and the typing off (the
+ * in-app updater refreshes the page, never the shell, so a newer page can meet that shell); a refusal (`refused`)
+ * from a shell before H1 whose key was taken - it installed no hook either - or from any shell while the other key
+ * set is held: all off.
  */
 export function keysUpOf(answer: unknown, refused: boolean): KeysUp {
-  if (refused) return { key: false, clicks: false };
+  if (refused) return { key: false, next: false, clicks: false, typing: false };
   if (answer && typeof answer === "object") {
-    const a = answer as { key?: unknown; clicks?: unknown };
-    return { key: a.key !== false, clicks: a.clicks === true };
+    const a = answer as { key?: unknown; next?: unknown; clicks?: unknown; typing?: unknown };
+    const key = a.key !== false;
+    return { key, next: a.next === undefined ? key : a.next !== false, clicks: a.clicks === true, typing: a.typing === true };
   }
-  if (typeof answer === "boolean") return { key: true, clicks: answer };
-  return { key: true, clicks: false };
+  if (typeof answer === "boolean") return { key: true, next: true, clicks: answer, typing: false };
+  return { key: true, next: true, clicks: false, typing: false };
 }
 
 /**
- * What the start says about the key and the clicks (H1), and whether the clicks are live: the clicks only when asked
- * AND the hook is up (so the bar's and the builder's "Click to capture" hint is shown only then); `KEY_TAKEN_CLICK`
- * when the key is taken but the clicks are live, `KEY_TAKEN` when it is taken and they were not asked; `CLICKS_OFF`
- * when they were asked and the hook is not up. Both off with the tick on: ONE line, `KEYS_AND_CLICKS_OFF` - the two
- * single lines would each point at the other's way.
+ * What the start says about the keys, the clicks and the typing (H1, W2d, F3), and which are live: the clicks only
+ * when asked AND the hook is up (so the bar's and the builder's "Click to capture" hint is shown only then), the
+ * typing likewise. Each key is named on its own: `KEY_TAKEN_CLICK` / `KEY_TAKEN` for Shift+F8 (by whether the clicks
+ * are live), `NEXT_KEY_TAKEN` for Shift+F9, `KEYS_TAKEN_CLICK` / `KEYS_TAKEN` for both; `CLICKS_OFF` / `TYPING_OFF`
+ * when a hook was asked and is not up - both: ONE line, `HOOKS_OFF`. Shift+F8 taken AND the clicks off with the tick
+ * on: ONE line, `KEYS_AND_CLICKS_OFF` (the two single lines would each point at the other's way) -
+ * `KEYS_AND_HOOKS_OFF` when the typing is off as well - and Shift+F9's own line after it when that is taken too.
  */
-export function keysLines(up: KeysUp, clicksAsked: boolean): { clicks: boolean; lines: string[] } {
+export function keysLines(up: KeysUp, clicksAsked: boolean, typingAsked = false): { clicks: boolean; typing: boolean; lines: string[] } {
   const clicks = clicksAsked && up.clicks;
-  if (!up.key && clicksAsked && !up.clicks) return { clicks, lines: [KEYS_AND_CLICKS_OFF] };
+  const typing = typingAsked && up.typing;
+  const clicksOff = clicksAsked && !up.clicks;
+  const typingOff = typingAsked && !up.typing;
   const lines: string[] = [];
-  if (!up.key) lines.push(clicks ? KEY_TAKEN_CLICK : KEY_TAKEN);
-  if (clicksAsked && !up.clicks) lines.push(CLICKS_OFF);
-  return { clicks, lines };
+  if (!up.key && clicksOff) {
+    lines.push(typingOff ? KEYS_AND_HOOKS_OFF : KEYS_AND_CLICKS_OFF);
+    if (!up.next) lines.push(NEXT_KEY_TAKEN);
+    return { clicks, typing, lines };
+  }
+  if (!up.key && !up.next) lines.push(clicks ? KEYS_TAKEN_CLICK : KEYS_TAKEN);
+  else if (!up.key) lines.push(clicks ? KEY_TAKEN_CLICK : KEY_TAKEN);
+  else if (!up.next) lines.push(NEXT_KEY_TAKEN);
+  if (clicksOff && typingOff) lines.push(HOOKS_OFF);
+  else if (clicksOff) lines.push(CLICKS_OFF);
+  // The typing line never says "press Shift+F8" beside a line that says the key is taken (G5).
+  else if (typingOff) lines.push(up.key ? TYPING_OFF : clicks ? TYPING_OFF_CLICK : TYPING_OFF_BAR);
+  return { clicks, typing, lines };
 }
 /** The shell took the key but could not install the click hook (W2b): the capture goes on by the key and the button. */
 export const CLICKS_OFF = "Clicks could not be captured on this computer: capture with Shift+F8 or the bar's Capture.";
 /** The bar's second line in click mode (W2b). */
 export const CLICK_HINT = "Click to capture · Shift+F8 captures without a click";
+/** The clause the hint gains while the typing hook is up (W2d, R3). */
+export const TYPING_HINT = "typing captures a second after you stop";
+/** The bar's hint line by what is live: the click hint, with the typing clause when typing is; typing alone names the key; neither, nothing. */
+export function hintLine(clicks: boolean, typing: boolean): string {
+  if (clicks) return typing ? `${CLICK_HINT} · ${TYPING_HINT}` : CLICK_HINT;
+  return typing ? `Shift+F8 captures · ${TYPING_HINT}` : "";
+}
+
+/** When the session moves on (W2d, R1): at Next (the default: every capture until then re-takes the step), or at each capture (0.18.0). */
+export type GuidedAdvance = "next" | "capture";
 
 export interface GuidedOptions {
   kind: CaptureKind;
@@ -141,21 +224,42 @@ export interface GuidedOptions {
   monitor: number | null;
   /** Capture on click (W2b): every click in the frame takes the step's still; Shift+F8 still captures without one. */
   clicks: boolean;
+  /** Move on at Next, or after each capture (R1). */
+  advance: GuidedAdvance;
+  /** The still after the click (R2): 0 takes it at the press, `SETTLE_MS` that long after; clicks only. */
+  settleMs: number;
+  /** Typing takes a still (R3): a second after you stop typing, the hotspot where you last clicked in the step. */
+  typing: boolean;
 }
 
 export type GuidedPhase = "idle" | "starting" | "ready" | "capturing" | "finished";
 
+/** Who asked for a capture: the key (or the bar's button, which carries no pointer), the click hook, or a typed pause (R3). */
+export type CaptureBy = "key" | "click" | "typing";
+
 /**
  * Where a session stands: the step ids it visits, the index of the current one, and the counts for the audit row -
- * `captured` every capture that landed (a key, a click, the bar's button), `taken` the distinct steps that got a
- * picture this run (a retake after Back is not a second step), `byClick` how many captures the click hook made,
- * `passed` the distinct steps skipped and `skipped` how many of those got no picture since (a step skipped, Back,
- * skipped again is one; a step skipped and then captured is not skipped).
+ * `captured` every capture that landed (a key, a click, a typed pause, the bar's button), `taken` the distinct steps
+ * that got a picture this run (a retake after Back, or a second still of the step held until Next, is not a second
+ * step), `byClick` how many captures the click hook made, `byTyping` how many a typed pause made, `landed` how many
+ * landed on each step this run (by id, so a still in flight lands on the step it was taken for), `passed` the
+ * distinct steps skipped and `skipped` how many of those got no picture since (a step skipped, Back, skipped again
+ * is one; a step skipped and then captured is not skipped).
  */
-export interface GuidedSession { ids: string[]; at: number; captured: number; skipped: number; taken: string[]; byClick: number; passed: string[] }
+export interface GuidedSession {
+  ids: string[];
+  at: number;
+  captured: number;
+  skipped: number;
+  taken: string[];
+  byClick: number;
+  byTyping: number;
+  landed: Record<string, number>;
+  passed: string[];
+}
 
 export function sessionOf(ids: string[]): GuidedSession {
-  return { ids: [...ids], at: 0, captured: 0, skipped: 0, taken: [], byClick: 0, passed: [] };
+  return { ids: [...ids], at: 0, captured: 0, skipped: 0, taken: [], byClick: 0, byTyping: 0, landed: {}, passed: [] };
 }
 
 export function currentId(s: GuidedSession): string | null {
@@ -172,40 +276,58 @@ function skippedOf(passed: string[], taken: string[]): number {
 }
 
 /**
- * The step a capture claims - the current one - with the session moved on AT ONCE: the still and the attach follow
- * (in click order, when more than one is in flight) and `recordCapture` counts the one that lands. Null when every
- * step is visited.
+ * The step a capture claims - the current one - and the session after the claim: moved on AT ONCE in `capture` mode
+ * (0.18.0: the still and the attach follow, in click order when more than one is in flight), unchanged in `next` mode
+ * (R1: the step is yours until Next; the id is still claimed now, so the still lands on it whatever Next does
+ * meanwhile). `recordCapture` counts the one that lands. Null when every step is visited.
  */
-export function claimStep(s: GuidedSession): { id: string; session: GuidedSession } | null {
+export function claimStep(s: GuidedSession, advance: GuidedAdvance): { id: string; session: GuidedSession } | null {
   const id = currentId(s);
   if (!id) return null;
-  return { id, session: { ...s, at: s.at + 1 } };
+  return { id, session: advance === "capture" ? { ...s, at: s.at + 1 } : s };
 }
 
 /**
- * A capture that landed on step `id`: one more in `captured` (and in `byClick` when the click hook made it), the
- * id in `taken` once however often the step is captured again after Back, and the step no longer skipped.
+ * A capture that landed on step `id`: one more in `captured` (and in `byClick` or `byTyping` by who made it), one more
+ * on the step in `landed`, the id in `taken` once however often the step is captured again, and the step no longer
+ * skipped.
  */
-export function recordCapture(s: GuidedSession, id: string, byClick = false): GuidedSession {
+export function recordCapture(s: GuidedSession, id: string, by: CaptureBy = "key"): GuidedSession {
   const taken = s.taken.includes(id) ? s.taken : [...s.taken, id];
-  return { ...s, captured: s.captured + 1, byClick: s.byClick + (byClick ? 1 : 0), taken, skipped: skippedOf(s.passed, taken) };
+  return {
+    ...s, captured: s.captured + 1, byClick: s.byClick + (by === "click" ? 1 : 0), byTyping: s.byTyping + (by === "typing" ? 1 : 0),
+    landed: { ...s.landed, [id]: (s.landed[id] ?? 0) + 1 }, taken, skipped: skippedOf(s.passed, taken),
+  };
 }
 
 /**
- * The session moved on after a capture (claimed and landed in one go: the key's path when nothing else is in
- * flight) or a skip (the step's id in `passed` once; `skipped` counts the distinct steps skipped and not captured).
+ * The session moved on: after a capture (claimed and landed in one go - the `capture` mode's path when nothing else
+ * is in flight), or at Next (R1: the step's id in `passed` once when it got no picture this run - a Skip - and not at
+ * all when it did; `skipped` counts the distinct steps skipped and not captured since). Unchanged at the end.
  */
-export function advance(s: GuidedSession, outcome: "captured" | "skipped", byClick = false): GuidedSession {
-  const claimed = claimStep(s);
+export function advance(s: GuidedSession, outcome: "captured" | "next", by: CaptureBy = "key"): GuidedSession {
+  const claimed = claimStep(s, "capture");
   if (!claimed) return s;
-  if (outcome === "captured") return recordCapture(claimed.session, claimed.id, byClick);
-  const passed = s.passed.includes(claimed.id) ? s.passed : [...s.passed, claimed.id];
+  if (outcome === "captured") return recordCapture(claimed.session, claimed.id, by);
+  const passed = s.taken.includes(claimed.id) || s.passed.includes(claimed.id) ? s.passed : [...s.passed, claimed.id];
   return { ...claimed.session, passed, skipped: skippedOf(passed, s.taken) };
 }
 
 /** How many DISTINCT steps got a picture this run: what "Captured N steps" counts (a retake is not a second step). */
 export function capturedSteps(s: GuidedSession): number {
   return s.taken.length;
+}
+
+/** How many captures landed on the current step this run (R4: "2 stills this step" when more than one). */
+export function stillsThisStep(s: GuidedSession): number {
+  const id = currentId(s);
+  return id ? s.landed[id] ?? 0 : 0;
+}
+
+/** The one button where Skip was (R1): "Next" when the current step got a picture this run, "Skip" otherwise; "Next" at the end. */
+export function nextLabel(s: GuidedSession): "Next" | "Skip" {
+  const id = currentId(s);
+  return !id || s.taken.includes(id) ? "Next" : "Skip";
 }
 
 /** Back to the step before (a capture can be taken again); the counts are what happened and stay. */
@@ -294,11 +416,13 @@ export type CaptureTarget = { rect: Rect; title: string | null } | { error: stri
 /**
  * What one capture grabs: the region chosen at the start, the window under the pointer (the front-most one when
  * the capture came from the bar's button, which carries no pointer), or the chosen monitor. `clicks` picks the
- * wording of the no-window refusal (a click will do too when the clicks are on).
+ * wording of the no-window refusal (a click will do too when the clicks are on). For a typed pause (F1) `window`
+ * is given - the frame of the window typed into, which wins over the list and the pointer in the Window kind, or
+ * null for no such window, which is the no-window refusal; left out for every other capture.
  */
 export function captureTarget(
   kind: CaptureKind,
-  input: { region: Region | null; monitors: MonitorInfo[]; monitor: number | null; windows: WindowInfo[]; pointer: Point | null; clicks?: boolean },
+  input: { region: Region | null; monitors: MonitorInfo[]; monitor: number | null; windows: WindowInfo[]; pointer: Point | null; clicks?: boolean; window?: Rect | null },
 ): CaptureTarget {
   if (kind === "region") {
     if (!input.region) return { error: "No region was chosen." };
@@ -306,6 +430,10 @@ export function captureTarget(
     return { rect: { x: r.x, y: r.y, width: r.width, height: r.height }, title: r.window_title };
   }
   if (kind === "window") {
+    if (input.window !== undefined) {
+      if (!input.window) return { error: noWindowLine(!!input.clicks) };
+      return { rect: { ...input.window }, title: null };
+    }
     const w = input.pointer ? windowUnder(input.windows, input.pointer) : input.windows[0] ?? null;
     if (!w) return { error: noWindowLine(!!input.clicks) };
     return { rect: { x: w.x, y: w.y, width: w.width, height: w.height }, title: w.title };
@@ -349,14 +477,26 @@ export interface BarPayload {
    * without a click" under the instruction only then.
    */
   clicks: boolean;
+  /** The typing is live - asked for AND the shell's keyboard hook up (R3): the hint gains " · typing captures a second after you stop". */
+  typing: boolean;
+  /** How many captures landed on the current step this run (R4): the bar says "2 stills this step" past one. */
+  stillsThisStep: number;
+  /** The LAST capture that landed in the run, whichever step: its number and a thumbnail (a data URL made by the page); null before the first, or when none could be made. */
+  lastStill: LastStill | null;
 }
+
+/** The last still of the run, as the bar shows it (R4): the step's number and a JPEG data URL `THUMB_WIDTH` wide. */
+export interface LastStill { step: number; thumb: string }
 
 /**
  * The bar's state: what the bar page shows (`public/capture-bar.html`, steps mode) and the builder's own copy. The
  * hook sends it on every change and again when the bar asks (`capture:control` `hello`, sent once the bar's
  * listener is up: the first state would otherwise be missed, the page loading after the hook's first send).
  */
-export function barPayload(name: string, doc: WalkthroughDocument, s: GuidedSession, phase: GuidedPhase, message: string | null = null, clicks = false): BarPayload {
+export function barPayload(
+  name: string, doc: WalkthroughDocument, s: GuidedSession, phase: GuidedPhase, message: string | null = null, clicks = false, typing = false,
+  lastStill: LastStill | null = null,
+): BarPayload {
   const id = currentId(s);
   const index = id ? stepIndex(doc, id) : -1;
   const step = index >= 0 ? doc.steps[index] : null;
@@ -367,7 +507,7 @@ export function barPayload(name: string, doc: WalkthroughDocument, s: GuidedSess
     text: done ? "Press Done to close the bar and go back to the builder." : step.text || "(no text yet)",
     instruction: done ? "" : step.instruction,
     remaining: remaining(s), canBack: s.at > 0, canCapture: !done && phase === "ready",
-    message, clicks,
+    message, clicks, typing, stillsThisStep: stillsThisStep(s), lastStill,
   };
 }
 
@@ -380,6 +520,16 @@ export function barMessage(standing: string | null, transient: string | null): s
 /** Shift+F8 exactly: the capture key (the shell's global key, and the page's own when it has the focus). */
 export function guidedHotkey(e: { key: string; shiftKey: boolean; ctrlKey?: boolean; altKey?: boolean; metaKey?: boolean }): boolean {
   return e.key === "F8" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+}
+
+/** Shift+F9 exactly: Next (W2d; the shell's global key, and the page's own when the builder has the focus). */
+export function nextHotkey(e: { key: string; shiftKey: boolean; ctrlKey?: boolean; altKey?: boolean; metaKey?: boolean }): boolean {
+  return e.key === "F9" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+}
+
+/** A wait of `ms` (R2: the still after the click); the tests fake the timers. */
+export function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** The pointer the shell's key event carries, or null for anything else (an older shell's bare payload). */
@@ -399,4 +549,62 @@ export function clickOf(payload: unknown): StepClick | null {
   const button = (payload as { button?: unknown } | null)?.button;
   if (!point || (button !== "left" && button !== "right")) return null;
   return { point, button };
+}
+
+/** A typed pause as the shell raises it (F1): the pointer, and the frame of the window typed into - the foreground window - or null for each. */
+export interface StepTyped { point: Point | null; window: Rect | null }
+
+/** The typed pause `capture:step-typed` carries - `{x, y, window: {x, y, width, height} | null}`; an older shell's bare pointer has no window. */
+export function typedOf(payload: unknown): StepTyped {
+  const point = pointerOf(payload);
+  const w = (payload as { window?: unknown } | null)?.window as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | null | undefined;
+  const window =
+    w && typeof w === "object" && typeof w.x === "number" && typeof w.y === "number" && typeof w.width === "number" && typeof w.height === "number" && w.width > 0 && w.height > 0
+      ? { x: Math.round(w.x), y: Math.round(w.y), width: Math.round(w.width), height: Math.round(w.height) }
+      : null;
+  return { point, window };
+}
+
+/** Whether two rectangles share a pixel (half-open on both axes). */
+export function rectsIntersect(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
+/**
+ * The area a typed pause's window must meet, per kind (F1, G1): a Region's frame or the Full screen's monitor (the
+ * click area), or - for a Window - the rectangle of the step's LAST STILL this run (`lastRect`; none before the step's
+ * first still, so the window typed into is taken then).
+ */
+export function typedArea(kind: CaptureKind, clickArea: Rect | null, lastRect: Rect | null): Rect | null {
+  return kind === "window" ? lastRect : clickArea;
+}
+
+/**
+ * What a typed pause does, by the window typed into (F1, G1): with an area (`typedArea`) and a window that does not
+ * meet it, no still ("outside", the bar says so with `typedOutsideLine`) - so a reply typed in a chat window takes
+ * nothing in any kind; no window known (an older shell, no foreground window) or no area (a Window step with no still
+ * yet this run) is the still as before. In the Window kind the still is of the window typed into (`captureTarget`).
+ */
+export function typedRule(kind: CaptureKind, area: Rect | null, window: Rect | null): "capture" | "outside" {
+  void kind;
+  if (area && window && !rectsIntersect(window, area)) return "outside";
+  return "capture";
+}
+
+/**
+ * Whether a typed pause arriving at `now` fires within the pause of a Next pressed at `nextAt` (G2): the user typed,
+ * then pressed Next within the second, so the still belongs to the step just left and is dropped. Never pressed: no.
+ */
+export function typedAfterNext(nextAt: number | null, now: number): boolean {
+  return nextAt !== null && now - nextAt < TYPING_PAUSE_MS;
+}
+
+/**
+ * Where a typed still's hotspot goes (F1): the step's last click this run when it lies in the captured rectangle, else
+ * the pointer when it does, else nowhere (null: no hotspot).
+ */
+export function typedHotspotPoint(lastClick: Point | null, pointer: Point | null, rect: Rect): Point | null {
+  if (lastClick && insideFrame(lastClick, rect)) return lastClick;
+  if (pointer && insideFrame(pointer, rect)) return pointer;
+  return null;
 }

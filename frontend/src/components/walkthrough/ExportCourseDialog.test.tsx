@@ -105,8 +105,10 @@ describe("the preview", () => {
     expect(text("[data-export-new-in-guide]")).toContain("Line 33: Press Cancel to leave.");
     expect(text("[data-export-kept]")).toContain("_assets/images/wt-01-first-abc123abc123-s9s9s9s9s9s9.png - still used by 02-other");
     expect(text("[data-export-debris]")).toContain("01-first/.guide.md.1234abcd.keep - left by an interrupted export");
-    // The intro states the content manager's caveat instead of promising a pin (recheck NIT-5).
-    expect(text("[data-export-caveat]")).toContain("The Content Manager does not draw the pins yet");
+    // The intro states which content manager draws the pin (recheck NIT-5; W2d fix F2: from 0.7.42).
+    expect(text("[data-export-caveat]")).toBe(
+      "The pins show in a Content Manager from 0.7.42 (a Content Editor from 1.30.0); an older one shows the picture, the pin's text as a numbered line and the caption. Export into a published course once its readers have that version.",
+    );
     // The files and the diff are there, collapsed.
     expect((q("[data-export-files]") as HTMLDetailsElement).open).toBe(false);
     expect(text("[data-export-files] summary")).toBe("2 files to write");

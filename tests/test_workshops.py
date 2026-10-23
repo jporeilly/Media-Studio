@@ -1297,6 +1297,50 @@ def test_the_guided_capture_rows_say_on_click_and_count_the_captures(rig):
     assert guided_done_detail(3, 1, 5, None) == "done: 3 captured, 5 captures, 1 skipped"
 
 
+def test_the_guided_capture_rows_say_on_typing_the_settle_and_the_mode_and_count_the_typed_captures(rig):
+    """W2d (R6): the start row adds ", on typing" when the keyboard hook is live, "still 0.5 s after the click" when
+    the still is taken after the click settles, and "moves on at Next" / "moves on at each capture" by the mode -
+    each part only when it was sent and so; the done row adds ", 2 typed" beside the clicks when typed captures
+    were sent and made. Every new field is optional: a 0.18.0 page writes the rows it did (the test above)."""
+    from api.routers.walkthroughs import guided_done_detail, guided_start_detail
+
+    admin = rig["admin"]
+    wid = _imported(rig)["id"]
+    url = f"/api/walkthroughs/{wid}/guided-capture"
+    assert admin.post(url, json={"event": "start", "kind": "region", "cursor": True, "clicks": True, "typing": True, "settle_ms": 500, "advance": "next"}).status_code == 204
+    assert admin.post(url, json={"event": "start", "kind": "window", "cursor": False, "clicks": True, "typing": False, "settle_ms": 0, "advance": "capture"}).status_code == 204
+    assert admin.post(url, json={"event": "start", "kind": "screen", "cursor": True, "clicks": False, "typing": True, "advance": "next"}).status_code == 204
+    assert admin.post(url, json={"event": "done", "captured": 8, "skipped": 1, "captures": 11, "by_click": 7, "by_typing": 2}).status_code == 204
+    assert admin.post(url, json={"event": "done", "captured": 3, "skipped": 0, "captures": 3, "by_click": 3, "by_typing": 0}).status_code == 204
+    assert admin.post(url, json={"event": "done", "captured": 2, "skipped": 0, "captures": 4, "by_click": 0, "by_typing": 2}).status_code == 204
+    rows = [row["detail"] for row in auth_store.list_audit(action="walkthrough.guided_capture")]
+    assert rows == [
+        "done: 2 captured, 4 captures (0 by click, 2 typed), 0 skipped",
+        "done: 3 captured (3 by click), 0 skipped",
+        "done: 8 captured, 11 captures (7 by click, 2 typed), 1 skipped",
+        "start: screen with pointer, on typing, moves on at Next",
+        "start: window, on click, moves on at each capture",
+        "start: region with pointer, on click, on typing, still 0.5 s after the click, moves on at Next",
+    ]
+    # The bounds: the settle within 0-5000 ms, the mode one of the two, typing a real boolean, the typed count not negative.
+    assert admin.post(url, json={"event": "start", "settle_ms": 5001}).status_code == 422
+    assert admin.post(url, json={"event": "start", "settle_ms": -1}).status_code == 422
+    assert admin.post(url, json={"event": "start", "advance": "later"}).status_code == 422
+    assert admin.post(url, json={"event": "start", "typing": "yes"}).status_code == 422
+    assert admin.post(url, json={"event": "done", "captured": 1, "by_typing": -1}).status_code == 422
+    assert admin.post(url, json={"event": "start", "settle_ms": 5000, "advance": "capture", "typing": False}).status_code == 204
+    # The two rules, pure: each part only when so, and nothing for what was not sent (a page before W2d).
+    assert guided_start_detail("window", True, True, None, None, None) == "start: window with pointer, on click"
+    assert guided_start_detail("window", False, False, False, 0, None) == "start: window"
+    assert guided_start_detail("region", True, True, True, 500, "next") == "start: region with pointer, on click, on typing, still 0.5 s after the click, moves on at Next"
+    assert guided_start_detail("region", False, True, False, 1000, "capture") == "start: region, on click, still 1 s after the click, moves on at each capture"
+    assert guided_start_detail(None, False, None, None, None, "next") == "start: unknown, moves on at Next"
+    assert guided_done_detail(8, 1, 11, 7, 2) == "done: 8 captured, 11 captures (7 by click, 2 typed), 1 skipped"
+    assert guided_done_detail(3, 1, 3, 0, 0) == "done: 3 captured (0 by click), 1 skipped"
+    assert guided_done_detail(3, 1, 5, None, 2) == "done: 3 captured, 5 captures (2 typed), 1 skipped"
+    assert guided_done_detail(3, 1, None, None, None) == "done: 3 captured, 1 skipped"
+
+
 def test_a_window_still_of_another_size_is_drawn_centred_on_the_first_stills_frame(rig, monkeypatch):
     """W2b, R7 as the fix rounds left it (F6, F7, G5): with ``frame`` (the run's frame - the widest width x the
     tallest height of its stills so far, as the page keeps it) a smaller still is drawn centred on a TRANSPARENT
