@@ -6,15 +6,16 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  type Step, type WalkthroughDocument, type WalkthroughSource, MAX_STEPS, MIN_HOTSPOT_SIDE, backIndex, canAddStep, chapterAt, chapterCount, chapterStart, chapters,
-  clampHotspot, clampIndex, countsLine, deleteStep, displayedRect, documentOf, endIndex, fitRect, hasPicture, homeIndex, imagesOf, insertStep,
-  moveStep, namesOnly, narrationOf, nextIndex, normaliseStep, playUrl, putBody, reorderStep, safeFileStem, sameDocument, serialiseDocument,
-  setHotspot, shownAsModal, stepById, stepImageUrl, stepIndex, stepLabel, stepsToCapture, tooltipPlacement, transcript, transcriptFileName,
-  typingIn, updateStep,
+  type Step, type WalkthroughDocument, type WalkthroughSource, CLICKS, CLICK_LABELS, HOTSPOT_DEFAULT, MARKERS, MARKER_LABELS, MAX_STEPS, MIN_HOTSPOT_SIDE,
+  backIndex, canAddStep, centredHotspot, chapterAt, chapterCount, chapterStart, chapters, clampHotspot, clampIndex, clickLead, countsLine, deleteStep,
+  displayedRect, documentOf, endIndex, fitRect, hasPicture, homeIndex, imagesOf, insertStep, moveStep, namesOnly, narrationOf, nextIndex, normaliseStep,
+  playUrl, putBody, reorderStep, safeFileStem, sameDocument, serialiseDocument, setHotspot, shownAsModal, stepById, stepImageUrl, stepIndex, stepLabel,
+  stepsToCapture, tooltipPlacement, transcript, transcriptFileName, typingIn, updateStep,
 } from "./walkthrough";
 
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 400, height: 300, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 400, height: 300, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null,
+  click: "left", marker: "box", ...over,
 });
 const ids = (doc: WalkthroughDocument) => doc.steps.map((s) => s.id);
 const doc = (...steps: Step[]): WalkthroughDocument => ({ name: "Tour", steps });
@@ -23,7 +24,7 @@ const A = "aaaaaaaaaaaa", B = "bbbbbbbbbbbb", C = "cccccccccccc", D = "ddddddddd
 describe("the document", () => {
   it("normalises a step to exactly the server's fields, the hotspot in whole pixels, and compares by content", () => {
     const s = normaliseStep({ ...step(A), hotspot: { x: 1.4, y: 2.6, width: 10.2, height: 9.9 }, extra: "dropped" } as Step);
-    expect(Object.keys(s)).toEqual(["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "note", "source"]);
+    expect(Object.keys(s)).toEqual(["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "note", "source", "click", "marker"]);
     // W2e: the record's own `source` (its workshops among it) is the server's - never sent, as a step's anchor is not.
     const put = putBody({ name: "N", steps: [step("aaaaaaaaaaaa", { anchor: { key: "k", ordinal: 1 } })] }, 3) as unknown as Record<string, unknown>;
     expect(Object.keys(put)).toEqual(["version", "name", "revision", "steps"]);
@@ -311,5 +312,41 @@ describe("keys and urls", () => {
     expect(playUrl("w1")).toBe("/walkthroughs/w1/play");
     expect(playUrl("w1", 0)).toBe("/walkthroughs/w1/play");
     expect(playUrl("w1", 3)).toBe("/walkthroughs/w1/play?step=3");
+  });
+});
+
+describe("the click kind and the marker (F3, F4) and the added hotspot (F2)", () => {
+  it("a step carries click and marker; a record without them reads left and box, so every existing walkthrough looks as it did", () => {
+    expect(CLICKS).toEqual(["left", "right", "double", "none"]);
+    expect(MARKERS).toEqual(["box", "beacon"]);
+    expect(CLICK_LABELS).toEqual({ left: "Left", right: "Right", double: "Double", none: "None" });
+    expect(MARKER_LABELS).toEqual({ box: "Box", beacon: "Beacon" });
+    const old = normaliseStep({ ...step(A), click: undefined, marker: undefined } as unknown as Step);
+    expect([old.click, old.marker]).toEqual(["left", "box"]);
+    const set = normaliseStep(step(A, { click: "right", marker: "beacon" }));
+    expect([set.click, set.marker]).toEqual(["right", "beacon"]);
+    // The save sends them; a record with them and one with the defaults spelled out are the same document.
+    expect(putBody({ name: "N", steps: [step(A, { click: "double" })] }, 1).steps[0]).toMatchObject({ click: "double", marker: "box" });
+    expect(sameDocument({ name: "N", steps: [step(A)] }, { name: "N", steps: [{ ...step(A), click: undefined, marker: undefined } as unknown as Step] })).toBe(true);
+    expect(sameDocument({ name: "N", steps: [step(A)] }, { name: "N", steps: [step(A, { marker: "beacon" })] })).toBe(false);
+    expect(documentOf({ name: "T", steps: [{ ...step(A), click: undefined } as unknown as Step] }).steps[0].click).toBe("left");
+  });
+
+  it("the player's tooltip lead names the real click: Right-click, Double-click; nothing for a left click or none", () => {
+    expect(clickLead("left")).toBe("");
+    expect(clickLead("none")).toBe("");
+    expect(clickLead("right")).toBe("Right-click");
+    expect(clickLead("double")).toBe("Double-click");
+    expect(clickLead(undefined)).toBe("");
+  });
+
+  it("Add hotspot places the capture's 160 x 60 centred on the picture, clamped into a small one, none for a picture too small", () => {
+    expect(HOTSPOT_DEFAULT).toEqual({ width: 160, height: 60 });
+    expect(centredHotspot({ width: 400, height: 300 })).toEqual({ x: 120, y: 120, width: 160, height: 60 });
+    expect(centredHotspot({ width: 1201, height: 801 })).toEqual({ x: 521, y: 371, width: 160, height: 60 });
+    // Smaller than the default on a side: the hotspot takes the picture's size there.
+    expect(centredHotspot({ width: 100, height: 40 })).toEqual({ x: 0, y: 0, width: 100, height: 40 });
+    expect(centredHotspot({ width: MIN_HOTSPOT_SIDE - 1, height: 300 })).toBeNull();
+    expect(centredHotspot({ width: 0, height: 0 })).toBeNull();
   });
 });

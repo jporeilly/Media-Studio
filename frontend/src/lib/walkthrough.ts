@@ -32,6 +32,11 @@ export const MAX_NOTE_CHARS = 4000;
 export const MAX_NAME_CHARS = 120;
 /** A hotspot's sides, at least (the server: MIN_HOTSPOT_SIDE). */
 export const MIN_HOTSPOT_SIDE = 8;
+/**
+ * The hotspot a guided capture draws round the pointer, and Add hotspot puts at the picture's centre (F2), in
+ * picture pixels (the server clamps it again). `lib/guided.ts` re-exports it as the capture's.
+ */
+export const HOTSPOT_DEFAULT: Size = { width: 160, height: 60 };
 export const DOCUMENT_VERSION = 1;
 
 /** What the server says to a save whose revision is not the record's any more (its 409). */
@@ -44,7 +49,7 @@ export const RELOAD_ASK = { title: "Reload the walkthrough?", message: "Your uns
 export const TOO_MANY_STEPS_MESSAGE = `A walkthrough can hold at most ${MAX_STEPS} steps.`;
 /** The empty list says how a walkthrough is made - and where a still comes from. */
 export const EMPTY_HOW =
-  "Take a still with Capture (in the desktop app), annotate it if you like, then add it as a step - or import a course workshop and capture its steps. Building and playing a walkthrough work in the browser edition too; only taking a still needs the desktop app.";
+  "Press Record… (in the desktop app) and click through the application: every click makes a step, with a beacon where you clicked. Or take a still with Capture, annotate it if you like, and add it as a step - or import a course workshop and capture its steps. Building and playing a walkthrough work in the browser edition too; only recording and taking a still need the desktop app.";
 export const END_TITLE = "That is the end";
 /** What the builder's placeholder and the player's card say of a step that has no picture yet (an imported one). */
 export const NO_PICTURE_TITLE = "No picture yet";
@@ -58,6 +63,29 @@ export type Placement = "auto" | "top" | "bottom" | "left" | "right";
 export type Side = Exclude<Placement, "auto">;
 export const PLACEMENTS: Placement[] = ["auto", "top", "bottom", "left", "right"];
 export const PLACEMENT_LABELS: Record<Placement, string> = { auto: "Auto", top: "Above", bottom: "Below", left: "Left", right: "Right" };
+/**
+ * The real click the learner makes at a step (F3): the player's tooltip starts with "Right-click" / "Double-click"
+ * when so, the hotspot still advances on any click. "left" is the default - a record from before the field, an
+ * imported step, a step added from a still; Record sets it by the button pressed ("none" for the key, the bar's
+ * button and a typed pause). The server: `services.walkthroughs.CLICKS`.
+ */
+export type ClickKind = "left" | "right" | "double" | "none";
+export const CLICKS: ClickKind[] = ["left", "right", "double", "none"];
+export const CLICK_LABELS: Record<ClickKind, string> = { left: "Left", right: "Right", double: "Double", none: "None" };
+/**
+ * How the hotspot is drawn in the player (F4): the outlined, pulsing box as before (the default, so every existing
+ * walkthrough looks as it did), or a beacon - a pulsing ring with a dot at the hotspot's centre; the whole rectangle
+ * is the click target either way. Record and Capture steps set "beacon" on the steps they picture. The server:
+ * `services.walkthroughs.MARKERS`.
+ */
+export type Marker = "box" | "beacon";
+export const MARKERS: Marker[] = ["box", "beacon"];
+export const MARKER_LABELS: Record<Marker, string> = { box: "Box", beacon: "Beacon" };
+
+/** What the player's tooltip starts with for the step's click kind: the real click to make; nothing for a left click or none. */
+export function clickLead(click: ClickKind | undefined): string {
+  return click === "right" ? "Right-click" : click === "double" ? "Double-click" : "";
+}
 
 export interface Hotspot { x: number; y: number; width: number; height: number }
 /** Where a step's picture came from (informational): a still, or a course workshop's guide (W2). */
@@ -106,6 +134,10 @@ export interface Step {
    * edits nor sends it (`normaliseStep` leaves it out), and every save keeps the record's own.
    */
   anchor?: StepAnchor | null;
+  /** The real click the learner makes here (F3): "left" by default. */
+  click: ClickKind;
+  /** How the hotspot is drawn (F4): "box" by default, "beacon" for a pulsing ring with a dot. */
+  marker: Marker;
 }
 
 /** What the builder edits and the history holds: the name and the steps; the revision is kept beside it. */
@@ -146,7 +178,9 @@ export interface WalkthroughSummary {
 /** The body of a save: the document with the revision it was loaded at. */
 export interface WalkthroughPut { version: typeof DOCUMENT_VERSION; name: string; revision: number; steps: Step[] }
 
-const STEP_KEYS: (keyof Step)[] = ["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "note", "source"];
+const STEP_KEYS: (keyof Step)[] = ["id", "image", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "note", "source", "click", "marker"];
+/** What a step reads as without a field (a record from before it): the server's defaults, one place. */
+const STEP_DEFAULTS: Partial<Record<keyof Step, unknown>> = { hotspot: null, source: null, image: null, kind: "tooltip", placement: "auto", click: "left", marker: "box" };
 
 /** A text as the server stores it: CRLF and a lone CR become LF. */
 const plainText = (value: unknown): string => String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -154,13 +188,14 @@ const plainText = (value: unknown): string => String(value ?? "").replace(/\r\n/
 /**
  * A step with exactly the fields the server writes and reads, in one order, AS THE SERVER STORES THEM - the one
  * normalisation rule: the chapter trimmed, the text, the instruction and the note with LF line breaks, the hotspot
- * in whole pixels, a missing instruction or note "", a missing picture null. `serialiseDocument` compares documents
- * through it, so a document with `" Intro "` typed is the same document as the server's stripped answer, and
- * "Unsaved changes" clears after a save.
+ * in whole pixels, a missing instruction or note "", a missing picture null, a missing click kind "left" and a
+ * missing marker "box" (F3, F4: a record from before the fields). `serialiseDocument` compares documents through
+ * it, so a document with `" Intro "` typed is the same document as the server's stripped answer, and "Unsaved
+ * changes" clears after a save.
  */
 export function normaliseStep(s: Step): Step {
   const out = {} as Record<string, unknown>;
-  for (const key of STEP_KEYS) out[key] = s[key] ?? (key === "hotspot" || key === "source" || key === "image" ? null : key === "kind" ? "tooltip" : key === "placement" ? "auto" : "");
+  for (const key of STEP_KEYS) out[key] = s[key] ?? (key in STEP_DEFAULTS ? STEP_DEFAULTS[key] : "");
   const h = s.hotspot;
   out.hotspot = h ? { x: Math.round(h.x), y: Math.round(h.y), width: Math.round(h.width), height: Math.round(h.height) } : null;
   out.text = plainText(s.text);
@@ -320,6 +355,15 @@ export function clampHotspot(hotspot: Hotspot | null, size: Size): Hotspot | nul
   const x = Math.max(0, Math.min(Math.round(hotspot.x), size.width - width));
   const y = Math.max(0, Math.min(Math.round(hotspot.y), size.height - height));
   return { x, y, width, height };
+}
+
+/**
+ * The hotspot Add hotspot makes (F2): `HOTSPOT_DEFAULT` centred on a picture of `size`, kept inside it by the
+ * one clamp (a side larger than the picture takes the picture's); null for a picture that cannot hold one.
+ */
+export function centredHotspot(size: Size): Hotspot | null {
+  const width = Math.min(HOTSPOT_DEFAULT.width, size.width), height = Math.min(HOTSPOT_DEFAULT.height, size.height);
+  return clampHotspot({ x: Math.round((size.width - width) / 2), y: Math.round((size.height - height) / 2), width, height }, size);
 }
 
 /** A tooltip step without a hotspot has nothing to sit beside: it is shown as a modal (the guide says so). */

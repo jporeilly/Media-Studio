@@ -375,7 +375,8 @@ def apply_edits(lines: list[tuple[str, str]], edits: list[tuple[int, int, list[s
 def player_document(rec: dict) -> dict:
     """The walkthrough as the player bundle carries it: the name and what the player shows of each step - no
     owner, no ids of stills, no notes (the bundle may go into a public course)."""
-    keys = ("id", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter")
+    # F3, F4: the click kind and the marker travel too - the offline player names the click and draws the beacon.
+    keys = ("id", "width", "height", "hotspot", "kind", "text", "instruction", "placement", "chapter", "click", "marker")
     steps = []
     for step in rec.get("steps") or []:
         row = {key: step.get(key) for key in keys}

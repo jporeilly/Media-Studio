@@ -45,6 +45,13 @@
   window, shown in the 150 x 84 box at the left with "step 3" under it; this
   page fetches nothing. Next stays enabled while a still is in flight (the
   attach lands on the step it was taken for); Back and Done wait.
+
+  RECORD MODE (F1): a payload with `record: true` is a recording - every
+  capture makes a step - so the label reads "Recording · N steps" (the main
+  window writes it), the text says what to do, the one button where Next was
+  is Undo (sent as the action "undo"; enabled by `canUndo`: a step was made
+  this run and nothing is in flight), Back is hidden, and Capture and Done
+  are as they are.
 -->
 <style>
   :root { color-scheme: dark; }
@@ -130,8 +137,11 @@
   const CLICK_HINT = "Click to capture · Shift+F8 captures without a click";
   const TYPING_HINT = "typing captures a second after you stop";
   const hintOf = (clicks, typing) => (clicks ? (typing ? `${CLICK_HINT} · ${TYPING_HINT}` : CLICK_HINT) : typing ? `Shift+F8 captures · ${TYPING_HINT}` : "");
+  // Record mode (F1): the one button where Next was is Undo, and sends "undo".
+  let recording = false;
   const showSteps = (p) => {
     document.body.classList.add("mode-steps");
+    recording = !!p.record;
     sLabel.textContent = p.label || "";
     sName.textContent = p.name || "";
     sRemaining.textContent = p.remaining ? `${p.remaining} to go` : "";
@@ -153,12 +163,24 @@
     }
     sCapture.disabled = !p.canCapture;
     sCapture.textContent = p.phase === "capturing" ? "Capturing…" : "Capture";
-    // ONE button where Skip was (W2d, R1): Next when the step got a still this run, Skip otherwise - the one rule
-    // (`advance(s, "next")`) on the main window's side; enabled while a still is in flight, as the attach lands on its
-    // claimed step whatever Next does meanwhile. Back and Done wait.
-    sNext.textContent = stills > 0 ? "Next" : "Skip";
-    sNext.title = stills > 0 ? "Move on to the next step (Shift+F9): the last still stands" : "Leave this step for later and move on (Shift+F9)";
-    sNext.disabled = !(p.phase === "ready" || p.phase === "capturing") || !p.remaining;
+    sCapture.title = recording
+      ? "Make a step from a still now (from this button there is no beacon: a click in the application, a typed pause or Shift+F8 with the pointer on the control places it)"
+      : "Take this step's still now (a click in the frame, a typed pause, or Shift+F8 with the pointer on the control places the hotspot; from this button there is no hotspot)";
+    if (recording) {
+      // Record mode (F1): Undo takes the last step made this run back; it waits while a still is in flight. No Back.
+      sNext.textContent = "Undo";
+      sNext.title = "Take the last recorded step back";
+      sNext.disabled = !p.canUndo;
+      sBack.style.display = "none";
+    } else {
+      // ONE button where Skip was (W2d, R1): Next when the step got a still this run, Skip otherwise - the one rule
+      // (`advance(s, "next")`) on the main window's side; enabled while a still is in flight, as the attach lands on its
+      // claimed step whatever Next does meanwhile. Back and Done wait.
+      sNext.textContent = stills > 0 ? "Next" : "Skip";
+      sNext.title = stills > 0 ? "Move on to the next step (Shift+F9): the last still stands" : "Leave this step for later and move on (Shift+F9)";
+      sNext.disabled = !(p.phase === "ready" || p.phase === "capturing") || !p.remaining;
+      sBack.style.display = "";
+    }
     sBack.disabled = !p.canBack || p.phase === "capturing";
     sDone.disabled = p.phase === "capturing";
   };
@@ -174,7 +196,7 @@
   pauseBtn.onclick = () => send(state === "paused" ? "resume" : "pause");
   stopBtn.onclick = () => send(state === "countdown" ? "cancel" : "stop");
   sCapture.onclick = () => send("capture");
-  sNext.onclick = () => send("next");
+  sNext.onclick = () => send(recording ? "undo" : "next");
   sBack.onclick = () => send("back");
   sDone.onclick = () => send("done");
   const show = (p) => {
@@ -195,7 +217,7 @@
       label.textContent = state === "paused" ? "Paused  (Shift+F9 resumes)" : state === "saving" ? "Saving…" : state === "recording" ? "Recording  (Shift+F10 stops)" : state;
     }
   };
-  if (stepsMode) showSteps({ label: "Starting…", name: "", text: "", instruction: "", message: "", phase: "starting", remaining: 0, canBack: false, canCapture: false, clicks: false, typing: false, stillsThisStep: 0, lastStill: null });
+  if (stepsMode) showSteps({ label: "Starting…", name: "", text: "", instruction: "", message: "", phase: "starting", remaining: 0, canBack: false, canCapture: false, clicks: false, typing: false, stillsThisStep: 0, lastStill: null, record: false, canUndo: false });
   else show({ state: "countdown", elapsedMs: 0, countdown: "" });
   if (t && t.event) await t.event.listen("capture:state", (e) => show(e.payload || {}));
   // The listener is up: ask for the state as it stands (the main window sends it on change only).

@@ -17,7 +17,7 @@ import { Player, type PlayerProps } from "./Player";
 
 const S = (id: string, over: Partial<Step> = {}): Step => ({
   id, image: `step-${id}.png`, width: 400, height: 200, hotspot: { x: 100, y: 50, width: 40, height: 20 }, kind: "tooltip", text: `Text ${id}`,
-  instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
+  instruction: "", placement: "auto", chapter: "", note: "", source: null, click: "left", marker: "box", ...over,
 });
 const THREE: Step[] = [S("one", { chapter: "Start" }), S("two", { kind: "modal", text: "A card" }), S("three", { chapter: "End", text: "Last words" })];
 
@@ -352,5 +352,48 @@ describe("the player", () => {
     expect(progress()).toBe("No steps");
     await act(async () => { button("Close")!.click(); });
     expect(exits).toBe(1);
+  });
+
+  it("F4: a beacon step draws a pulsing ring with a dot at the hotspot's centre - the whole rectangle still the click target, the tooltip anchored as before; a box as before; no pulse under reduced motion", async () => {
+    await mount({ walkthrough: { name: "T", steps: [S("one", { marker: "beacon" }), S("two")] } });
+    const spot = hotspot()!;
+    // The button is the hotspot's rectangle (400 x 200 in 800 x 400: scale 2), so a click anywhere in it goes on.
+    expect([spot.style.left, spot.style.top, spot.style.width, spot.style.height]).toEqual(["200px", "100px", "80px", "40px"]);
+    expect(spot.className).toContain("ms-hotspot-beacon");
+    expect(spot.className).toContain("ms-hotspot-pulse");
+    expect(spot.getAttribute("data-marker")).toBe("beacon");
+    expect(spot.querySelector("[data-player-beacon]")).not.toBeNull();
+    const tip = q("[data-player-tooltip]")!;
+    expect(tip.getAttribute("data-side")).toBe("bottom");
+    expect(tip.textContent).toBe("Text one");
+    await act(async () => { spot.click(); });
+    expect(progress()).toBe("Step 2 of 3".replace("3", "2"));
+    const box = hotspot()!;
+    expect(box.className).not.toContain("ms-hotspot-beacon");
+    expect(box.getAttribute("data-marker")).toBe("box");
+    expect(box.querySelector("[data-player-beacon]")).toBeNull();
+    await act(async () => root?.unmount());
+    await mount({ reducedMotion: true, walkthrough: { name: "T", steps: [S("one", { marker: "beacon" })] } });
+    expect(hotspot()!.className).toContain("ms-hotspot-beacon");
+    expect(hotspot()!.className).not.toContain("ms-hotspot-pulse");
+  });
+
+  it("F3: the tooltip starts with Right-click or Double-click when the step says so, and the hotspot's label too; a left click and none say nothing more", async () => {
+    await mount({ walkthrough: { name: "T", steps: [S("one", { click: "right" }), S("two", { click: "double", text: "Open it" }), S("three", { click: "none" }), S("four")] } });
+    expect(q("[data-tooltip-click]")!.textContent).toBe("Right-click");
+    expect(q("[data-player-tooltip]")!.textContent).toBe("Right-clickText one");
+    expect(hotspot()!.getAttribute("aria-label")).toBe("Right-click: Text one");
+    // Any click on the hotspot still advances: the label tells the learner which real click to make.
+    await act(async () => { hotspot()!.click(); });
+    expect(q("[data-tooltip-click]")!.textContent).toBe("Double-click");
+    expect(hotspot()!.getAttribute("aria-label")).toBe("Double-click: Open it");
+    await act(async () => { hotspot()!.click(); });
+    expect(q("[data-tooltip-click]")).toBeNull();
+    expect(hotspot()!.getAttribute("aria-label")).toBe("Text three");
+    await act(async () => { hotspot()!.click(); });
+    expect(q("[data-tooltip-click]")).toBeNull();
+    expect(q("[data-player-tooltip]")!.textContent).toBe("Text four");
+    // The transcript is unchanged by the click kind.
+    expect(transcript({ name: "T", steps: [S("one", { click: "right" })] })).toBe("# T\n\n1. Text one\n");
   });
 });

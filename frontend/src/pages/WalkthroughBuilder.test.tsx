@@ -28,7 +28,8 @@ vi.mock("../api/client", async (importOriginal) => {
 const WID = "abc123abc123";
 const A = "aaaaaaaaaaaa", B = "bbbbbbbbbbbb", N = "cccccccccccc";
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null,
+  click: "left", marker: "box", ...over,
 });
 /** What the server stores of a sent document: the name and the chapters stripped, the texts with LF line breaks. */
 const asStored = (sent: { name: string; steps: Step[] }) => ({
@@ -648,5 +649,73 @@ describe("replace picture", () => {
     const sent = puts()[0][1] as { revision: number; steps: Step[] };
     expect(sent.revision).toBe(3);
     expect(sent.steps[0]).toMatchObject({ width: 100, height: 50, hotspot: { x: 20, y: 0, width: 80, height: 50 } });
+  });
+});
+
+describe("the builder's flow (F2), the click kind (F3) and the marker (F4)", () => {
+  it("Add hotspot puts a 160 x 60 hotspot centred on the picture (clamped into a small one) with the move/resize hint; Remove hotspot takes it away; the no-hotspot hint offers both ways", async () => {
+    await mount();
+    expect(hotspotLine()).toBe("No hotspot: press Add hotspot, or drag on the picture to draw one. A tooltip step without a hotspot is shown as a modal card.");
+    expect(q("[data-add-hotspot]")).not.toBeNull();
+    expect((q("[data-remove-hotspot]") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { q("[data-add-hotspot]")!.click(); });
+    // The picture is 200 x 100: the default is clamped to it and centred.
+    expect(hotspotLine()).toBe("Hotspot 160 × 60 at 20, 20. Drag it to move it; the handles resize it; Remove hotspot takes it away.");
+    expect(q("[data-surface-hotspot]")).not.toBeNull();
+    expect(q("[data-add-hotspot]")).toBeNull();
+    expect(status()).toBe("Unsaved changes");
+    expect(button("Undo")!.disabled).toBe(false);
+    await act(async () => { q("[data-remove-hotspot]")!.click(); });
+    expect(hotspotLine()).toContain("No hotspot: press Add hotspot");
+    await key("z", { ctrlKey: true });
+    expect(hotspotLine()).toContain("Hotspot 160 × 60 at 20, 20");
+    await key("s", { ctrlKey: true });
+    await settle();
+    expect((puts()[0][1] as { steps: Step[] }).steps[0].hotspot).toEqual({ x: 20, y: 20, width: 160, height: 60 });
+  });
+
+  it("the Click and Marker selects edit the step and travel in the save; a step is Left and Box until changed", async () => {
+    await mount();
+    expect((q("[data-step-click]") as HTMLSelectElement).value).toBe("left");
+    expect((q("[data-step-marker]") as HTMLSelectElement).value).toBe("box");
+    expect([...(q("[data-step-click]") as HTMLSelectElement).options].map((o) => o.textContent)).toEqual(["Left", "Right", "Double", "None"]);
+    expect([...(q("[data-step-marker]") as HTMLSelectElement).options].map((o) => o.textContent)).toEqual(["Beacon", "Box"]);
+    await act(async () => { setValue(q("[data-step-click]") as HTMLSelectElement, "right"); });
+    await act(async () => { setValue(q("[data-step-marker]") as HTMLSelectElement, "beacon"); });
+    expect(status()).toBe("Unsaved changes");
+    // The marker shows on the picture while there is a hotspot: a dot at its centre for a beacon.
+    await drag(10, 10, 90, 60);
+    expect(q("[data-surface-beacon]")).not.toBeNull();
+    await act(async () => { setValue(q("[data-step-marker]") as HTMLSelectElement, "box"); });
+    expect(q("[data-surface-beacon]")).toBeNull();
+    await act(async () => { setValue(q("[data-step-marker]") as HTMLSelectElement, "beacon"); });
+    await key("s", { ctrlKey: true });
+    await settle();
+    const sent = (puts()[0][1] as { steps: Step[] }).steps;
+    expect(sent[0]).toMatchObject({ id: A, click: "right", marker: "beacon" });
+    expect(sent[1]).toMatchObject({ id: B, click: "left", marker: "box" });
+    // Undo over the selects, as over any edit.
+    await key("z", { ctrlKey: true });
+    expect((q("[data-step-marker]") as HTMLSelectElement).value).toBe("box");
+  });
+
+  it("an empty walkthrough shows a card that says how a step is made, with Add step… (and Record… only in the desktop app); the picker offers no Take a still now… outside it", async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === `/api/walkthroughs/${WID}`) return record({ steps: [] }) as never;
+      if (path === "/api/captures") return { captures: [capture] } as never;
+      return {} as never;
+    });
+    await mount();
+    const card = q("[data-empty-placeholder]")!;
+    expect(card.textContent).toContain("No steps yet");
+    expect(card.textContent).toContain("Press Record… (in the desktop app)");
+    expect(q("[data-record]")).toBeNull();
+    expect(q("[data-step-placeholder]")).toBeNull();
+    const adds = [...document.querySelectorAll("[data-add-step]")] as HTMLButtonElement[];
+    expect(adds.length).toBe(2);
+    await act(async () => { adds[1].click(); });
+    await settle();
+    expect(q("[role=dialog]")!.textContent).toContain("Add step");
+    expect(q("[data-take-still]")).toBeNull();
   });
 });

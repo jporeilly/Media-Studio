@@ -9,7 +9,7 @@
  * player shows; each step's `image` is its picture's file name beside the page (null for a step without one).
  * Unit-tested in playerBundle.test.ts; the built page is opened offline by tests/test_course_export.py.
  */
-import type { Hotspot, Placement, Step, StepKind } from "./walkthrough";
+import { type ClickKind, type Hotspot, type Marker, type Placement, type Step, type StepKind, CLICKS, MARKERS } from "./walkthrough";
 
 /** The id of the data slot the server fills. */
 export const DATA_ELEMENT_ID = "walkthrough-data";
@@ -50,6 +50,9 @@ function stepOf(v: unknown, index: number): Step {
     chapter: str(s.chapter),
     note: "",
     source: null,
+    // F3, F4: the click kind and the marker; an unknown one reads as the defaults, as an unknown kind does.
+    click: CLICKS.includes(s.click as ClickKind) ? (s.click as ClickKind) : "left",
+    marker: MARKERS.includes(s.marker as Marker) ? (s.marker as Marker) : "box",
   };
 }
 

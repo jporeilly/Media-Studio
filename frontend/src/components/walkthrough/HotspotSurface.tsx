@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useRef } from "react";
 import { type HandleName, type Point, type Size, HANDLE_PX, cropFromDrag, cropHandles, handleAt, inRect, moveCrop, resizeCrop } from "../../lib/annotate";
-import { type Hotspot, MIN_HOTSPOT_SIDE } from "../../lib/walkthrough";
+import { type Hotspot, type Marker, MIN_HOTSPOT_SIDE } from "../../lib/walkthrough";
 
 type Drag =
   | { kind: "draw"; start: Point; base: Hotspot | null }
@@ -25,11 +25,13 @@ export interface HotspotSurfaceProps {
   /** Screen pixels per picture pixel. */
   zoom: number;
   hotspot: Hotspot | null;
+  /** How the player draws the hotspot (F4): a beacon shows a dot at the hotspot's centre here too. */
+  marker?: Marker;
   /** The changed hotspot: `commit` false while a drag runs (preview only), true once it ends. */
   onChange: (hotspot: Hotspot | null, commit: boolean) => void;
 }
 
-export function HotspotSurface({ src, size, zoom, hotspot, onChange }: HotspotSurfaceProps) {
+export function HotspotSurface({ src, size, zoom, hotspot, marker = "box", onChange }: HotspotSurfaceProps) {
   const ref = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
 
@@ -119,6 +121,9 @@ export function HotspotSurface({ src, size, zoom, hotspot, onChange }: HotspotSu
       {hotspot && (
         <>
           <div className="ms-surface-spot" data-surface-hotspot="" style={{ left: hotspot.x * zoom, top: hotspot.y * zoom, width: hotspot.width * zoom, height: hotspot.height * zoom }} />
+          {marker === "beacon" && (
+            <div className="ms-surface-beacon" data-surface-beacon="" style={{ left: (hotspot.x + hotspot.width / 2) * zoom, top: (hotspot.y + hotspot.height / 2) * zoom }} />
+          )}
           {cropHandles(hotspot).map((h) => (
             <div key={h.name} className="ms-surface-handle" data-handle={h.name} style={{ left: h.x * zoom, top: h.y * zoom }} />
           ))}

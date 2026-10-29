@@ -24,10 +24,13 @@ describe("readBundle", () => {
     expect(got.name).toBe("Tour");
     expect(got.steps[0]).toEqual({
       id: "aaaaaaaaaaaa", image: "step-aaaaaaaaaaaa.png", width: 400, height: 300, hotspot: { x: 1, y: 2, width: 30, height: 20 }, kind: "modal",
-      text: "One", instruction: "Do one", placement: "left", chapter: "Start", note: "", source: null,
+      text: "One", instruction: "Do one", placement: "left", chapter: "Start", note: "", source: null, click: "left", marker: "box",
     });
-    // A path that leaves the folder, or an address: no picture - and so no size and no hotspot either.
-    expect(got.steps[1]).toMatchObject({ image: null, width: 0, height: 0, hotspot: null, kind: "tooltip", placement: "auto", text: "" });
+    // A path that leaves the folder, or an address: no picture - and so no size and no hotspot either. An unknown
+    // click kind or marker (F3, F4) reads as the defaults, as an unknown kind does.
+    expect(got.steps[1]).toMatchObject({ image: null, width: 0, height: 0, hotspot: null, kind: "tooltip", placement: "auto", text: "", click: "left", marker: "box" });
+    const typed = readBundle(JSON.stringify({ name: "T", steps: [{ id: "aaaaaaaaaaaa", image: "step-aaaaaaaaaaaa.png", width: 4, height: 4, click: "right", marker: "beacon" }, { click: "middle", marker: "pin" }] }))!;
+    expect([typed.steps[0].click, typed.steps[0].marker, typed.steps[1].click, typed.steps[1].marker]).toEqual(["right", "beacon", "left", "box"]);
     expect(got.steps[2].image).toBeNull();
     expect(got.steps[3].id).toBe("step-4");
     expect(readBundle(JSON.stringify({ steps: [] }))!.name).toBe("Walkthrough");

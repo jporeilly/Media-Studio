@@ -28,7 +28,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, ValidationError, field_validator, model_validator
 
 from api.audit import (
     PROJECT_GENERATE, WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE,
@@ -39,7 +39,10 @@ from api.body import capped_body
 from api.deps import current_user, may_access_project
 from api.routers.captures import _owned as owned_capture
 from api.routers.projects import generate_detail, start_generate
-from api.schemas import GenerateRequest, HotspotIn, WalkthroughIn, WalkthroughName, plain_validation_error
+from api.schemas import (
+    ChapterName, GenerateRequest, HotspotIn, WalkthroughClick, WalkthroughIn, WalkthroughMarker, WalkthroughName, plain_step_text,
+    plain_validation_error,
+)
 from api.store import display_name_of
 from services import course_export, studio_settings, walkthroughs, workshops
 from services import projects as store
@@ -60,15 +63,6 @@ class NewWalkthroughIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: WalkthroughName
-
-
-class AddStepIn(BaseModel):
-    """The still whose picture becomes the step, and the step to insert after (else appended)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    capture_id: str = Field(min_length=12, max_length=12)
-    after: str | None = Field(None, min_length=12, max_length=12)
 
 
 class FrameIn(BaseModel):
@@ -104,6 +98,33 @@ class ReplacePictureIn(BaseModel):
     capture_id: str = Field(min_length=12, max_length=12)
     hotspot: HotspotIn | None = None
     frame: FrameIn | None = None
+    #: F4: the step's marker set with the picture (Capture steps sends "beacon"); left out, the step's own stays.
+    marker: WalkthroughMarker | None = None
+
+
+class AddStepIn(BaseModel):
+    """The still whose picture becomes the step, and the step to insert after (else appended). A recording (F1)
+    sends what the step starts with as well: the ``hotspot`` round the point (in the still's pixels, clamped into
+    the picture), the Window kind's ``frame`` (as the picture route takes it), the ``click`` kind (F3), the
+    ``marker`` (F4) and the ``text`` / ``instruction`` / ``chapter`` - each bounded as the save bounds it, so the
+    step made is one the next save accepts as it is. A still from the picker sends the first two fields only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capture_id: str = Field(min_length=12, max_length=12)
+    after: str | None = Field(None, min_length=12, max_length=12)
+    hotspot: HotspotIn | None = None
+    frame: FrameIn | None = None
+    click: WalkthroughClick = "left"
+    marker: WalkthroughMarker = "box"
+    text: str = Field("", max_length=walkthroughs.MAX_STEP_TEXT)
+    instruction: str = Field("", max_length=walkthroughs.MAX_INSTRUCTION_CHARS)
+    chapter: ChapterName = ""
+
+    @field_validator("text", "instruction")
+    @classmethod
+    def _plain_text(cls, value: str) -> str:
+        return plain_step_text(value)
 
 
 #: A chapter's name as ``skip_chapters`` gives it: at most what a chapter's name may hold (a longer one matches nothing).
@@ -163,11 +184,14 @@ class GuidedCaptureIn(BaseModel):
     were made and how many of them by a click, and since W2d how many a typed pause made). The stills
     themselves are ``capture.still`` rows and each picture attached a ``walkthrough.replace_picture``
     row; this is the row that frames them. The W2b and W2d fields are optional: a page before them sends
-    none, and its rows read as they did."""
+    none, and its rows read as they did. ``mode`` (F1) says which guided capture it was: "steps" (or none, a
+    page before it) - Capture steps - or "record" - Record, whose rows read "record: …" and "recorded: N steps
+    (M by click, T typed)" (``captured`` then counts the steps made and kept)."""
 
     model_config = ConfigDict(extra="forbid")
 
     event: Literal["start", "done"]
+    mode: Literal["steps", "record"] | None = None
     kind: Literal["region", "window", "screen"] | None = None
     cursor: bool = False
     clicks: StrictBool | None = None
@@ -183,13 +207,16 @@ class GuidedCaptureIn(BaseModel):
 
 def guided_start_detail(
     kind: str | None, cursor: bool, clicks: bool | None, typing: bool | None = None, settle_ms: int | None = None, advance: str | None = None,
+    mode: str | None = None,
 ) -> str:
     """"start: region with pointer, on click, on typing, still 0.5 s after the click, moves on at Next" - the kind
     (``unknown`` when none was given, never guessed), " with pointer" when the cursor is drawn, then each part only
     when so: ", on click" when every click is a step (W2b), ", on typing" when a typed pause is (W2d), ", still N s
     after the click" when the still waits for the click to settle, and ", moves on at Next" or ", moves on at each
     capture" by the mode - nothing for a page that sent no ``advance``. The row says what is LIVE: the page sends
-    the hooks that went up, not the ticks."""
+    the hooks that went up, not the ticks. A recording (F1, ``mode`` "record") reads "record: region with pointer,
+    on click, on typing" - it never moves on, so nothing is said of that."""
+    recording = mode == "record"
     parts = [f"{kind or 'unknown'}{' with pointer' if cursor else ''}"]
     if clicks:
         parts.append("on click")
@@ -197,18 +224,27 @@ def guided_start_detail(
         parts.append("on typing")
     if settle_ms:
         parts.append(f"still {settle_ms / 1000:g} s after the click")
-    if advance == "next":
+    if not recording and advance == "next":
         parts.append("moves on at Next")
-    elif advance == "capture":
+    elif not recording and advance == "capture":
         parts.append("moves on at each capture")
-    return f"start: {', '.join(parts)}"
+    return f"{'record' if recording else 'start'}: {', '.join(parts)}"
 
 
-def guided_done_detail(captured: int, skipped: int, captures: int | None, by_click: int | None, by_typing: int | None = None) -> str:
+def guided_done_detail(
+    captured: int, skipped: int, captures: int | None, by_click: int | None, by_typing: int | None = None, mode: str | None = None,
+) -> str:
     """"done: 3 captured (2 by click), 1 skipped" - ``captured`` the distinct steps that got a picture; when
     the captures made differ from that (a retake after Back, or a step held until Next), "done: 3 captured,
     5 captures (2 by click), 1 skipped"; ", 2 typed" inside the brackets when typed captures were sent and
-    made (W2d); without the W2b counts, "done: 3 captured, 1 skipped" as before."""
+    made (W2d); without the W2b counts, "done: 3 captured, 1 skipped" as before. A recording (F1, ``mode``
+    "record") reads "recorded: 3 steps (2 by click, 1 typed)" - ``captured`` the steps made and kept, the two
+    counts how many of THOSE a click or a typed pause made (each when sent; a page that sent none says only the
+    steps)."""
+    if mode == "record":
+        detail = f"recorded: {captured} step{'' if captured == 1 else 's'}"
+        made = [f"{n} {what}" for n, what in ((by_click, "by click"), (by_typing, "typed")) if n is not None]
+        return f"{detail} ({', '.join(made)})" if made else detail
     detail = f"{captured} captured"
     if captures is not None and captures != captured:
         detail += f", {captures} captures"
@@ -351,12 +387,19 @@ def delete(wid: str, user: dict = Depends(current_user)):
 def add_step(wid: str, body: AddStepIn, user: dict = Depends(current_user)):
     """A new step from the capture's CURRENT picture (the annotated one when
     there is one), copied into the walkthrough; inserted after ``after`` or
-    appended. The capture must be the caller's (404 / 403 as the Captures
-    routes answer). Answers the record."""
+    appended. A recording (F1) sends the step's hotspot, click kind, marker and
+    text with it (and the Window kind's frame, as the picture route takes it);
+    a still that does not fit the frame is a 400, nothing written. The capture
+    must be the caller's (404 / 403 as the Captures routes answer). Answers the
+    record."""
     _owned(wid, user)
     owned_capture(body.capture_id, user)
+    frame = (body.frame.width, body.frame.height) if body.frame else None
     try:
-        rec, position = walkthroughs.add_step(wid, body.capture_id, body.after)
+        rec, position = walkthroughs.add_step(
+            wid, body.capture_id, body.after, hotspot=body.hotspot.model_dump() if body.hotspot else None, frame=frame,
+            click=body.click, marker=body.marker, text=body.text, instruction=body.instruction, chapter=body.chapter,
+        )
     except walkthroughs.NoSuchStep as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except ValueError as exc:
@@ -381,7 +424,7 @@ def replace_picture(wid: str, sid: str, body: ReplacePictureIn, user: dict = Dep
     hotspot = walkthroughs.KEEP_HOTSPOT if "hotspot" not in body.model_fields_set else (body.hotspot.model_dump() if body.hotspot else None)
     frame = (body.frame.width, body.frame.height) if body.frame else None
     try:
-        rec = walkthroughs.replace_picture(wid, sid, body.capture_id, hotspot=hotspot, frame=frame)
+        rec = walkthroughs.replace_picture(wid, sid, body.capture_id, hotspot=hotspot, frame=frame, marker=body.marker)
     except walkthroughs.NoSuchStep as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except ValueError as exc:
@@ -390,7 +433,8 @@ def replace_picture(wid: str, sid: str, body: ReplacePictureIn, user: dict = Dep
         raise HTTPException(status_code=404, detail=str(exc)) from None
     spot = "" if hotspot is walkthroughs.KEEP_HOTSPOT else (", no hotspot" if hotspot is None else ", hotspot set")
     framed = f", framed {frame[0]}x{frame[1]}" if frame else ""
-    audit(WALKTHROUGH_REPLACE_PICTURE, user=user, entity="walkthrough", entity_id=wid, detail=f"step {sid}: capture {body.capture_id}{spot}{framed}")
+    marked = f", {body.marker}" if body.marker else ""
+    audit(WALKTHROUGH_REPLACE_PICTURE, user=user, entity="walkthrough", entity_id=wid, detail=f"step {sid}: capture {body.capture_id}{spot}{framed}{marked}")
     return rec
 
 
@@ -403,9 +447,9 @@ def guided_capture(wid: str, body: GuidedCaptureIn, user: dict = Depends(current
     walkthrough here (each picture attached is a replace_picture of its own)."""
     _owned(wid, user)
     if body.event == "start":
-        detail = guided_start_detail(body.kind, body.cursor, body.clicks, body.typing, body.settle_ms, body.advance)
+        detail = guided_start_detail(body.kind, body.cursor, body.clicks, body.typing, body.settle_ms, body.advance, mode=body.mode)
     else:
-        detail = guided_done_detail(body.captured, body.skipped, body.captures, body.by_click, body.by_typing)
+        detail = guided_done_detail(body.captured, body.skipped, body.captures, body.by_click, body.by_typing, mode=body.mode)
     audit(WALKTHROUGH_GUIDED_CAPTURE, user=user, entity="walkthrough", entity_id=wid, detail=detail)
 
 

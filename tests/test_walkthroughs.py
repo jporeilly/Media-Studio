@@ -233,8 +233,10 @@ def test_add_step_copies_the_captures_current_picture_through_the_oracle(rig, mo
     assert rec["revision"] == 3 and len(rec["steps"]) == 2
     a, b = rec["steps"]
     assert a["image"] == f"step-{a['id']}.png" and (a["width"], a["height"]) == (40, 30)
+    # F3, F4: a step from a still is a left click with the box.
     assert a == {"id": a["id"], "image": a["image"], "width": 40, "height": 30, "hotspot": None, "kind": "tooltip", "text": "",
-                 "instruction": "", "placement": "auto", "chapter": "", "note": "", "source": {"capture_id": plain, "annotated": False}}
+                 "instruction": "", "placement": "auto", "chapter": "", "note": "", "source": {"capture_id": plain, "annotated": False},
+                 "click": "left", "marker": "box"}
     assert b["source"] == {"capture_id": marked, "annotated": True} and (b["width"], b["height"]) == (60, 20)
     # The annotated still gives the ANNOTATED picture (blue), the plain one its still (red).
     assert _pixel(c, w["id"], a["id"]) == RED
@@ -473,6 +475,8 @@ def _bad_cases():
         ("a size that is not the picture's", with_step(width=41), "40x30"),
         ("an unknown kind", with_step(kind="toast"), "kind"),
         ("an unknown placement", with_step(placement="middle"), "placement"),
+        ("an unknown click kind", with_step(click="middle"), "click"),
+        ("an unknown marker", with_step(marker="arrow"), "marker"),
         ("a bad step id", with_step(id="not-an-id"), "id"),
         # The second step takes the first's id AND its picture (each step's picture is named by its id), so it is
         # the uniqueness of the ids that refuses it.
@@ -771,7 +775,7 @@ def test_the_limits_rows_name_the_walkthrough_constants():
         assert str(number) in joined, number
     assert "1,000" in joined or "1000" in joined
     assert "2,000" in joined or "2000" in joined
-    for name in ("MAX_STEPS", "MAX_STEP_TEXT", "MAX_INSTRUCTION_CHARS", "MAX_CHAPTER_CHARS", "MIN_HOTSPOT_SIDE", "MAX_PUT_BYTES"):
+    for name in ("MAX_STEPS", "MAX_STEP_TEXT", "MAX_INSTRUCTION_CHARS", "MAX_CHAPTER_CHARS", "MIN_HOTSPOT_SIDE", "MAX_PUT_BYTES", "CLICKS", "MARKERS"):
         assert name in text, name
 
 
@@ -955,5 +959,139 @@ def test_the_transcript_route_answers_markdown_and_a_download(rig, monkeypatch):
     assert d.headers["content-disposition"] == 'attachment; filename="Tour-Part-12.md"'
     assert len(auth_store.list_audit(limit=100)) == rows_before, "a read records nothing"
     assert other.get(f"/api/walkthroughs/{w['id']}/transcript").status_code == 403
+
+
+# -- Record (F1): the add-step path a recording takes; the click kind (F3) and the marker (F4) --------------------------
+
+def test_a_step_carries_its_click_kind_and_marker_with_left_and_box_as_the_defaults(rig, monkeypatch):
+    """F3, F4: ``click`` is "left" | "right" | "double" | "none" and ``marker`` "box" | "beacon"; a step made
+    from a still is "left" and "box", a save round-trips both, and a record from before the fields existed
+    reads "left" and "box" for every step - every existing walkthrough looks as it did."""
+    c = rig["admin"]
+    cid = _still(rig, monkeypatch, 40, 30)
+    w = _new(c)
+    rec = _add(c, w["id"], cid)
+    assert (rec["steps"][0]["click"], rec["steps"][0]["marker"]) == ("left", "box")
+    assert walkthroughs.CLICKS == ("left", "right", "double", "none")
+    assert walkthroughs.MARKERS == ("box", "beacon")
+    rec["steps"][0].update({"click": "right", "marker": "beacon"})
+    r = _put(c, w["id"], _body(rec))
+    assert r.status_code == 200, r.text
+    assert (r.json()["steps"][0]["click"], r.json()["steps"][0]["marker"]) == ("right", "beacon")
+    assert (_stored(rig, w["id"])["steps"][0]["click"], _stored(rig, w["id"])["steps"][0]["marker"]) == ("right", "beacon")
+    # A record on disk without the fields (made before this release) reads the defaults.
+    stored = _stored(rig, w["id"])
+    for s in stored["steps"]:
+        del s["click"], s["marker"]
+    (_folder(rig, w["id"]) / "walkthrough.json").write_text(json.dumps(stored), encoding="utf-8")
+    old = c.get(f"/api/walkthroughs/{w['id']}").json()
+    assert (old["steps"][0]["click"], old["steps"][0]["marker"]) == ("left", "box")
+    # A save from a page before the fields (no click, no marker in the body) is taken as "left" and "box".
+    body = _body(old)
+    for s in body["steps"]:
+        del s["click"], s["marker"]
+    r = _put(c, w["id"], body)
+    assert r.status_code == 200, r.text
+    assert (r.json()["steps"][0]["click"], r.json()["steps"][0]["marker"]) == ("left", "box")
+    # The offline player's document carries both (it draws the beacon and names the click as the app's player does).
+    from services import course_export
+
+    doc = course_export.player_document(r.json())
+    assert (doc["steps"][0]["click"], doc["steps"][0]["marker"]) == ("left", "box")
+    copy = c.post(f"/api/walkthroughs/{w['id']}/duplicate").json()
+    assert (copy["steps"][0]["click"], copy["steps"][0]["marker"]) == ("left", "box")
+
+
+def test_add_step_takes_the_hotspot_the_click_kind_the_marker_and_the_text_a_recording_sends(rig, monkeypatch):
+    """Record (F1) makes a step per capture through ``POST /steps``: the still, the hotspot round the point (clamped
+    into the picture), the click kind (F3), the beacon (F4) and the text, appended after the last step; with the
+    Window kind's ``frame`` (W2b) the still is drawn on the frame and the hotspot moves with it, as a replaced
+    picture's does. A still that does not fit the frame is refused with nothing written."""
+    c = rig["admin"]
+    cid = _still(rig, monkeypatch, 40, 30)
+    w = _new(c)
+    first = _add(c, w["id"], cid)["steps"][0]
+    r = c.post(f"/api/walkthroughs/{w['id']}/steps", json={
+        "capture_id": cid, "hotspot": {"x": 30, "y": 20, "width": 20, "height": 20}, "click": "right", "marker": "beacon",
+        "text": "Right-click here", "instruction": "", "chapter": "",
+    })
+    assert r.status_code == 200, r.text
+    rec = r.json()
+    assert [s["id"] for s in rec["steps"]][0] == first["id"] and len(rec["steps"]) == 2
+    made = rec["steps"][1]
+    assert made["hotspot"] == {"x": 20, "y": 10, "width": 20, "height": 20}, "clamped into the 40 x 30 picture"
+    assert (made["click"], made["marker"], made["text"], made["kind"], made["instruction"], made["chapter"]) == ("right", "beacon", "Right-click here", "tooltip", "", "")
+    assert made["source"] == {"capture_id": cid, "annotated": False}
+    # The answer is a valid document: the builder's next save of it as it is passes.
+    assert _put(c, w["id"], _body(rec)).status_code == 200, "the record validates against itself"
+    # The frame: the 40 x 30 still centred on 60 x 40, transparent round it, the hotspot moved by (10, 5).
+    r = c.post(f"/api/walkthroughs/{w['id']}/steps", json={
+        "capture_id": cid, "hotspot": {"x": 0, "y": 0, "width": 10, "height": 10}, "frame": {"width": 60, "height": 40},
+        "click": "none", "marker": "beacon", "text": "",
+    })
+    assert r.status_code == 200, r.text
+    framed = r.json()["steps"][2]
+    assert (framed["width"], framed["height"]) == (60, 40)
+    assert framed["hotspot"] == {"x": 10, "y": 5, "width": 10, "height": 10}
+    picture = Image.open(io.BytesIO(c.get(f"/api/walkthroughs/{w['id']}/steps/{framed['id']}/image").content)).convert("RGBA")
+    assert picture.getpixel((0, 0))[3] == 0 and picture.getpixel((30, 20))[:3] == RED
+    # The hotspot is placed round the point by the page; here a hotspot outside a small picture is dropped, not an error.
+    r = c.post(f"/api/walkthroughs/{w['id']}/steps", json={"capture_id": cid, "hotspot": {"x": 0, "y": 0, "width": 8, "height": 8}, "frame": {"width": 40, "height": 30}})
+    assert r.status_code == 200 and r.json()["steps"][3]["hotspot"] == {"x": 0, "y": 0, "width": 8, "height": 8}
+    before, pictures = _stored(rig, w["id"]), _pictures(rig, w["id"])
+    r = c.post(f"/api/walkthroughs/{w['id']}/steps", json={"capture_id": cid, "frame": {"width": 20, "height": 40}})
+    assert r.status_code == 400 and "smaller than the still" in r.text, r.text
+    assert _stored(rig, w["id"]) == before and _pictures(rig, w["id"]) == pictures
+    # The body's own schema: a click kind or a marker that is none of the kinds, or a text past the cap, is a 422.
+    for body, word in (
+        ({"capture_id": cid, "click": "middle"}, "click"),
+        ({"capture_id": cid, "marker": "arrow"}, "marker"),
+        ({"capture_id": cid, "text": "x" * (walkthroughs.MAX_STEP_TEXT + 1)}, "text"),
+        ({"capture_id": cid, "text": "a\x00b"}, "control"),
+        ({"capture_id": cid, "chapter": "c" * (walkthroughs.MAX_CHAPTER_CHARS + 1)}, "chapter"),
+    ):
+        r = c.post(f"/api/walkthroughs/{w['id']}/steps", json=body)
+        assert r.status_code == 422 and word in r.text.lower(), (body, r.status_code, r.text)
+    assert _stored(rig, w["id"]) == before
+
+
+def test_replace_picture_can_set_the_marker_and_keeps_it_otherwise(rig, monkeypatch):
+    """Capture steps sets "beacon" on the steps it pictures (F4) through the picture route's ``marker``; a body
+    without it leaves the step's own marker as it is."""
+    c = rig["admin"]
+    cid = _still(rig, monkeypatch, 40, 30)
+    w = _new(c)
+    rec = _add(c, w["id"], cid)
+    sid = rec["steps"][0]["id"]
+    url = f"/api/walkthroughs/{w['id']}/steps/{sid}/picture"
+    r = c.post(url, json={"capture_id": cid, "hotspot": _hotspot(), "marker": "beacon"})
+    assert r.status_code == 200, r.text
+    assert r.json()["steps"][0]["marker"] == "beacon"
+    assert c.post(url, json={"capture_id": cid}).json()["steps"][0]["marker"] == "beacon", "left out: the step's own stays"
+    assert c.post(url, json={"capture_id": cid, "marker": "box"}).json()["steps"][0]["marker"] == "box"
+    assert c.post(url, json={"capture_id": cid, "marker": "pin"}).status_code == 422
+    rows = [r["detail"] for r in auth_store.list_audit(action="walkthrough.replace_picture")]
+    assert rows[-1] == f"step {sid}: capture {cid}, hotspot set, beacon", "the row says the marker the capture set"
+
+
+def test_the_record_rows_say_record_and_recorded(rig):
+    """F1: the guided capture's rows in record mode - "record: region with pointer, on click, on typing" and
+    "recorded: N steps (M by click, T typed)"; the steps mode's rows are as they were."""
+    from api.routers.walkthroughs import guided_done_detail, guided_start_detail
+
+    assert guided_start_detail("region", True, True, True, 0, None, mode="record") == "record: region with pointer, on click, on typing"
+    assert guided_start_detail("window", False, True, False, 500, "next") == "start: window, on click, still 0.5 s after the click, moves on at Next"
+    assert guided_done_detail(3, 0, 3, 2, 1, mode="record") == "recorded: 3 steps (2 by click, 1 typed)"
+    assert guided_done_detail(1, 0, 1, 0, 0, mode="record") == "recorded: 1 step (0 by click, 0 typed)"
+    assert guided_done_detail(0, 0, 0, None, None, mode="record") == "recorded: 0 steps"
+    assert guided_done_detail(2, 1, 2, 1, None) == "done: 2 captured (1 by click), 1 skipped"
+    c = rig["admin"]
+    w = _new(c, "Recorded tour")
+    url = f"/api/walkthroughs/{w['id']}/guided-capture"
+    assert c.post(url, json={"event": "start", "mode": "record", "kind": "window", "cursor": True, "clicks": True, "typing": True, "settle_ms": 0}).status_code == 204
+    assert c.post(url, json={"event": "done", "mode": "record", "captured": 3, "skipped": 0, "captures": 3, "by_click": 2, "by_typing": 1}).status_code == 204
+    rows = [r["detail"] for r in auth_store.list_audit(action="walkthrough.guided_capture")]
+    assert rows == ["recorded: 3 steps (2 by click, 1 typed)", "record: window with pointer, on click, on typing"]
+    assert c.post(url, json={"event": "start", "mode": "replay"}).status_code == 422
     assert TestClient(rig["app"], client=LOOPBACK).get(f"/api/walkthroughs/{w['id']}/transcript").status_code == 401
     assert c.get("/api/walkthroughs/aabbccddeeff/transcript").status_code == 404

@@ -7,12 +7,16 @@
  * the step's picture and the last still stands - or after each capture, 0.18.0's one capture per step), the still
  * after the click settles (off by default), typing takes a still (on by default), then Start. Desktop app only
  * (behind `useCaptureAvailable`, like the Capture button); the flow itself is `useGuidedCapture`.
+ *
+ * The SAME dialog opens for **Record** (F1, `mode: "record"`): titled Record, with the kind, the cursor, the clicks, the
+ * settle tick and the typing tick - and without "Which steps" and the move-on radio, since a recording visits no step:
+ * every capture makes one, appended after the last.
  */
 import { useEffect, useState } from "react";
-import { Camera, Monitor, MousePointer2, Square } from "lucide-react";
+import { Camera, Disc, Monitor, MousePointer2, Square } from "lucide-react";
 import { Button, Field, Modal, Select } from "../ui";
 import { type CaptureKind, type MonitorInfo, shellBridge } from "../../lib/capture";
-import { type GuidedAdvance, type GuidedOptions, SETTLE_MS } from "../../lib/guided";
+import { type GuidedAdvance, type GuidedMode, type GuidedOptions, SETTLE_MS } from "../../lib/guided";
 
 const KINDS: { key: CaptureKind; label: string; how: string }[] = [
   { key: "window", label: "Window", how: "The window under the pointer when you click or press Shift+F8 (from the bar's Capture button: the front-most window); after typing, the window you typed into." },
@@ -20,8 +24,10 @@ const KINDS: { key: CaptureKind; label: string; how: string }[] = [
   { key: "screen", label: "Full screen", how: "A whole monitor, every step." },
 ];
 
-export function CaptureStepsDialog({ open, missing, total, onClose, onStart }: {
+export function CaptureStepsDialog({ open, mode = "steps", missing, total, onClose, onStart }: {
   open: boolean;
+  /** Capture the steps the walkthrough has (the default), or record new ones (F1). */
+  mode?: GuidedMode;
   /** How many steps have no picture yet, of how many. */
   missing: number;
   total: number;
@@ -46,25 +52,32 @@ export function CaptureStepsDialog({ open, missing, total, onClose, onStart }: {
   }, [open, missing]);
 
   const kindInfo = KINDS.find((k) => k.key === kind)!;
-  const count = every ? total : missing;
-  const start = () => onStart({ kind, cursor, every, monitor, clicks, advance, settleMs: settle ? SETTLE_MS : 0, typing });
+  const recording = mode === "record";
+  const count = recording ? 1 : every ? total : missing;
+  const start = () => onStart({ mode, kind, cursor, every: recording ? false : every, monitor, clicks, advance: recording ? "next" : advance, settleMs: settle ? SETTLE_MS : 0, typing });
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title="Capture steps"
+      title={recording ? "Record" : "Capture steps"}
       width={620}
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" icon={<Camera size={16} />} disabled={count === 0} onClick={start} data-capture-steps-start="">Start</Button>
+          <Button variant="primary" icon={recording ? <Disc size={16} /> : <Camera size={16} />} disabled={count === 0} onClick={start} data-capture-steps-start="">Start</Button>
         </>
       }
     >
-      <p style={{ marginTop: 0 }}>
-        A capture bar opens beside the screen with the step's text and instruction. Just do the step in the application: every click takes the still at that moment, attaches it to the step and places a hotspot round the click; typing takes one a second after you stop. The step is yours until you press <b>Next</b> (or <b>Shift+F9</b>): every capture until then re-takes its picture, and the last still stands. For a step with no click, put the pointer on the thing the viewer should click and press <b>Shift+F8</b> (or <b>Capture</b> on the bar). <b>Skip</b> is the same button for a step that has no still yet; <b>Back</b> returns to the step before; <b>Done</b> closes the bar. The builder is saved first and reloads when you are done.
-      </p>
+      {recording ? (
+        <p style={{ marginTop: 0 }}>
+          A capture bar opens beside the screen. Just click through the application: <b>every click makes a step</b> - the still at that moment, a beacon round the point you clicked, and "Click here" (or "Right-click here") to say what to do - appended after the walkthrough's last step; typing makes one a second after you stop, with the beacon round the pointer. For a step with no click, put the pointer on the thing the viewer should click and press <b>Shift+F8</b> (or <b>Capture</b> on the bar, which places no beacon). <b>Undo</b> takes the last step back; <b>Done</b> closes the bar and opens the new steps in the builder, where you write what each says. The builder is saved first.
+        </p>
+      ) : (
+        <p style={{ marginTop: 0 }}>
+          A capture bar opens beside the screen with the step's text and instruction. Just do the step in the application: every click takes the still at that moment, attaches it to the step and places a hotspot round the click; typing takes one a second after you stop. The step is yours until you press <b>Next</b> (or <b>Shift+F9</b>): every capture until then re-takes its picture, and the last still stands. For a step with no click, put the pointer on the thing the viewer should click and press <b>Shift+F8</b> (or <b>Capture</b> on the bar). <b>Skip</b> is the same button for a step that has no still yet; <b>Back</b> returns to the step before; <b>Done</b> closes the bar. The builder is saved first and reloads when you are done.
+        </p>
+      )}
       <div style={{ display: "flex", gap: 8, margin: "14px 0" }}>
         {KINDS.map((k) => (
           <button
@@ -91,20 +104,22 @@ export function CaptureStepsDialog({ open, missing, total, onClose, onStart }: {
             </Select>
           </Field>
         )}
-        <fieldset style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "8px 12px", margin: 0, display: "grid", gap: 6 }} data-capture-advance-group="">
-          <legend style={{ fontWeight: 600, padding: "0 4px" }}>Move on to the next step</legend>
-          <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
-            <input type="radio" name="capture-advance" checked={advance === "next"} onChange={() => setAdvance("next")} style={{ marginTop: 3 }} data-capture-advance="next" />
-            <span><b>when I press Next</b> - every click, key press and typed pause takes this step's picture again until you press Next; the last still stands</span>
-          </label>
-          <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
-            <input type="radio" name="capture-advance" checked={advance === "capture"} onChange={() => setAdvance("capture")} style={{ marginTop: 3 }} data-capture-advance="capture" />
-            <span><b>after each capture</b> - one capture per step, as in 0.18.0</span>
-          </label>
-        </fieldset>
+        {!recording && (
+          <fieldset style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "8px 12px", margin: 0, display: "grid", gap: 6 }} data-capture-advance-group="">
+            <legend style={{ fontWeight: 600, padding: "0 4px" }}>Move on to the next step</legend>
+            <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
+              <input type="radio" name="capture-advance" checked={advance === "next"} onChange={() => setAdvance("next")} style={{ marginTop: 3 }} data-capture-advance="next" />
+              <span><b>when I press Next</b> - every click, key press and typed pause takes this step's picture again until you press Next; the last still stands</span>
+            </label>
+            <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
+              <input type="radio" name="capture-advance" checked={advance === "capture"} onChange={() => setAdvance("capture")} style={{ marginTop: 3 }} data-capture-advance="capture" />
+              <span><b>after each capture</b> - one capture per step, as in 0.18.0</span>
+            </label>
+          </fieldset>
+        )}
         <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
           <input type="checkbox" checked={clicks} onChange={(e) => setClicks(e.target.checked)} style={{ marginTop: 3 }} data-capture-clicks="" />
-          <span><b>Capture on click</b> - every click in the frame takes the step's still; Shift+F8 still captures without a click</span>
+          <span><b>Capture on click</b> - every click in the frame {recording ? "makes a step" : "takes the step's still"}; Shift+F8 still captures without a click</span>
         </label>
         <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
           <input type="checkbox" checked={settle} disabled={!clicks} onChange={(e) => setSettle(e.target.checked)} style={{ marginTop: 3 }} data-capture-settle="" />
@@ -112,18 +127,22 @@ export function CaptureStepsDialog({ open, missing, total, onClose, onStart }: {
         </label>
         <label className="os-row" style={{ gap: 10, alignItems: "flex-start" }}>
           <input type="checkbox" checked={typing} onChange={(e) => setTyping(e.target.checked)} style={{ marginTop: 3 }} data-capture-typing="" />
-          <span><b>Typing takes a still</b> - a still a second after you stop typing, of the window you typed into when it meets the step's last picture (before the step's first still, that window as it is), the hotspot where you last clicked in this step when that is in the picture, else round the pointer; which keys you press is never recorded</span>
+          {recording
+            ? <span><b>Typing makes a step</b> - a step a second after you stop typing, of the window you typed into, the beacon round the pointer; which keys you press is never recorded</span>
+            : <span><b>Typing takes a still</b> - a still a second after you stop typing, of the window you typed into when it meets the step's last picture (before the step's first still, that window as it is), the hotspot where you last clicked in this step when that is in the picture, else round the pointer; which keys you press is never recorded</span>}
         </label>
         <label className="os-row" style={{ gap: 10, alignItems: "center" }}>
           <input type="checkbox" checked={cursor} onChange={(e) => setCursor(e.target.checked)} data-capture-cursor="" />
           <MousePointer2 size={15} /> <span>Cursor in the picture</span>
         </label>
-        <Field label="Which steps">
-          <Select value={every ? "every" : "missing"} onChange={(e) => setEvery(e.target.value === "every")} aria-label="Which steps" data-capture-which="">
-            <option value="missing">{`Steps without a picture (${missing} of ${total})`}</option>
-            <option value="every">{`Every step (${total})`}</option>
-          </Select>
-        </Field>
+        {!recording && (
+          <Field label="Which steps">
+            <Select value={every ? "every" : "missing"} onChange={(e) => setEvery(e.target.value === "every")} aria-label="Which steps" data-capture-which="">
+              <option value="missing">{`Steps without a picture (${missing} of ${total})`}</option>
+              <option value="every">{`Every step (${total})`}</option>
+            </Select>
+          </Field>
+        )}
         {count === 0 && <p className="os-muted os-small" style={{ margin: 0 }}>Every step has a picture already; choose Every step to capture them again.</p>}
       </div>
     </Modal>

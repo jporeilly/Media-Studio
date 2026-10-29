@@ -664,6 +664,9 @@ class AnnotationDocument(BaseModel):
 
 WalkthroughKind = Literal[walkthrough_rules.KINDS]
 WalkthroughPlacement = Literal[walkthrough_rules.PLACEMENTS]
+#: F3, F4: the real click the learner makes at a step, and how the player draws the hotspot (the one rule is the service's).
+WalkthroughClick = Literal[walkthrough_rules.CLICKS]
+WalkthroughMarker = Literal[walkthrough_rules.MARKERS]
 #: A walkthrough's or a step's id: twelve hex characters, as a capture's.
 Hex12 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
 #: A step's picture, by its file name in the walkthrough's folder.
@@ -695,6 +698,16 @@ ChapterName = Annotated[
 def _pictures(info) -> dict | None:
     context = getattr(info, "context", None) or {}
     return context.get("pictures")
+
+
+def plain_step_text(value: str) -> str:
+    """The one rule for a step's TEXT (its text, instruction or note): plain text with line breaks - CRLF normalised
+    to LF, no other control character (a tab is allowed). ``StepIn`` applies it on a save; the add-step body a
+    recording sends (``api.routers.walkthroughs.AddStepIn``) applies the same."""
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    if _TEXT_CONTROL_RE.search(value):
+        raise ValueError("A step's text may not contain control characters.")
+    return value
 
 
 class HotspotIn(BaseModel):
@@ -776,15 +789,15 @@ class StepIn(BaseModel):
     source: StepSourceIn | WorkshopCaptureSourceIn | WorkshopSourceIn | None = None
     #: W2c: where an imported step is in its guide; None for any other step (the save keeps the record's own).
     anchor: AnchorIn | None = None
+    #: F3, F4: the real click the learner makes, and how the hotspot is drawn - a body from before the fields is "left" and "box".
+    click: WalkthroughClick = "left"
+    marker: WalkthroughMarker = "box"
 
     @field_validator("text", "instruction", "note")
     @classmethod
     def _plain_text(cls, value: str) -> str:
         """Plain text with line breaks: CRLF normalised to LF, no other control character (a tab is allowed)."""
-        value = value.replace("\r\n", "\n").replace("\r", "\n")
-        if _TEXT_CONTROL_RE.search(value):
-            raise ValueError("A step's text may not contain control characters.")
-        return value
+        return plain_step_text(value)
 
     @model_validator(mode="after")
     def _image_named_by_id(self):

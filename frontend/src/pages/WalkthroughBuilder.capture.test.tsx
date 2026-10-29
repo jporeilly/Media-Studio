@@ -43,12 +43,17 @@ import WalkthroughBuilderPage from "./WalkthroughBuilder";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const hoisted = vi.hoisted(() => ({ recorder: "idle" as string, region: null as unknown }));
+const hoisted = vi.hoisted(() => ({ recorder: "idle" as string, region: null as unknown, takeStill: vi.fn() }));
 vi.mock("../api/client", async (importOriginal) => {
   const real = await importOriginal<typeof import("../api/client")>();
   return { ...real, api: { ...real.api, get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(), blob: vi.fn() } };
 });
 vi.mock("../lib/useCaptureAvailable", () => ({ useCaptureAvailable: () => true }));
+// The recorder's context (F2: Take a still now… goes through the Capture dialog's `takeStill`): the still's id is all it answers.
+vi.mock("../context/CaptureContext", () => ({
+  useCapture: () => ({ state: "idle", elapsedMs: 0, message: null, savingJobId: null, clearSavingJob: () => {}, liveRecordingId: null, saveRunning: false, hotkeysLive: false,
+    startRecording: async () => {}, takeStill: hoisted.takeStill, pause: () => {}, resume: () => {}, stop: () => {}, cancelCountdown: () => {}, dismiss: () => {}, lastStillAt: 0 }),
+}));
 // The thumbnail (R4) is one function over the canvas, which jsdom has not: stubbed, a fixed data URL.
 vi.mock("../lib/thumbnail", () => ({ THUMB_WIDTH: 320, thumbnailOf: vi.fn(async () => "data:image/jpeg;base64,thumb") }));
 vi.mock("../lib/captureShared", async (importOriginal) => {
@@ -67,7 +72,8 @@ const A = "aaaaaaaaaaaa", B = "bbbbbbbbbbbb", C = "cccccccccccc";
 const SPOON = { x: 100, y: 100, width: 1200, height: 800 };
 const DIALOG = { x: 300, y: 300, width: 400, height: 200 };
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: `Text ${id}`, instruction: `Do ${id}`, placement: "auto", chapter: "", note: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: `Text ${id}`, instruction: `Do ${id}`, placement: "auto", chapter: "", note: "", source: null,
+  click: "left", marker: "box", ...over,
 });
 const bare = (id: string, over: Partial<Step> = {}) => step(id, { image: null, width: 0, height: 0, ...over });
 const record = (over: Partial<Walkthrough> = {}): Walkthrough => ({
@@ -155,6 +161,8 @@ let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 let server: Walkthrough;
 let stillId = 0;
+/** The steps the faked server made through the add-step route (F1, F2), numbered in order. */
+let madeId = 0;
 /** Gates for the next `POST /api/captures` calls, taken in order: each still waits on its own (a capture held in flight). */
 let stillGates: Promise<void>[] = [];
 /** When set, `POST /api/captures` fails with it once. */
@@ -216,8 +224,8 @@ const startRow = () => [...posts()].reverse().find(([p, b]) => p.endsWith("/guid
 const doneRow = () => [...posts()].reverse().find(([p, b]) => p.endsWith("/guided-capture") && (b as { event?: string }).event === "done")?.[1];
 /** The still ids deleted from Captures (a superseded still, R1). */
 const deleted = () => vi.mocked(api.delete).mock.calls.map(([p]) => p);
-/** The start row as the hook writes it: what is LIVE, and the dialog's choices. */
-const start = (over: Record<string, unknown> = {}) => ({ event: "start", kind: "window", cursor: true, clicks: true, typing: true, settle_ms: 0, advance: "capture", ...over });
+/** The start row as the hook writes it: what is LIVE, the dialog's choices, and the mode (F1: "steps", or "record"). */
+const start = (over: Record<string, unknown> = {}) => ({ event: "start", mode: "steps", kind: "window", cursor: true, clicks: true, typing: true, settle_ms: 0, advance: "capture", ...over });
 
 async function openAndStart(advance: Advance = "capture") {
   await act(async () => { q("[data-capture-steps]")!.click(); });
@@ -232,6 +240,9 @@ beforeEach(() => {
   hoisted.recorder = "idle";
   hoisted.region = null;
   stillId = 0;
+  madeId = 0;
+  hoisted.takeStill.mockReset();
+  hoisted.takeStill.mockResolvedValue({ id: "cap000000077" });
   server = record();
   Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 1000 });
   Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 600 });
@@ -269,11 +280,26 @@ beforeEach(() => {
     }
     const attach = /\/api\/walkthroughs\/[^/]+\/steps\/([^/]+)\/picture$/.exec(path);
     if (attach) {
-      const b = body as { capture_id: string; hotspot: Step["hotspot"] };
+      const b = body as { capture_id: string; hotspot: Step["hotspot"]; marker?: Step["marker"] };
       server = {
         ...server, revision: server.revision + 1,
-        steps: server.steps.map((s) => (s.id === attach[1] ? { ...s, image: `step-${s.id}.png`, width: 1200, height: 800, hotspot: b.hotspot, source: { capture_id: b.capture_id, annotated: false } } : s)),
+        steps: server.steps.map((s) => (s.id === attach[1] ? { ...s, image: `step-${s.id}.png`, width: 1200, height: 800, hotspot: b.hotspot, source: { capture_id: b.capture_id, annotated: false }, marker: b.marker ?? s.marker } : s)),
       };
+      return server as never;
+    }
+    // Record (F1) and Take a still now (F2) make a step through the add-step route: appended, or after a step.
+    if (path === `/api/walkthroughs/${WID}/steps`) {
+      const b = body as { capture_id: string; after?: string; hotspot?: Step["hotspot"]; frame?: { width: number; height: number }; click?: Step["click"]; marker?: Step["marker"]; text?: string; instruction?: string; chapter?: string };
+      madeId += 1;
+      const id = `0000000000${String(madeId).padStart(2, "0")}`;
+      const made: Step = {
+        ...step(id, { text: b.text ?? "", instruction: b.instruction ?? "", chapter: b.chapter ?? "" }), width: b.frame?.width ?? 1200, height: b.frame?.height ?? 800,
+        hotspot: b.hotspot ?? null, source: { capture_id: b.capture_id, annotated: false }, click: b.click ?? "left", marker: b.marker ?? "box",
+      };
+      const at = b.after ? server.steps.findIndex((s) => s.id === b.after) : -1;
+      const steps = [...server.steps];
+      steps.splice(at < 0 ? steps.length : at + 1, 0, made);
+      server = { ...server, revision: server.revision + 1, steps };
       return server as never;
     }
     return undefined as never;
@@ -392,7 +418,7 @@ describe("the guided capture", () => {
     const still = posts().find(([p]) => p === "/api/captures")!;
     expect(still[1]).toEqual({ x: 100, y: 100, width: 1200, height: 800, cursor: true, kind: "window", name: "Tour · step 2" });
     const attach = posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)!;
-    expect(attach[1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
+    expect(attach[1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
     // The server's record is the saved baseline: the list shows B's picture, nothing is unsaved.
     expect(q(`[data-step="${B}"] img`)).not.toBeNull();
     expect(q(`[data-step="${B}"] [data-step-no-picture]`)).toBeNull();
@@ -404,7 +430,7 @@ describe("the guided capture", () => {
     const second = posts().filter(([p]) => p === "/api/captures")[1];
     expect(second[1]).toMatchObject({ x: 300, y: 300, width: 400, height: 200, name: "Tour · step 3" });
     const attachC = posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)!;
-    expect(attachC[1]).toEqual({ capture_id: cid(2), hotspot: null, frame: { width: 1200, height: 800 } });
+    expect(attachC[1]).toEqual({ capture_id: cid(2), hotspot: null, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ phase: "finished", label: "All steps visited", remaining: 0, canCapture: false });
     // Done: the bar closed, the key given back, the window restored, the done row, the builder reloaded.
     const gets = vi.mocked(api.get).mock.calls.length;
@@ -413,7 +439,7 @@ describe("the guided capture", () => {
     expect(invoked("capture_bar_close").length).toBe(1);
     expect(invoked("capture_hotkeys_stop").length).toBe(1);
     expect(shell.windowCalls).toEqual(["minimize", "unminimize", "setFocus"]);
-    expect(doneRow()).toEqual({ event: "done", captured: 2, skipped: 0, captures: 2, by_click: 0, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 2, skipped: 0, captures: 2, by_click: 0, by_typing: 0 });
     expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThan(gets);
     expect(status()).toBe("Captured 2 steps.");
     expect(q("[data-capture-line]")).toBeNull();
@@ -436,7 +462,7 @@ describe("the guided capture", () => {
     expect(lastTold()).toMatchObject({ phase: "ready", canCapture: true, message: "No window is under the pointer: point at the window and click, or press Shift+F8." });
     await fire("capture:step-key", { x: 150, y: 150 });
     const attach = posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)!;
-    expect(attach[1]).toEqual({ capture_id: cid(1), hotspot: { x: 0, y: 20, width: 160, height: 60 } });
+    expect(attach[1]).toEqual({ capture_id: cid(1), hotspot: { x: 0, y: 20, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 3 of 3", message: null });
     // A still the server refuses: the same way to the bar, cleared by the next payload (a skip here).
     stillFailure = new Error("The grab timed out.");
@@ -448,12 +474,12 @@ describe("the guided capture", () => {
     // travels with it, R7) and no hotspot. (The failed grab above took the second still id.)
     await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "F8", shiftKey: true, bubbles: true, cancelable: true })); await new Promise((r) => setTimeout(r, 30)); });
     const attachC = posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)!;
-    expect(attachC[1]).toEqual({ capture_id: cid(3), hotspot: null, frame: { width: 1200, height: 800 } });
+    expect(attachC[1]).toEqual({ capture_id: cid(3), hotspot: null, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ phase: "finished", message: null });
     await act(async () => { q("[data-capture-done]")!.click(); });
     await settle();
     // B was skipped and then captured after Back: not skipped (F5) - two steps pictured, none skipped.
-    expect(doneRow()).toEqual({ event: "done", captured: 2, skipped: 0, captures: 2, by_click: 0, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 2, skipped: 0, captures: 2, by_click: 0, by_typing: 0 });
     expect(status()).toBe("Captured 2 steps.");
   });
 
@@ -464,14 +490,14 @@ describe("the guided capture", () => {
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
     expect(invoked("capture_windows").length).toBe(1);
     expect(posts().find(([p]) => p === "/api/captures")![1]).toEqual({ x: 100, y: 100, width: 1200, height: 800, cursor: true, kind: "window", name: "Tour · step 2" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
     expect(status()).toBe("Saved");
     expect(lastTold()).toMatchObject({ phase: "ready", label: "Step 3 of 3", clicks: true, message: null });
     // A right click on the dialog on top (300..700 x 300..500): its window, the hotspot in its pixels (clamped at the
     // left edge), and the run's frame - the first still's 1200 x 800 - for the server to draw the smaller still on (R7).
     await fire("capture:step-click", { x: 350, y: 350, button: "right" });
     expect(posts().filter(([p]) => p === "/api/captures")[1][1]).toMatchObject({ x: 300, y: 300, width: 400, height: 200, name: "Tour · step 3" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ phase: "finished", label: "All steps visited", clicks: true });
     // Every step visited: a click takes nothing more; a payload that is no click is ignored.
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
@@ -479,7 +505,7 @@ describe("the guided capture", () => {
     expect(posts().filter(([p]) => p === "/api/captures").length).toBe(2);
     await fire("capture:control", { action: "done" });
     await settle();
-    expect(doneRow()).toEqual({ event: "done", captured: 2, skipped: 0, captures: 2, by_click: 2, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 2, skipped: 0, captures: 2, by_click: 2, by_typing: 0 });
     expect(status()).toBe("Captured 2 steps.");
   });
 
@@ -512,8 +538,8 @@ describe("the guided capture", () => {
     // The first lands: A then B, in click order, each with its own still and hotspot; the bar back to Capture at step 3.
     await act(async () => { openFirst(); await new Promise((r) => setTimeout(r, 60)); });
     expect(attaches()).toEqual([A, B]);
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${A}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${A}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ phase: "ready", label: "Step 3 of 3", canCapture: true, message: null });
     expect(status()).toBe("Saved");
     // Step C by the key: the run ends; the counts say three landed, two by click.
@@ -521,7 +547,7 @@ describe("the guided capture", () => {
     expect(lastTold()).toMatchObject({ phase: "finished" });
     await fire("capture:control", { action: "done" });
     await settle();
-    expect(doneRow()).toEqual({ event: "done", captured: 3, skipped: 0, captures: 3, by_click: 2, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 3, skipped: 0, captures: 3, by_click: 2, by_typing: 0 });
     expect(status()).toBe("Captured 3 steps.");
   });
 
@@ -644,11 +670,11 @@ describe("the guided capture", () => {
     // On it - any application there: the monitor's still, the hotspot round the click; the line gone.
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
     expect(posts().find(([p]) => p === "/api/captures")![1]).toEqual({ x: 0, y: 0, width: 1920, height: 1080, cursor: true, kind: "screen", name: "Tour · step 2" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 820, y: 670, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 820, y: 670, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 3 of 3", message: null });
     // The key is never "outside": Shift+F8 with the pointer off the monitor takes the monitor's still, with no hotspot.
     await fire("capture:step-key", { x: 2500, y: 500 });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: null });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: null, marker: "beacon" });
   });
 
   it("a run that starts on a small window converges on the larger one: the larger still keeps its size and becomes the frame (F7)", async () => {
@@ -656,13 +682,13 @@ describe("the guided capture", () => {
     await openEveryAndStart();
     // Step A: the dialog (400 x 200) - the first still, the frame for now.
     await fire("capture:step-click", { x: 350, y: 350, button: "left" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${A}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 0, y: 20, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${A}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 0, y: 20, width: 160, height: 60 }, marker: "beacon" });
     // Step B: Spoon (1200 x 800), larger than the frame: attached at its own size, no frame sent, and the frame from here on.
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
     // Step C: the dialog again, which fits Spoon's frame: drawn on it.
     await fire("capture:step-click", { x: 350, y: 350, button: "right" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(3), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(3), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ phase: "finished" });
   });
 
@@ -680,7 +706,7 @@ describe("the guided capture", () => {
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
     await fire("capture:control", { action: "done" });
     await settle();
-    expect(doneRow()).toEqual({ event: "done", captured: 1, skipped: 1, captures: 1, by_click: 1, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 1, skipped: 1, captures: 1, by_click: 1, by_typing: 0 });
     expect(status()).toBe("Captured 1 step, skipped 1.");
   });
 
@@ -702,12 +728,12 @@ describe("the guided capture", () => {
     // Inside: the region's still, the hotspot round the point in the region's pixels - and the line is gone.
     await fire("capture:step-click", { x: 100, y: 100, button: "left" });
     expect(posts().find(([p]) => p === "/api/captures")![1]).toEqual({ x: 10, y: 20, width: 300, height: 200, cursor: true, kind: "region", name: "Tour · step 2" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 10, y: 50, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 10, y: 50, width: 160, height: 60 }, marker: "beacon" });
     expect(shell.told.every((t) => (t as { message: string | null }).message !== "Click inside the frame to capture this step." || (t as { phase: string }).phase === "ready")).toBe(true);
     expect(lastTold()).toMatchObject({ label: "Step 3 of 3", message: null });
     // A key press is never "outside": the pointer outside the frame gives no hotspot, as before.
     await fire("capture:step-key", { x: 500, y: 100 });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: null });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(2), hotspot: null, marker: "beacon" });
   });
 
   it("the tick off is the one key press per step: no hook asked for, no click listened to, the row and the bar say so (W2b)", async () => {
@@ -745,7 +771,7 @@ describe("the guided capture", () => {
     expect(q("[data-capture-line]")!.textContent).toContain("Click to capture · Shift+F8 captures without a click");
     // A click is a step, and after it lands the line still stands on the bar and the builder.
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 3 of 3", message: keyTaken, clicks: true });
     expect(q("[data-capture-message]")!.textContent).toBe(keyTaken);
     // The start row says ", on click" from what is LIVE (n-2): here the clicks are.
@@ -882,7 +908,7 @@ describe("the guided capture", () => {
     expect(q("[data-capture-next]")!.textContent).toBe("Skip");
     // The first click: B's still and hotspot, and the bar STAYS on step 2 - with one still landed, the button reads Next.
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ phase: "ready", label: "Step 2 of 3", canCapture: true, stillsThisStep: 1, message: null });
     expect(q("[data-capture-label]")!.textContent).toBe("Step 2 of 3");
     expect(q("[data-capture-next]")!.textContent).toBe("Next");
@@ -891,7 +917,7 @@ describe("the guided capture", () => {
     // last still stands - and the first, superseded within the run, leaves Captures once the later attach landed.
     await fire("capture:step-click", { x: 350, y: 350, button: "right" });
     expect(attaches()).toEqual([B, B]);
-    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[1][1]).toEqual({ capture_id: cid(2), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 } });
+    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[1][1]).toEqual({ capture_id: cid(2), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(server.steps.find((s) => s.id === B)!.source).toEqual({ capture_id: cid(2), annotated: false });
     expect(deleted()).toEqual([`/api/captures/${cid(1)}`]);
     expect(lastTold()).toMatchObject({ phase: "ready", label: "Step 2 of 3", stillsThisStep: 2 });
@@ -911,7 +937,7 @@ describe("the guided capture", () => {
     await fire("capture:control", { action: "next" });
     await fire("capture:control", { action: "done" });
     await settle();
-    expect(doneRow()).toEqual({ event: "done", captured: 1, skipped: 0, captures: 3, by_click: 3, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 1, skipped: 0, captures: 3, by_click: 3, by_typing: 0 });
     expect(status()).toBe("Captured 1 step.");
   });
 
@@ -943,7 +969,7 @@ describe("the guided capture", () => {
     await fire("capture:control", { action: "done" });
     await settle();
     // B got its picture after it was passed: not skipped; C was skipped by the page's key and never pictured.
-    expect(doneRow()).toEqual({ event: "done", captured: 1, skipped: 1, captures: 1, by_click: 1, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 1, skipped: 1, captures: 1, by_click: 1, by_typing: 0 });
     expect(status()).toBe("Captured 1 step, skipped 1.");
   });
 
@@ -979,7 +1005,7 @@ describe("the guided capture", () => {
     await tick(1);
     expect(posts().filter(([p]) => p === "/api/captures").length).toBe(1);
     await tick(50);
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ phase: "ready", label: "Step 2 of 3", stillsThisStep: 1 });
     // The key's whole point is "now": no wait.
     await act(async () => { shell.handlers["capture:step-key"]?.({ payload: { x: 900, y: 700 } }); await vi.advanceTimersByTimeAsync(0); });
@@ -1002,16 +1028,16 @@ describe("the guided capture", () => {
     // Spoon's, and the hotspot the step's last click, which lies in it.
     await fire("capture:step-typed", { x: 5, y: 5, window: SPOON });
     expect(posts().filter(([p]) => p === "/api/captures")[1][1]).toMatchObject({ x: 100, y: 100, width: 1200, height: 800, name: "Tour · step 2" });
-    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[1][1]).toEqual({ capture_id: cid(2), hotspot: { x: 720, y: 570, width: 160, height: 60 } });
+    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[1][1]).toEqual({ capture_id: cid(2), hotspot: { x: 720, y: 570, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 2 of 3", stillsThisStep: 2, message: null });
     // Typed into the dialog on top with the pointer on it: the still is the DIALOG's (not the window under the last click),
     // and the last click (900, 700) is not in that picture, so the hotspot is round the pointer.
     await fire("capture:step-typed", { x: 350, y: 350, window: DIALOG });
     expect(posts().filter(([p]) => p === "/api/captures")[2][1]).toMatchObject({ x: 300, y: 300, width: 400, height: 200 });
-    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[2][1]).toEqual({ capture_id: cid(3), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 } });
+    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[2][1]).toEqual({ capture_id: cid(3), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 }, marker: "beacon" });
     // Typed into the dialog with the pointer off it and the last click off it: the still, with no hotspot.
     await fire("capture:step-typed", { x: 5, y: 5, window: DIALOG });
-    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[3][1]).toEqual({ capture_id: cid(4), hotspot: null, frame: { width: 1200, height: 800 } });
+    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[3][1]).toEqual({ capture_id: cid(4), hotspot: null, frame: { width: 1200, height: 800 }, marker: "beacon" });
     // No foreground window (null): in Window kind no still, the no-window refusal on the bar and the builder's line.
     await fire("capture:step-typed", { x: 900, y: 700, window: null });
     expect(posts().filter(([p]) => p === "/api/captures").length).toBe(4);
@@ -1021,11 +1047,11 @@ describe("the guided capture", () => {
     await fire("capture:step-next", null);
     await settle(1000);
     await fire("capture:step-typed", { x: 350, y: 350, window: DIALOG });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(5), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)![1]).toEqual({ capture_id: cid(5), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 3 of 3", stillsThisStep: 1, message: null });
     await fire("capture:control", { action: "done" });
     await settle();
-    expect(doneRow()).toEqual({ event: "done", captured: 2, skipped: 0, captures: 5, by_click: 1, by_typing: 4 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 2, skipped: 0, captures: 5, by_click: 1, by_typing: 4 });
     expect(status()).toBe("Captured 2 steps.");
     // Capture mode: the click moved the session on, so a typed pause has no click point - the pointer when it is in the
     // picture. (Every step this time: all three have pictures after the first run, so the run starts at step 1.)
@@ -1035,11 +1061,11 @@ describe("the guided capture", () => {
     await fire("capture:step-click", { x: 900, y: 700, button: "left" });
     expect(lastTold()).toMatchObject({ label: "Step 2 of 3" });
     await fire("capture:step-typed", { x: 350, y: 350, window: DIALOG });
-    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`).pop()![1]).toEqual({ capture_id: cid(7), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 } });
+    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`).pop()![1]).toEqual({ capture_id: cid(7), hotspot: { x: 0, y: 20, width: 160, height: 60 }, frame: { width: 1200, height: 800 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 3 of 3" });
     await fire("capture:control", { action: "done" });
     await settle();
-    expect(doneRow()).toEqual({ event: "done", captured: 2, skipped: 0, captures: 2, by_click: 1, by_typing: 1 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 2, skipped: 0, captures: 2, by_click: 1, by_typing: 1 });
   });
 
   it("a typed pause that fires within a second of Next belongs to the step just left and is ignored (G2); a second on, it is a still", async () => {
@@ -1088,11 +1114,11 @@ describe("the guided capture", () => {
     // Typed into a window that meets the frame: the region's still; the hotspot round the pointer, which is in it; the line gone.
     await fire("capture:step-typed", { x: 100, y: 100, window: { x: 200, y: 100, width: 300, height: 300 } });
     expect(posts().find(([p]) => p === "/api/captures")![1]).toEqual({ x: 10, y: 20, width: 300, height: 200, cursor: true, kind: "region", name: "Tour · step 2" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 10, y: 50, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 10, y: 50, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 2 of 3", stillsThisStep: 1, message: null });
     // No foreground window known: the still as before, by the pointer rule - the pointer off the frame gives no hotspot.
     await fire("capture:step-typed", { x: 500, y: 100, window: null });
-    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[1][1]).toEqual({ capture_id: cid(2), hotspot: null });
+    expect(posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)[1][1]).toEqual({ capture_id: cid(2), hotspot: null, marker: "beacon" });
     expect(lastTold()).toMatchObject({ stillsThisStep: 2, message: null });
   });
 
@@ -1109,7 +1135,7 @@ describe("the guided capture", () => {
     // A window that straddles the edge meets the monitor: the monitor's still, the hotspot round the pointer on it.
     await fire("capture:step-typed", { x: 900, y: 700, window: { x: 1800, y: 100, width: 300, height: 300 } });
     expect(posts().find(([p]) => p === "/api/captures")![1]).toEqual({ x: 0, y: 0, width: 1920, height: 1080, cursor: true, kind: "screen", name: "Tour · step 2" });
-    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 820, y: 670, width: 160, height: 60 } });
+    expect(posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${B}/picture`)![1]).toEqual({ capture_id: cid(1), hotspot: { x: 820, y: 670, width: 160, height: 60 }, marker: "beacon" });
     expect(lastTold()).toMatchObject({ label: "Step 2 of 3", stillsThisStep: 1, message: null });
   });
 
@@ -1194,7 +1220,7 @@ describe("the guided capture", () => {
     expect(deleted()).toEqual([`/api/captures/${cid(1)}`]);
     await fire("capture:control", { action: "done" });
     await settle();
-    expect(doneRow()).toEqual({ event: "done", captured: 1, skipped: 0, captures: 2, by_click: 1, by_typing: 0 });
+    expect(doneRow()).toEqual({ event: "done", mode: "steps", captured: 1, skipped: 0, captures: 2, by_click: 1, by_typing: 0 });
     expect(status()).toBe("Captured 1 step.");
   });
 
@@ -1241,6 +1267,204 @@ describe("the guided capture", () => {
     ]);
     expect(invoked("capture_windows")).toEqual([]);
     const attachC = posts().find(([p]) => p === `/api/walkthroughs/${WID}/steps/${C}/picture`)!;
-    expect(attachC[1]).toEqual({ capture_id: cid(2), hotspot: { x: 10, y: 50, width: 160, height: 60 } });
+    expect(attachC[1]).toEqual({ capture_id: cid(2), hotspot: { x: 10, y: 50, width: 160, height: 60 }, marker: "beacon" });
+  });
+});
+
+describe("Record (F1): every capture makes a step; Take a still now (F2)", () => {
+  const puts = () => vi.mocked(api.put).mock.calls;
+  /** The ids the faked server gives the steps it makes, in order. */
+  const madeStep = (n: number) => `0000000000${String(n).padStart(2, "0")}`;
+  /** The add-step bodies posted, in order. */
+  const adds = () => posts().filter(([p]) => p === `/api/walkthroughs/${WID}/steps`).map(([, b]) => b);
+  const shiftF8 = () => act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "F8", shiftKey: true, bubbles: true, cancelable: true })); await new Promise((r) => setTimeout(r, 30)); });
+
+  async function openRecordAndStart() {
+    await act(async () => { q("[data-record]")!.click(); });
+    const dialog = q("[role=dialog]")!;
+    expect(dialog.textContent).toContain("Record");
+    // The same dialog as Capture steps - the kind, cursor, settle and typing controls - without "which steps" and the move-on radio.
+    expect(q("[data-capture-which]")).toBeNull();
+    expect(q("[data-capture-advance-group]")).toBeNull();
+    expect(q("[data-capture-clicks]")).not.toBeNull();
+    expect(q("[data-capture-settle]")).not.toBeNull();
+    expect(q("[data-capture-typing]")).not.toBeNull();
+    expect(q("[data-capture-cursor]")).not.toBeNull();
+    expect(q("[data-capture-kind='window']")).not.toBeNull();
+    await act(async () => { (q("[data-capture-steps-start]") as HTMLButtonElement).click(); });
+    await settle(60);
+  }
+
+  it("Record… opens the dialog without the which-steps and move-on choices; Start saves first, writes the record row, opens the bar reading Recording · 0 steps with Undo greyed", async () => {
+    await mount();
+    expect(q("[data-record]")).not.toBeNull();
+    await act(async () => { setValue(document.querySelector("[data-step-text]") as HTMLTextAreaElement, "Edited"); });
+    await openRecordAndStart();
+    expect(vi.mocked(api.put)).toHaveBeenCalledTimes(1);
+    expect(startRow()).toEqual({ event: "start", mode: "record", kind: "window", cursor: true, clicks: true, typing: true, settle_ms: 0 });
+    expect(invoked("capture_bar_open")[0].args).toMatchObject({ mode: "steps", width: 760, height: 112 });
+    expect(invoked("capture_hotkeys_start")[0].args).toEqual({ keys: "steps", clicks: true, typing: true });
+    expect(shell.windowCalls).toEqual(["minimize"]);
+    expect(lastTold()).toMatchObject({
+      mode: "steps", phase: "ready", record: true, label: "Recording · 0 steps", instruction: "", remaining: 0, canBack: false, canCapture: true, canUndo: false,
+      clicks: true, typing: true, stillsThisStep: 0, lastStill: null, message: null,
+    });
+    expect(q("[data-capture-label]")!.textContent).toBe("Recording · 0 steps");
+    expect((q("[data-capture-undo]") as HTMLButtonElement).disabled).toBe(true);
+    expect(q("[data-capture-next]")).toBeNull();
+    expect(q("[data-record]")!.hasAttribute("disabled")).toBe(true);
+    expect(q("[data-capture-steps]")!.hasAttribute("disabled")).toBe(true);
+    expect(posts().filter(([p]) => p === "/api/captures")).toEqual([]);
+  });
+
+  it("a click makes a step at the end - the still, then the add-step with the hotspot round the point, the button as the click kind, a beacon and the text; a right click, a typed pause and the key likewise; Undo takes the last back; Done reloads at the first new step", async () => {
+    await mount();
+    await openRecordAndStart();
+    // A left click on Spoon: the still is named for the step it becomes (step 4 of a walkthrough of 3), then the step is appended.
+    await fire("capture:step-click", { x: 900, y: 700, button: "left" });
+    expect(invoked("capture_windows").length).toBe(1);
+    expect(posts().find(([p]) => p === "/api/captures")![1]).toEqual({ x: 100, y: 100, width: 1200, height: 800, cursor: true, kind: "window", name: "Tour · step 4" });
+    expect(adds()[0]).toEqual({ capture_id: cid(1), hotspot: { x: 720, y: 570, width: 160, height: 60 }, click: "left", marker: "beacon", text: "Click here", instruction: "", chapter: "" });
+    expect(attaches()).toEqual([]);
+    expect(server.steps.map((s) => s.id)).toEqual([A, B, C, madeStep(1)]);
+    expect(q(`[data-step="${madeStep(1)}"] img`)).not.toBeNull();
+    expect(status()).toBe("Saved");
+    expect(lastTold()).toMatchObject({ phase: "ready", record: true, label: "Recording · 1 step", canUndo: true, message: null, lastStill: { step: 4, thumb: "data:image/jpeg;base64,thumb" } });
+    expect(q("[data-capture-label]")!.textContent).toBe("Recording · 1 step");
+    // A right click on the dialog on top: its window drawn on the run's frame (W2b), the click kind right, "Right-click here".
+    await fire("capture:step-click", { x: 350, y: 350, button: "right" });
+    expect(posts().filter(([p]) => p === "/api/captures")[1][1]).toMatchObject({ x: 300, y: 300, width: 400, height: 200, name: "Tour · step 5" });
+    expect(adds()[1]).toEqual({ capture_id: cid(2), hotspot: { x: 0, y: 20, width: 160, height: 60 }, click: "right", marker: "beacon", text: "Right-click here", instruction: "", chapter: "", frame: { width: 1200, height: 800 } });
+    // A typed pause: a step of the window typed into, the hotspot round the pointer (no "last click" in record mode), no click, no text.
+    await fire("capture:step-typed", { x: 900, y: 700, window: SPOON });
+    expect(posts().filter(([p]) => p === "/api/captures")[2][1]).toMatchObject({ x: 100, y: 100, width: 1200, height: 800, name: "Tour · step 6" });
+    expect(adds()[2]).toEqual({ capture_id: cid(3), hotspot: { x: 720, y: 570, width: 160, height: 60 }, click: "none", marker: "beacon", text: "", instruction: "", chapter: "" });
+    // The page's own Shift+F8: no pointer, so the front-most window (the dialog, on the frame), no hotspot, no click, no text.
+    await shiftF8();
+    expect(adds()[3]).toEqual({ capture_id: cid(4), hotspot: null, click: "none", marker: "beacon", text: "", instruction: "", chapter: "", frame: { width: 1200, height: 800 } });
+    expect(lastTold()).toMatchObject({ phase: "ready", label: "Recording · 4 steps", canUndo: true, lastStill: { step: 7 } });
+    expect(server.steps.length).toBe(7);
+    // Undo: the LAST step made this run goes, through the whole-document save at the server's revision (the still it was made from is kept).
+    const revision = server.revision;
+    await fire("capture:control", { action: "undo" });
+    const put = puts().at(-1)!;
+    expect(put[0]).toBe(`/api/walkthroughs/${WID}`);
+    expect((put[1] as { revision: number }).revision).toBe(revision);
+    expect((put[1] as { steps: Step[] }).steps.map((s) => s.id)).toEqual([A, B, C, madeStep(1), madeStep(2), madeStep(3)]);
+    expect(server.steps.map((s) => s.id)).toEqual([A, B, C, madeStep(1), madeStep(2), madeStep(3)]);
+    expect(deleted()).toEqual([]);
+    expect(lastTold()).toMatchObject({ phase: "ready", label: "Recording · 3 steps", canUndo: true, message: null });
+    expect(q(`[data-step="${madeStep(4)}"]`)).toBeNull();
+    expect(status()).toBe("Saved");
+    // The builder's own Undo button does the same.
+    await act(async () => { q("[data-capture-undo]")!.click(); });
+    await settle();
+    expect(server.steps.map((s) => s.id)).toEqual([A, B, C, madeStep(1), madeStep(2)]);
+    expect(lastTold()).toMatchObject({ label: "Recording · 2 steps" });
+    // Done: the row says what was recorded - the steps kept, by who made them - and the builder reloads at the first new step.
+    const gets = vi.mocked(api.get).mock.calls.length;
+    await fire("capture:control", { action: "done" });
+    await settle();
+    expect(doneRow()).toEqual({ event: "done", mode: "record", captured: 2, skipped: 0, captures: 4, by_click: 2, by_typing: 0 });
+    expect(invoked("capture_bar_close").length).toBe(1);
+    expect(invoked("capture_hotkeys_stop").length).toBe(1);
+    expect(shell.windowCalls).toEqual(["minimize", "unminimize", "setFocus"]);
+    expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThan(gets);
+    expect(status()).toBe("Recorded 2 steps.");
+    expect(q(`[data-step="${madeStep(1)}"]`)!.getAttribute("aria-selected")).toBe("true");
+    expect(q("[data-capture-line]")).toBeNull();
+    expect(Object.keys(shell.handlers)).toEqual([]);
+    expect(q("[data-record]")!.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("the W2d rules hold in record mode: a click outside a region's frame is no step, a third capture in flight is too fast, a still that fails makes no step and says so, and a walkthrough at the cap takes no more", async () => {
+    hoisted.region = { x: 10, y: 20, width: 300, height: 200, monitor: 0, window_title: null };
+    await mount();
+    await act(async () => { q("[data-record]")!.click(); });
+    await act(async () => { (q("[data-capture-kind='region']") as HTMLButtonElement).click(); });
+    await act(async () => { (q("[data-capture-steps-start]") as HTMLButtonElement).click(); });
+    await settle(60);
+    expect(startRow()).toEqual({ event: "start", mode: "record", kind: "region", cursor: true, clicks: true, typing: true, settle_ms: 0 });
+    await fire("capture:step-click", { x: 900, y: 700, button: "left" });
+    expect(adds()).toEqual([]);
+    expect(lastTold()).toMatchObject({ record: true, label: "Recording · 0 steps", message: "Click inside the frame to capture this step." });
+    // Inside the frame: the region's still, the hotspot in its pixels.
+    await fire("capture:step-click", { x: 100, y: 100, button: "left" });
+    expect(adds()[0]).toEqual({ capture_id: cid(1), hotspot: { x: 10, y: 50, width: 160, height: 60 }, click: "left", marker: "beacon", text: "Click here", instruction: "", chapter: "" });
+    // Two in flight, a third too fast: the clicks are kept in order, the third claims nothing.
+    let openFirst!: () => void, openSecond!: () => void;
+    stillGates = [new Promise<void>((r) => { openFirst = r; }), new Promise<void>((r) => { openSecond = r; })];
+    await fire("capture:step-click", { x: 100, y: 100, button: "left" });
+    await fire("capture:step-click", { x: 120, y: 120, button: "right" });
+    expect(lastTold()).toMatchObject({ phase: "capturing", canCapture: false, canUndo: false });
+    await fire("capture:step-click", { x: 100, y: 100, button: "left" });
+    expect(posts().filter(([p]) => p === "/api/captures").length).toBe(3);
+    expect(lastTold()).toMatchObject({ phase: "capturing", message: "Too fast: wait for the still." });
+    await act(async () => { openSecond(); await new Promise((r) => setTimeout(r, 40)); });
+    expect(adds().length).toBe(1);
+    await act(async () => { openFirst(); await new Promise((r) => setTimeout(r, 60)); });
+    expect(adds().map((b) => (b as { click: string }).click)).toEqual(["left", "left", "right"]);
+    expect(server.steps.map((s) => s.id)).toEqual([A, B, C, madeStep(1), madeStep(2), madeStep(3)]);
+    expect(lastTold()).toMatchObject({ phase: "ready", label: "Recording · 3 steps", canUndo: true, message: null });
+    // A still that fails: no step, the line on the bar and the builder, the count unchanged.
+    stillFailure = new Error("The grab timed out.");
+    await fire("capture:step-click", { x: 100, y: 100, button: "left" });
+    expect(adds().length).toBe(3);
+    expect(lastTold()).toMatchObject({ phase: "ready", label: "Recording · 3 steps", message: "The step could not be captured: The grab timed out." });
+    expect(q("[data-capture-message]")!.textContent).toBe("The step could not be captured: The grab timed out.");
+    await fire("capture:control", { action: "done" });
+    await settle();
+    expect(doneRow()).toEqual({ event: "done", mode: "record", captured: 3, skipped: 0, captures: 3, by_click: 3, by_typing: 0 });
+    expect(status()).toBe("Recorded 3 steps.");
+  });
+
+  it("an empty walkthrough's card offers Record… too, and a Record on a walkthrough with steps appends after the last", async () => {
+    server = record({ steps: [] });
+    await mount();
+    expect(document.querySelectorAll("[data-record]").length).toBe(2);
+    expect(q("[data-empty-placeholder]")).not.toBeNull();
+    expect(q("[data-capture-steps]")!.hasAttribute("disabled")).toBe(true);
+    await act(async () => { (document.querySelectorAll("[data-record]")[1] as HTMLButtonElement).click(); });
+    await act(async () => { (q("[data-capture-steps-start]") as HTMLButtonElement).click(); });
+    await settle(60);
+    expect(lastTold()).toMatchObject({ record: true, label: "Recording · 0 steps" });
+    await fire("capture:step-click", { x: 900, y: 700, button: "left" });
+    expect(posts().find(([p]) => p === "/api/captures")![1]).toMatchObject({ name: "Tour · step 1" });
+    expect(server.steps.map((s) => s.id)).toEqual([madeStep(1)]);
+    await fire("capture:control", { action: "done" });
+    await settle();
+    expect(status()).toBe("Recorded 1 step.");
+    expect(q("[data-empty-placeholder]")).toBeNull();
+    expect(q(`[data-step="${madeStep(1)}"]`)!.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("F2: Add step… offers Take a still now…: the Capture dialog's still tab from the builder, and the still becomes a step after the selected one, with no hotspot", async () => {
+    await mount();
+    await act(async () => { q("[data-add-step]")!.click(); });
+    await settle();
+    expect(q("[role=dialog]")!.textContent).toContain("Add step");
+    await act(async () => { q("[data-take-still]")!.click(); });
+    await settle();
+    const dialog = q("[role=dialog]")!;
+    expect(dialog.textContent).toContain("Take a still");
+    expect(dialog.textContent).not.toContain("Record screen");
+    expect(dialog.textContent).toContain("Full screen");
+    const capture = [...dialog.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Capture")!;
+    await act(async () => { capture.click(); });
+    await settle(60);
+    expect(hoisted.takeStill).toHaveBeenCalledWith({ kind: "region", cursor: true, delaySeconds: 0, monitor: null });
+    expect(adds()).toEqual([{ capture_id: "cap000000077", after: A }]);
+    expect(server.steps.map((s) => s.id)).toEqual([A, madeStep(1), B, C]);
+    expect(q(`[data-step="${madeStep(1)}"]`)!.getAttribute("aria-selected")).toBe("true");
+    expect(q("[data-hotspot-line]")!.textContent).toContain("No hotspot: press Add hotspot");
+    expect(q("[role=dialog]")).toBeNull();
+    expect(status()).toBe("Saved");
+    // A still given up (Escape on the overlay): nothing added.
+    hoisted.takeStill.mockResolvedValueOnce(null);
+    await act(async () => { q("[data-add-step]")!.click(); });
+    await act(async () => { q("[data-take-still]")!.click(); });
+    await act(async () => { [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Capture")!.click(); });
+    await settle(60);
+    expect(adds().length).toBe(1);
   });
 });

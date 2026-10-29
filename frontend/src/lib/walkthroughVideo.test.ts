@@ -10,7 +10,8 @@ import {
 } from "./walkthrough";
 
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 400, height: 300, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 400, height: 300, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null,
+  click: "left", marker: "box", ...over,
 });
 const A = "aaaaaaaaaaaa", B = "bbbbbbbbbbbb", C = "cccccccccccc";
 

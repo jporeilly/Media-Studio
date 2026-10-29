@@ -24,6 +24,7 @@ vi.mock("../api/client", async (importOriginal) => {
 const WID = "abc123abc123";
 const step = (id: string): Step => ({
   id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "",
+  click: "left", marker: "box",
   source: { course: "demo", slug: "01-first", image: null, alt: "", launcher: null, capture_id: "cap000000001", annotated: false },
   anchor: { key: "s :: one.", ordinal: 1 },
 });

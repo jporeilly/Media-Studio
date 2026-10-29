@@ -35,7 +35,9 @@ the whole app suite looks and feels the same.
   (annotated or not) with a hotspot the viewer clicks, a tooltip beside it or a centred card, a
   chapter, and the instruction the learner follows; a builder makes one and a full-window player
   presents it, in the browser edition too, and the walkthrough reads as a transcript - the script
-  of the narrated video to come. Or import a course workshop - or several of a course, a whole
+  of the narrated video to come. Record one from scratch in the desktop app: click through the
+  application and every click, typed pause or Shift+F8 becomes a step with its still and a
+  beacon round the point. Or import a course workshop - or several of a course, a whole
   section or the whole course, with the chapters you do not want left out: each workshop's
   sections become the chapters, its numbered steps the steps with their instructions and the
   guide's screenshots, and the desktop app captures the rest as you perform them - every click

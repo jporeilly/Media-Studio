@@ -74,23 +74,36 @@
  *   Closing the window while the bar is up is allowed: the shell closes the bar, removes the hooks and gives the
  *   keys back with the window (`capture::shutdown`); the pictures already attached are kept, and a still whose
  *   attach has not landed may not be attached - the page that would attach it goes with the window.
+ * - **Record (F1, `mode: "record"`).** The same bar, keys, hooks, settle, chain and frame rules - but no step is
+ *   claimed: every capture MAKES a step appended after the last (`POST /api/walkthroughs/{wid}/steps` with the still,
+ *   the hotspot round the point, the click kind by the button pressed - "none" for the key, the bar's button and a
+ *   typed pause - `marker: "beacon"` and "Click here" / "Right-click here" / "" as the text), the server's record is
+ *   the builder's baseline as before, and the session keeps the steps made this run (`made`). The bar reads
+ *   "Recording · N steps" with Undo where Next was: Undo takes the LAST step made back through the existing
+ *   step-removal path - the whole-document save with the step gone, at the revision the server last answered
+ *   (`latest`) - and Done writes "recorded: N steps (M by click, T typed)". A typed pause's hotspot is round the
+ *   pointer (there is no "last click" in record mode). The walkthrough's cap holds: a capture past it is refused
+ *   with the cap's line, and a Record on a full walkthrough does not start.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "../../api/client";
 import { type MonitorInfo, type Region, type WindowInfo, barPlacement, monitorFor, shellBridge } from "../../lib/capture";
 import { type Bridge, forgetFrozen, pickRegion, useRecorderState } from "../../lib/captureShared";
 import {
-  type BarPayload, type CaptureBy, type GuidedOptions, type GuidedPhase, type GuidedSession, type LastStill, type MissedStep, type Point, BAR_MODE,
+  type BarPayload, type CaptureBy, type ClickButton, type GuidedOptions, type GuidedPhase, type GuidedSession, type LastStill, type MissedStep, type Point, BAR_MODE,
   BAR_NOT_HIDDEN, BAR_NOT_OPENED, CONTROL_EVENT, KEYS_MODE, MAX_IN_FLIGHT, NEEDS_DESKTOP, NOTHING_TO_CAPTURE, RECORDING_IN_PROGRESS, STATE_EVENT,
   STEPS_BAR_HEIGHT, STEPS_BAR_WIDTH, STEP_CLICK_EVENT, STEP_KEY_EVENT, STEP_NEXT_EVENT, STEP_TYPED_EVENT, TOO_FAST,
   type Rect,
-  advance, atEnd, barMessage, barPayload, captureName, captureTarget, capturedSteps, claimStep, clickArea, clickOf, clickRule, currentId, delay,
-  frameFor, guidedHotkey, hotspotOf, keysLines, keysUpOf, missedLine, nextHotkey, outsideLine, pointerOf, recordCapture, sessionOf, stepBack,
-  typedAfterNext, typedArea, typedHotspotPoint, typedOf, typedOutsideLine, typedRule,
+  advance, atEnd, barMessage, barPayload, captureName, captureTarget, capturedSteps, claimStep, clickArea, clickKindOf, clickOf, clickRule, currentId,
+  delay, frameFor, guidedHotkey, hotspotOf, keysLines, keysUpOf, madeCounts, missedLine, nextHotkey, outsideLine, pointerOf, recordCapture, recordMade,
+  recordedText, sessionOf, stepBack, typedAfterNext, typedArea, typedHotspotPoint, typedOf, typedOutsideLine, typedRule, undoMade,
 } from "../../lib/guided";
 import type { Size } from "../../lib/annotate";
 import { thumbnailOf } from "../../lib/thumbnail";
-import { type Walkthrough, type WalkthroughDocument, hasPicture, stepImageUrl, stepIndex, stepsToCapture } from "../../lib/walkthrough";
+import {
+  type Walkthrough, type WalkthroughDocument, MAX_STEPS, TOO_MANY_STEPS_MESSAGE, deleteStep, documentOf, hasPicture, putBody, stepImageUrl, stepIndex,
+  stepsToCapture,
+} from "../../lib/walkthrough";
 
 export type { CaptureBy } from "../../lib/guided";
 
@@ -110,11 +123,16 @@ export interface GuidedCapture {
   message: string | null;
   bar: BarPayload | null;
   start: (options: GuidedOptions) => Promise<boolean>;
-  /** A capture: the pointer (the hotspot for a key or a click), who asked, and for a typed pause the window typed into (F1). */
-  capture: (pointer: Point | null, by?: CaptureBy, window?: Rect | null) => Promise<void>;
+  /**
+   * A capture: the pointer (the hotspot for a key or a click), who asked, for a typed pause the window typed into (F1),
+   * and for a click the button pressed (the recorded step's click kind, F3).
+   */
+  capture: (pointer: Point | null, by?: CaptureBy, window?: Rect | null, button?: ClickButton) => Promise<void>;
   /** Next (R1): move on; a step that got no picture this run is skipped by it. The bar's button, Shift+F9, the builder's line. */
   next: () => void;
   back: () => void;
+  /** Record mode (F1): the LAST step made this run is taken back - the whole-document save with it gone. The bar's button, the builder's line. */
+  undo: () => Promise<void>;
   done: () => Promise<void>;
   dismiss: () => void;
 }
@@ -177,6 +195,8 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
   const sessionToken = useRef(0);
   /** The transient line of the last payload (F5): the thumbnail's follow-up payload carries it rather than wiping it early. */
   const lastTransient = useRef<string | null>(null);
+  /** The record as the server last answered it this run (record mode, F1): what Undo's save is made from, at its revision. */
+  const latest = useRef<Walkthrough | null>(null);
   const minimised = useRef(false);
   const bridgeRef = useRef<Bridge | null>(null);
   const callbacks = useRef({ document, onAttached, onFinished });
@@ -244,7 +264,7 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
     tellBar(s, p, transient);
   }, [setPhaseBoth, tellBar]);
 
-  const capture = useCallback(async (pointer: Point | null, by: CaptureBy = "key", window: Rect | null = null) => {
+  const capture = useCallback(async (pointer: Point | null, by: CaptureBy = "key", window: Rect | null = null, button?: ClickButton) => {
     const opts = options.current;
     const bridge = bridgeRef.current;
     const doc = callbacks.current.document();
@@ -267,6 +287,59 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
       return;
     }
     if (inFlight.current >= MAX_IN_FLIGHT) { tellBar(s, phaseRef.current, TOO_FAST); return; }
+    if (opts.mode === "record") {
+      // Record (F1): no step is claimed - the capture MAKES one, appended after the last, through the add-step route
+      // with the still, the hotspot round the point, the click kind (F3), a beacon (F4) and the text to say what to
+      // do; the same grab, the same settle, the same chain and frame rules as a step's capture. The cap holds.
+      if (doc.steps.length + inFlight.current >= MAX_STEPS) { setMessage(redLine(TOO_MANY_STEPS_MESSAGE)); tellBar(s, phaseRef.current, TOO_MANY_STEPS_MESSAGE); return; }
+      inFlight.current += 1;
+      setPhaseBoth("capturing");
+      tellBar(s, "capturing");
+      const number = doc.steps.length + inFlight.current;
+      const grab = () => api.post<{ id: string; x: number; y: number; width: number; height: number }>("/api/captures", {
+        ...target.rect, cursor: opts.cursor, kind: opts.kind, name: captureName(doc.name, number),
+      });
+      const still = by === "click" && opts.settleMs > 0 ? delay(opts.settleMs).then(grab) : grab();
+      still.catch(() => { /* awaited in the chain, in its turn */ });
+      chain.current = chain.current.then(async () => {
+        try {
+          const taken = await still;
+          const rect = { x: taken.x, y: taken.y, width: taken.width, height: taken.height };
+          // A typed pause's hotspot is round the pointer when it is in the picture (no "last click" in record mode); a key's or a click's too.
+          const point = typed ? typedHotspotPoint(null, pointer, rect) : pointer;
+          const hotspot = hotspotOf(point, rect);
+          const placed = frameFor(opts.kind, frame.current, { width: taken.width, height: taken.height });
+          frame.current = placed.frame;
+          const click = clickKindOf(by, button);
+          const rec = await api.post<Walkthrough>(`/api/walkthroughs/${wid}/steps`, {
+            capture_id: taken.id, hotspot, click, marker: "beacon", text: recordedText(click), instruction: "", chapter: "",
+            ...(placed.send ? { frame: placed.send } : {}),
+          });
+          latest.current = rec;
+          const made = rec.steps[rec.steps.length - 1];
+          callbacks.current.onAttached(rec);
+          if (sessionRef.current && made) setSessionBoth(recordMade(sessionRef.current, made.id, by));
+          if (made) lastRect.current.set(made.id, rect);
+          setMessage(redLine(null));
+          settle(null);
+          const seq = ++thumbSeq.current;
+          const token = sessionToken.current;
+          if (made) {
+            void stepThumbnail(wid, made.id, rec.steps.length, rec.revision).then((thumb) => {
+              if (token !== sessionToken.current || seq !== thumbSeq.current || phaseRef.current === "idle") return;
+              lastStill.current = thumb;
+              tellBar(sessionRef.current, phaseRef.current, lastTransient.current);
+            });
+          }
+        } catch (e) {
+          // No step was made: the line on the bar and the builder, the count as it was.
+          const line = `The step could not be captured: ${errorMessage(e)}`;
+          setMessage(redLine(line));
+          settle(line);
+        }
+      });
+      return;
+    }
     // The step is claimed now - and the session moves on only in `capture` mode (R1): in `next` mode the step is
     // yours until Next, and the still lands on the id claimed here whatever Next does meanwhile. The still is taken
     // AT ONCE (a second grab may run beside the first, the screen being what must be caught at the click) and the
@@ -301,8 +374,9 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
         // The run's frame (Window kind): max width × max height so far; a still smaller on a side is drawn on it by the server.
         const placed = frameFor(opts.kind, frame.current, { width: taken.width, height: taken.height });
         frame.current = placed.frame;
+        // Capture steps sets "beacon" on the steps it pictures (F4).
         const rec = await api.post<Walkthrough>(`/api/walkthroughs/${wid}/steps/${claimed.id}/picture`, {
-          capture_id: taken.id, hotspot, ...(placed.send ? { frame: placed.send } : {}),
+          capture_id: taken.id, hotspot, ...(placed.send ? { frame: placed.send } : {}), marker: "beacon",
         });
         callbacks.current.onAttached(rec);
         if (sessionRef.current) setSessionBoth(recordCapture(sessionRef.current, claimed.id, by));
@@ -344,7 +418,7 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
     });
   }, [wid, setPhaseBoth, setSessionBoth, tellBar, settle, redLine]);
 
-  /** The shell's click hook (W2b): the same path as the key, under the click rule. */
+  /** The shell's click hook (W2b): the same path as the key, under the click rule; the button is the recorded step's click kind (F3). */
   const click = useCallback((payload: unknown) => {
     const c = clickOf(payload);
     const opts = options.current;
@@ -353,7 +427,7 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
       tellBar(sessionRef.current, phaseRef.current, outsideLine(opts.kind));
       return;
     }
-    void capture(c.point, "click");
+    void capture(c.point, "click", null, c.button);
   }, [capture, tellBar]);
 
   /**
@@ -400,6 +474,50 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
     tellBar(moved, "ready");
   }, [setPhaseBoth, setSessionBoth, tellBar]);
 
+  /**
+   * Undo (record mode, F1): the LAST step made this run leaves the walkthrough through the existing step-removal path -
+   * the whole-document save with the step gone, at the revision the server last answered (no route of its own; the
+   * still it was made from is kept in Captures, as the builder's Delete step keeps it). Waits while a still is in
+   * flight, as Back and Done do; the bar then shows the thumbnail of the step that is now the last one made.
+   */
+  const undo = useCallback(async () => {
+    const s = sessionRef.current;
+    const rec = latest.current;
+    if (!s || !s.record || phaseRef.current !== "ready" || inFlight.current > 0 || !rec) return;
+    const last = s.made[s.made.length - 1];
+    if (!last) return;
+    setPhaseBoth("capturing");
+    tellBar(s, "capturing");
+    try {
+      const next = await api.put<Walkthrough>(`/api/walkthroughs/${wid}`, putBody(deleteStep(documentOf(rec), last.id), rec.revision));
+      latest.current = next;
+      callbacks.current.onAttached(next);
+      const undone = undoMade(sessionRef.current ?? s);
+      setSessionBoth(undone);
+      lastRect.current.delete(last.id);
+      lastStill.current = null;
+      setMessage(redLine(null));
+      setPhaseBoth("ready");
+      tellBar(undone, "ready");
+      const kept = undone.made[undone.made.length - 1];
+      const number = kept ? stepIndex(documentOf(next), kept.id) + 1 : 0;
+      if (kept && number > 0) {
+        const seq = ++thumbSeq.current;
+        const token = sessionToken.current;
+        void stepThumbnail(wid, kept.id, number, next.revision).then((thumb) => {
+          if (token !== sessionToken.current || seq !== thumbSeq.current || phaseRef.current === "idle") return;
+          lastStill.current = thumb;
+          tellBar(sessionRef.current, phaseRef.current, lastTransient.current);
+        });
+      }
+    } catch (e) {
+      const line = `Could not undo the step: ${errorMessage(e)}`;
+      setMessage(redLine(line));
+      setPhaseBoth("ready");
+      tellBar(sessionRef.current, "ready", line);
+    }
+  }, [wid, redLine, setPhaseBoth, setSessionBoth, tellBar]);
+
   const done = useCallback(async () => {
     const s = sessionRef.current;
     if (phaseRef.current === "idle" || phaseRef.current === "capturing" || !s) return;
@@ -408,9 +526,12 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
     // list shows the step without one), or a key-taken / clicks-off line that speaks of a capture no longer running.
     await release();
     setMessage(null);
-    void api.post(`/api/walkthroughs/${wid}/guided-capture`, {
-      event: "done", captured: capturedSteps(s), skipped: s.skipped, captures: s.captured, by_click: s.byClick, by_typing: s.byTyping,
-    }).catch(() => {});
+    // The row: "done: …" for the steps, "recorded: N steps (M by click, T typed)" for a recording - the steps kept, by who made them (F1).
+    const counts = madeCounts(s);
+    void api.post(`/api/walkthroughs/${wid}/guided-capture`, s.record
+      ? { event: "done", mode: "record", captured: counts.steps, skipped: 0, captures: s.captured, by_click: counts.byClick, by_typing: counts.byTyping }
+      : { event: "done", mode: "steps", captured: capturedSteps(s), skipped: s.skipped, captures: s.captured, by_click: s.byClick, by_typing: s.byTyping },
+    ).catch(() => {});
     setSessionBoth(null);
     setBar(null);
     callbacks.current.onFinished(s);
@@ -423,8 +544,10 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
     if (phaseRef.current !== "idle") return false;
     const doc = callbacks.current.document();
     if (!doc) return false;
-    const ids = stepsToCapture(doc, opts.every);
-    if (ids.length === 0) { setMessage(NOTHING_TO_CAPTURE); return false; }
+    // Record (F1) visits no step: it makes them, after the last; a walkthrough at the cap takes no more.
+    const ids = opts.mode === "record" ? [] : stepsToCapture(doc, opts.every);
+    if (opts.mode === "steps" && ids.length === 0) { setMessage(NOTHING_TO_CAPTURE); return false; }
+    if (opts.mode === "record" && doc.steps.length >= MAX_STEPS) { setMessage(TOO_MANY_STEPS_MESSAGE); return false; }
     bridgeRef.current = bridge;
     options.current = opts;
     setMessage(null);
@@ -449,6 +572,7 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
       stillOf.current.clear();
       lastStill.current = null;
       lastTransient.current = null;
+      latest.current = null;
       thumbSeq.current = 0;
       sessionToken.current += 1;
       if (opts.kind === "region") {
@@ -456,7 +580,7 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
         forgetFrozen();
         if (!region.current) { setPhaseBoth("idle"); return false; }
       }
-      const s = sessionOf(ids);
+      const s = sessionOf(ids, opts.mode === "record");
       setSessionBoth(s);
       // The listeners first: the bar's hello (and a key press) can arrive the moment the bar is up.
       unlisteners.current.push(await bridge.event!.listen!(CONTROL_EVENT, (e) => {
@@ -464,6 +588,7 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
         if (action === "capture") void capture(null);
         else if (action === "next" || action === "skip") next();
         else if (action === "back") back();
+        else if (action === "undo") void undo();
         else if (action === "done") void done();
         else if (action === HELLO_ACTION) tellBar(sessionRef.current, phaseRef.current);
       }));
@@ -497,9 +622,11 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
       typingLive.current = keys.typing;
       for (const line of keys.lines) noteOnBar(line);
       // The audit row says what is LIVE, not what was ticked: an older shell or a refused hook writes none; the still
-      // after the click only with the clicks; and which mode was chosen.
+      // after the click only with the clicks; which mode was chosen (F1: "record" or "steps"), and for the steps when
+      // the session moves on (a recording never moves on: it has no step to move on from).
       await api.post(`/api/walkthroughs/${wid}/guided-capture`, {
-        event: "start", kind: opts.kind, cursor: opts.cursor, clicks: keys.clicks, typing: keys.typing, settle_ms: keys.clicks ? opts.settleMs : 0, advance: opts.advance,
+        event: "start", mode: opts.mode, kind: opts.kind, cursor: opts.cursor, clicks: keys.clicks, typing: keys.typing, settle_ms: keys.clicks ? opts.settleMs : 0,
+        ...(opts.mode === "steps" ? { advance: opts.advance } : {}),
       });
       try {
         await bridge.window?.getCurrentWindow?.()?.minimize();
@@ -511,7 +638,7 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
     } catch (e) {
       return await giveUp(`Could not start the capture: ${errorMessage(e)}`);
     }
-  }, [wid, recorder, back, capture, click, typed, done, next, release, noteOnBar, setPhaseBoth, setSessionBoth, tellBar]);
+  }, [wid, recorder, back, capture, click, typed, done, next, undo, release, noteOnBar, setPhaseBoth, setSessionBoth, tellBar]);
 
   // The page's own Shift+F8 and Shift+F9 while it has the focus (the shell's keys may be taken by another program): no pointer.
   useEffect(() => {
@@ -536,5 +663,5 @@ export function useGuidedCapture({ wid, document, onAttached, onFinished }: Guid
 
   const dismiss = useCallback(() => setMessage(null), []);
 
-  return { phase, session, message, bar, start, capture, next, back, done, dismiss };
+  return { phase, session, message, bar, start, capture, next, back, undo, done, dismiss };
 }

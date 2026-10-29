@@ -162,4 +162,37 @@ describe("the capture bar page in its steps mode", () => {
       ["main", "capture:control", "capture"], ["main", "capture:control", "next"], ["main", "capture:control", "back"], ["main", "capture:control", "done"],
     ]);
   });
+
+  it("in record mode (F1) the bar reads \"Recording · N steps\", the one button is Undo (sent as undo, enabled while there is a step to take back), Back is hidden, Done stays", async () => {
+    await load("steps");
+    const back = () => document.getElementById("s-back") as HTMLElement;
+    tell({ ...ready, record: true, label: "Recording · 0 steps", text: "Every click in the application makes a step.", instruction: "", remaining: 0, canBack: false, canUndo: false, clicks: true });
+    expect([text("s-label"), text("s-name"), text("s-remaining"), text("s-text"), text("s-instruction")]).toEqual(["Recording · 0 steps", "Tour", "", "Every click in the application makes a step.", ""]);
+    expect(text("s-next")).toBe("Undo");
+    expect(disabled("s-next")).toBe(true);
+    expect(back().style.display).toBe("none");
+    expect([disabled("s-capture"), disabled("s-done")]).toEqual([false, false]);
+    expect(text("s-hint")).toBe("Click to capture · Shift+F8 captures without a click");
+    expect(document.getElementById("s-capture")!.title).toContain("step");
+    tell({ ...ready, record: true, label: "Recording · 2 steps", remaining: 0, canBack: false, canUndo: true, lastStill: { step: 2, thumb: "data:image/jpeg;base64,abc" } });
+    expect([text("s-label"), text("s-next"), disabled("s-next")]).toEqual(["Recording · 2 steps", "Undo", false]);
+    expect(document.getElementById("s-next")!.title).toBe("Take the last recorded step back");
+    expect(text("s-thumb-caption")).toBe("step 2");
+    // While a still is in flight Undo and Done wait, as Back does in steps mode.
+    tell({ ...ready, record: true, phase: "capturing", canCapture: false, canUndo: false });
+    expect([disabled("s-next"), disabled("s-done"), text("s-capture")]).toEqual([true, true, "Capturing…"]);
+    tell({ ...ready, record: true, canUndo: true });
+    fake.emitted.length = 0;
+    document.getElementById("s-next")!.click();
+    document.getElementById("s-done")!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.emitted.map((e) => (e.payload as { action: string }).action)).toEqual(["undo", "done"]);
+    // Back to steps mode: the button is Next / Skip again and Back is shown.
+    tell({ ...ready, stillsThisStep: 1 });
+    expect([text("s-next"), back().style.display]).toEqual(["Next", ""]);
+    fake.emitted.length = 0;
+    document.getElementById("s-next")!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.emitted.map((e) => (e.payload as { action: string }).action)).toEqual(["next"]);
+  });
 });

@@ -1,7 +1,9 @@
 /**
  * The Capture dialog (T3): record the screen or take a still - which part (a region, a window, the
  * whole screen), with the microphone and the system sound for a recording, the pointer and a delay for a
- * still. What it starts is `useCapture()`'s; the rules are `lib/capture.ts`.
+ * still. What it starts is `useCapture()`'s; the rules are `lib/capture.ts`. With `stillOnly` (F2: the
+ * walkthrough builder's Take a still now…) the dialog is the still tab alone, titled Take a still, and
+ * `onStill` is told the still's id once it is taken (nothing on a still given up on the overlay).
  */
 import { useEffect, useState } from "react";
 import { Camera, Monitor, Mic, MousePointer2, Square, Video, Volume2 } from "lucide-react";
@@ -19,9 +21,17 @@ const KINDS: { key: CaptureKind; label: string; record: string; still: string }[
 
 interface Device { deviceId: string; label: string }
 
-export function CaptureDialog({ open, onClose, initialMode = "record" }: { open: boolean; onClose: () => void; initialMode?: CaptureMode }) {
+export function CaptureDialog({ open, onClose, initialMode = "record", stillOnly = false, onStill }: {
+  open: boolean;
+  onClose: () => void;
+  initialMode?: CaptureMode;
+  /** The still tab alone (F2): no Record screen tab, the title "Take a still". */
+  stillOnly?: boolean;
+  /** Told the still's id once one is taken (F2: the builder makes a step of it). */
+  onStill?: (id: string) => void;
+}) {
   const capture = useCapture();
-  const [mode, setMode] = useState<CaptureMode>(initialMode);
+  const [mode, setMode] = useState<CaptureMode>(stillOnly ? "still" : initialMode);
   const [kind, setKind] = useState<CaptureKind>("region");
   const [microphone, setMicrophone] = useState(true);
   const [microphoneId, setMicrophoneId] = useState<string | null>(null);
@@ -35,7 +45,7 @@ export function CaptureDialog({ open, onClose, initialMode = "record" }: { open:
 
   useEffect(() => {
     if (!open) return;
-    setMode(initialMode);
+    setMode(stillOnly ? "still" : initialMode);
     const bridge = shellBridge();
     if (bridge) {
       (bridge.core!.invoke!("capture_monitors") as Promise<MonitorInfo[]>).then(setMonitors).catch(() => setMonitors([]));
@@ -43,7 +53,7 @@ export function CaptureDialog({ open, onClose, initialMode = "record" }: { open:
     navigator.mediaDevices?.enumerateDevices?.().then((list) => {
       setDevices(list.filter((d) => d.kind === "audioinput").map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Microphone ${i + 1}` })));
     }).catch(() => setDevices([]));
-  }, [open, initialMode]);
+  }, [open, initialMode, stillOnly]);
 
   const listMicrophones = async () => {
     // Labels arrive only once the page has been allowed a microphone: ask once, then list.
@@ -62,7 +72,8 @@ export function CaptureDialog({ open, onClose, initialMode = "record" }: { open:
       if (mode === "record") {
         await capture.startRecording({ kind, microphone, microphoneId, systemSound });
       } else {
-        await capture.takeStill({ kind, cursor, delaySeconds: delay, monitor });
+        const rec = await capture.takeStill({ kind, cursor, delaySeconds: delay, monitor });
+        if (rec && onStill) onStill(rec.id);
       }
     } finally {
       setBusy(false);
@@ -76,7 +87,7 @@ export function CaptureDialog({ open, onClose, initialMode = "record" }: { open:
     <Modal
       open={open}
       onClose={onClose}
-      title="Capture"
+      title={stillOnly ? "Take a still" : "Capture"}
       width={620}
       footer={
         <>
@@ -87,11 +98,13 @@ export function CaptureDialog({ open, onClose, initialMode = "record" }: { open:
         </>
       }
     >
-      <Tabs
-        tabs={[{ key: "record", label: "Record screen" }, { key: "still", label: "Capture still" }]}
-        active={mode}
-        onChange={(k) => setMode(k as CaptureMode)}
-      />
+      {!stillOnly && (
+        <Tabs
+          tabs={[{ key: "record", label: "Record screen" }, { key: "still", label: "Capture still" }]}
+          active={mode}
+          onChange={(k) => setMode(k as CaptureMode)}
+        />
+      )}
       <div style={{ display: "flex", gap: 8, margin: "14px 0" }}>
         {KINDS.map((k) => (
           <button

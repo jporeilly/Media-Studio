@@ -39,15 +39,24 @@
  *
  * W3: **Make a video…** (saving first, asked the same way) opens `MakeVideoDialog`: the walkthrough becomes a project
  * whose Generate card renders it as a deck is rendered - each step a slide - and the builder opens that project.
+ *
+ * F1: **Record…** (desktop app only, beside Capture steps…, and on the empty walkthrough's card) runs the guided capture
+ * in its record mode: every click, typed pause or Shift+F8 in the application MAKES a step - appended after the last,
+ * with its still, a beacon round the point, the click kind and "Click here" - through the add-step route; the bar's
+ * Undo (or the capture line's) takes the last one back; Done reloads the builder with the first new step selected.
+ * F2: Add step… offers **Take a still now…** (the Capture dialog's still tab, from here; the still becomes a step with
+ * no hotspot), and a step without a hotspot has **Add hotspot** (a 160 × 60 hotspot centred on the picture). F3, F4: the
+ * step panel's **Click** (Left · Right · Double · None) and **Marker** (Beacon · Box).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowLeft, ArrowUp, Camera, Clapperboard, Copy, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Share, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Camera, Clapperboard, Copy, Crosshair, Disc, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Share, Trash2, Undo2, X } from "lucide-react";
 import { ApiError, api, errorMessage } from "../api/client";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Button, Card, EmptyState, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { useLeaveGuard } from "../components/annotate/useLeaveGuard";
+import { CaptureDialog } from "../components/capture/CaptureDialog";
 import { CaptureStepsDialog } from "../components/walkthrough/CaptureStepsDialog";
 import { ExportCourseDialog } from "../components/walkthrough/ExportCourseDialog";
 import { HotspotSurface } from "../components/walkthrough/HotspotSurface";
@@ -62,11 +71,11 @@ import { type GuidedOptions, capturedSteps, hintLine, nextLabel } from "../lib/g
 import { type History, canRedo, canUndo, commit, history, prune, redo, undo } from "../lib/history";
 import { useCaptureAvailable } from "../lib/useCaptureAvailable";
 import {
-  type Placement, type Step, type StepKind, type Walkthrough, type WalkthroughDocument, EMPTY_HOW, GONE_MESSAGE, MAX_CHAPTER_CHARS,
-  MAX_INSTRUCTION_CHARS, MAX_NAME_CHARS, MAX_STEP_TEXT, NO_PICTURE_HOW, NO_PICTURE_TITLE, PLACEMENTS, PLACEMENT_LABELS, RELOAD_ASK,
-  SAVE_BEFORE_PLAY, SAVE_BEFORE_VIDEO, TOO_MANY_STEPS_MESSAGE, UNSAVED_ASK, canAddStep, clampHotspot, deleteStep, documentOf, hasPicture, imagesOf, insertStep,
-  moveStep, namesOnly, playUrl, putBody, reorderStep, sameDocument, setHotspot, stepById, stepImageUrl, stepIndex, stepsToCapture, transcript,
-  transcriptFileName, typingIn, updateStep, walkthroughQueryKey, walkthroughsQueryKey,
+  type ClickKind, type Marker, type Placement, type Step, type StepKind, type Walkthrough, type WalkthroughDocument, CLICKS, CLICK_LABELS, EMPTY_HOW,
+  GONE_MESSAGE, MARKERS, MARKER_LABELS, MAX_CHAPTER_CHARS, MAX_INSTRUCTION_CHARS, MAX_NAME_CHARS, MAX_STEP_TEXT, NO_PICTURE_HOW, NO_PICTURE_TITLE,
+  PLACEMENTS, PLACEMENT_LABELS, RELOAD_ASK, SAVE_BEFORE_PLAY, SAVE_BEFORE_VIDEO, TOO_MANY_STEPS_MESSAGE, UNSAVED_ASK, canAddStep, centredHotspot,
+  clampHotspot, deleteStep, documentOf, hasPicture, imagesOf, insertStep, moveStep, namesOnly, playUrl, putBody, reorderStep, sameDocument, setHotspot,
+  stepById, stepImageUrl, stepIndex, stepsToCapture, transcript, transcriptFileName, typingIn, updateStep, walkthroughQueryKey, walkthroughsQueryKey,
 } from "../lib/walkthrough";
 
 /** What the status line says until the next change: an event, or a failure (drawn in the warning colour). */
@@ -101,6 +110,8 @@ export default function WalkthroughBuilderPage() {
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [captureOpen, setCaptureOpen] = useState(false);
+  const [recordOpen, setRecordOpen] = useState(false);
+  const [takeStillOpen, setTakeStillOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [videoOpen, setVideoOpen] = useState(false);
 
@@ -140,6 +151,13 @@ export default function WalkthroughBuilderPage() {
     onFinished: (s) => {
       void record.refetch().then((res) => {
         if (res.data) load(res.data);
+        if (s.record) {
+          // Record (F1): the steps made and kept, the first of them selected.
+          const made = s.made.length;
+          if (made) setSelectedId(s.made[0].id);
+          setEvent({ text: `Recorded ${made} step${made === 1 ? "" : "s"}.`, bad: false });
+          return;
+        }
         // The distinct steps that got a picture (a retake after Back is not a second step), and the skips.
         const taken = capturedSteps(s);
         setEvent({ text: `Captured ${taken} step${taken === 1 ? "" : "s"}${s.skipped ? `, skipped ${s.skipped}` : ""}.`, bad: false });
@@ -323,14 +341,21 @@ export default function WalkthroughBuilderPage() {
     setVideoOpen(true);
   }, [dirty, confirm, save]);
 
-  /** Capture steps: the builder saves first (as Play does), then the guided capture starts. */
+  /** Capture steps, and Record (F1): the builder saves first (as Play does), then the guided capture starts. */
   const startCapture = useCallback(async (options: GuidedOptions) => {
     setCaptureOpen(false);
+    setRecordOpen(false);
     if (!doc) return;
     if (dirty && !(await save())) return;
     setEvent(null);
     await guided.start(options);
   }, [doc, dirty, save, guided]);
+
+  /** Take a still now (F2): the picker closes, the Capture dialog's still tab opens; the still taken becomes a step. */
+  const takeStill = useCallback(() => {
+    setPicker(null);
+    setTakeStillOpen(true);
+  }, []);
 
   // The keys: Ctrl+S saves from anywhere (a text being typed included); undo / redo not while typing in a box.
   useEffect(() => {
@@ -385,6 +410,9 @@ export default function WalkthroughBuilderPage() {
           {canCapture && (
             <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={doc.steps.length === 0 || capturing || saving} title={missingCount ? `${missingCount} step${missingCount === 1 ? " has" : "s have"} no picture yet: capture them in order` : "Capture every step again, in order"} data-capture-steps="">Capture steps…</Button>
           )}
+          {canCapture && (
+            <Button size="sm" icon={<Disc size={14} />} onClick={() => setRecordOpen(true)} disabled={capturing || saving || !canAddStep(doc)} title={canAddStep(doc) ? "Record: click through the application and every click, typed pause or Shift+F8 becomes a step after the last" : TOO_MANY_STEPS_MESSAGE} data-record="">Record…</Button>
+          )}
           <span role="status" aria-live="polite" style={{ color: event?.bad ? "var(--bad)" : "var(--muted)", fontSize: 12.5 }} data-builder-status="">{statusText}</span>
           {stale && <Button size="sm" onClick={() => void reload()} data-builder-reload="">Reload</Button>}
         </div>
@@ -395,8 +423,10 @@ export default function WalkthroughBuilderPage() {
                 <Camera size={14} />
                 <strong data-capture-label="">{guided.bar.label}</strong>
                 <span className="os-truncate" style={{ flex: 1 }}>{guided.bar.text}</span>
-                <span className="os-muted">{guided.phase === "finished" ? "All steps visited." : `${hintLine(guided.bar.clicks, guided.bar.typing) || "Shift+F8 captures"}; the bar has Capture, Next, Back and Done.`}</span>
-                <Button size="sm" onClick={guided.next} disabled={guided.phase !== "ready" && guided.phase !== "capturing"} title="Move on to the next step (Shift+F9): a step with no still yet is left for later" data-capture-next="">{guided.session ? nextLabel(guided.session) : "Next"}</Button>
+                <span className="os-muted">{guided.phase === "finished" ? "All steps visited." : `${hintLine(guided.bar.clicks, guided.bar.typing) || "Shift+F8 captures"}; the bar has Capture, ${guided.bar.record ? "Undo and Done" : "Next, Back and Done"}.`}</span>
+                {guided.bar.record
+                  ? <Button size="sm" icon={<Undo2 size={14} />} onClick={() => void guided.undo()} disabled={!guided.bar.canUndo} title="Take the last recorded step back" data-capture-undo="">Undo</Button>
+                  : <Button size="sm" onClick={guided.next} disabled={guided.phase !== "ready" && guided.phase !== "capturing"} title="Move on to the next step (Shift+F9): a step with no still yet is left for later" data-capture-next="">{guided.session ? nextLabel(guided.session) : "Next"}</Button>}
                 <Button size="sm" onClick={() => void guided.done()} disabled={guided.phase === "capturing"} data-capture-done="">Done</Button>
               </>
             )}
@@ -464,8 +494,19 @@ export default function WalkthroughBuilderPage() {
                 size={{ width: selected.width, height: selected.height }}
                 zoom={zoom}
                 hotspot={hotspot}
+                marker={selected.marker}
                 onChange={(h, commitIt) => change(setHotspot(doc, selected.id, h), commitIt)}
               />
+            ) : doc.steps.length === 0 ? (
+              <div className="ms-placeholder" data-empty-placeholder="">
+                <Disc size={28} />
+                <strong>No steps yet</strong>
+                <p>{EMPTY_HOW}</p>
+                <div className="os-row" style={{ gap: 6 }}>
+                  {canCapture && <Button size="sm" variant="primary" icon={<Disc size={14} />} onClick={() => setRecordOpen(true)} disabled={capturing || saving} data-record="">Record…</Button>}
+                  <Button size="sm" icon={<Plus size={14} />} onClick={() => setPicker("add")} data-add-step="">Add step…</Button>
+                </div>
+              </div>
             ) : selected ? (
               <div className="ms-placeholder" data-step-placeholder="">
                 <ImageOff size={28} />
@@ -500,11 +541,24 @@ export default function WalkthroughBuilderPage() {
                     {PLACEMENTS.map((p) => <option key={p} value={p}>{PLACEMENT_LABELS[p]}</option>)}
                   </Select>
                 </Field>
+                <Field label="Click" hint="The real click the learner makes here: the tooltip starts with Right-click or Double-click when so">
+                  <Select value={selected.click} onChange={(e) => edit({ click: e.target.value as ClickKind })} data-step-click="">
+                    {CLICKS.map((c) => <option key={c} value={c}>{CLICK_LABELS[c]}</option>)}
+                  </Select>
+                </Field>
+                <Field label="Marker" hint={selected.marker === "beacon" ? "A pulsing ring with a dot at the hotspot's centre; the whole rectangle is still the click target" : "The outlined, pulsing box round the hotspot"}>
+                  <Select value={selected.marker} onChange={(e) => edit({ marker: e.target.value as Marker })} data-step-marker="">
+                    {[...MARKERS].reverse().map((m) => <option key={m} value={m}>{MARKER_LABELS[m]}</option>)}
+                  </Select>
+                </Field>
                 <Field label="Chapter" hint="Starts a new chapter at this step; leave it empty for none">
                   <Input maxLength={MAX_CHAPTER_CHARS} value={selected.chapter} onChange={(e) => edit({ chapter: e.target.value }, false)} onBlur={commitPreview} data-step-chapter-input="" />
                 </Field>
-                <div className="os-row" style={{ gap: 6 }}>
+                <div className="os-row" style={{ gap: 6, flexWrap: "wrap" }}>
                   <Button size="sm" icon={<Replace size={14} />} onClick={() => setPicker("replace")} data-replace-picture="">Replace picture…</Button>
+                  {hasPicture(selected) && !hotspot && (
+                    <Button size="sm" icon={<Crosshair size={14} />} onClick={() => edit({ hotspot: centredHotspot({ width: selected.width, height: selected.height }) })} title="A 160 × 60 hotspot at the picture's centre: drag it to where the viewer clicks" data-add-hotspot="">Add hotspot</Button>
+                  )}
                   <Button size="sm" onClick={() => edit({ hotspot: null })} disabled={!hotspot} data-remove-hotspot="">Remove hotspot</Button>
                 </div>
                 <p className="os-muted os-small" style={{ margin: 0 }} data-hotspot-line="">
@@ -513,8 +567,8 @@ export default function WalkthroughBuilderPage() {
                       ? "No picture yet, so no hotspot: the hotspot comes with the capture (Capture steps…: click through the step, or press Shift+F8 - it goes round the click or the pointer)."
                       : "No picture yet, so no hotspot: the hotspot comes with the capture (round the pointer when you press Shift+F8)."
                     : hotspot
-                      ? `Hotspot ${hotspot.width} × ${hotspot.height} at ${hotspot.x}, ${hotspot.y}. Drag inside it to move it, a handle to resize it.`
-                      : "No hotspot: drag on the picture to draw one. A tooltip step without a hotspot is shown as a modal card."}
+                      ? `Hotspot ${hotspot.width} × ${hotspot.height} at ${hotspot.x}, ${hotspot.y}. Drag it to move it; the handles resize it; Remove hotspot takes it away.`
+                      : "No hotspot: press Add hotspot, or drag on the picture to draw one. A tooltip step without a hotspot is shown as a modal card."}
                 </p>
                 <p className="os-muted os-xs" style={{ margin: 0 }} data-step-size="">
                   {hasPicture(selected) ? `${selected.width} × ${selected.height}` : NO_PICTURE_TITLE}
@@ -532,6 +586,12 @@ export default function WalkthroughBuilderPage() {
       {canCapture && (
         <CaptureStepsDialog open={captureOpen} missing={missingCount} total={doc.steps.length} onClose={() => setCaptureOpen(false)} onStart={(o) => void startCapture(o)} />
       )}
+      {canCapture && (
+        <CaptureStepsDialog open={recordOpen} mode="record" missing={missingCount} total={doc.steps.length} onClose={() => setRecordOpen(false)} onStart={(o) => void startCapture(o)} />
+      )}
+      {canCapture && (
+        <CaptureDialog open={takeStillOpen} onClose={() => setTakeStillOpen(false)} initialMode="still" stillOnly onStill={(cid) => void addStep({ id: cid } as Capture)} />
+      )}
       <ExportCourseDialog open={exportOpen} wid={id} onClose={() => setExportOpen(false)} />
       <MakeVideoDialog open={videoOpen} wid={id} doc={saved ?? doc} onClose={() => setVideoOpen(false)} />
       <StillPicker
@@ -541,6 +601,7 @@ export default function WalkthroughBuilderPage() {
         busy={picking}
         onClose={() => setPicker(null)}
         onPick={(c) => void (picker === "replace" ? replacePicture(c) : addStep(c))}
+        onTakeStill={canCapture && picker === "add" ? takeStill : undefined}
       />
     </>
   );

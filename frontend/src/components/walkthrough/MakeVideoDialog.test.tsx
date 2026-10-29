@@ -24,7 +24,8 @@ vi.mock("../../api/client", async (importOriginal) => {
 
 const WID = "abc123abc123";
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: "", instruction: "", placement: "auto", chapter: "", note: "", source: null,
+  click: "left", marker: "box", ...over,
 });
 const PROJECTS = [
   { id: "p1", name: "Your First Win", kind: "walkthrough", created_at: "2026-10-22T14:02:00Z", walkthrough_id: WID },

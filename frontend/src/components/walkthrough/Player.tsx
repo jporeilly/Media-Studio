@@ -24,7 +24,7 @@ import { ChevronLeft, ChevronRight, Copy, Download, FileText, List, RotateCcw, X
 import type { Size } from "../../lib/annotate";
 import { copyText, downloadText } from "../../lib/files";
 import {
-  type Step, END_TITLE, NO_PICTURE_CARD, backIndex, chapterAt, chapters, clampIndex, displayedRect, endIndex, fitRect, hasPicture, homeIndex,
+  type Step, END_TITLE, NO_PICTURE_CARD, backIndex, chapterAt, chapters, clampIndex, clickLead, displayedRect, endIndex, fitRect, hasPicture, homeIndex,
   nextIndex, shownAsModal, stepLabel, tooltipPlacement, transcript, transcriptFileName, typingIn,
 } from "../../lib/walkthrough";
 
@@ -193,6 +193,9 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
   };
   const nextLabel = last ? "Finish" : "Next";
   const rectStyle = (r: { x: number; y: number; width: number; height: number }): CSSProperties => ({ left: r.x, top: r.y, width: r.width, height: r.height });
+  // F3: the real click to make, said first in the tooltip and in the hotspot's label; F4: the marker the hotspot is drawn as.
+  const lead = step ? clickLead(step.click) : "";
+  const marker = step?.marker === "beacon" ? "beacon" : "box";
 
   return (
     <div className="ms-player" data-walkthrough-player="" data-reduced-motion={reduced ? "true" : undefined}>
@@ -235,15 +238,19 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
             key={`${current}-${hint}`}
             ref={hotspotRef}
             type="button"
-            className={`ms-hotspot${reduced ? "" : " ms-hotspot-pulse"}`}
+            className={`ms-hotspot${marker === "beacon" ? " ms-hotspot-beacon" : ""}${reduced ? "" : " ms-hotspot-pulse"}`}
             data-player-hotspot=""
-            aria-label={step!.text || "Next step"}
+            data-marker={marker}
+            aria-label={`${lead ? `${lead}: ` : ""}${step!.text || "Next step"}`}
             style={rectStyle(spot)}
             onClick={(e) => { e.stopPropagation(); next(); }}
-          />
+          >
+            {marker === "beacon" && <span className="ms-beacon" data-player-beacon="" aria-hidden="true" />}
+          </button>
         )}
         {step && !modal && !ended && tip && (
           <div ref={tipRef} className={`ms-tooltip ms-tooltip-${tip.side}`} role="dialog" aria-label={label} aria-live="polite" data-player-tooltip="" data-side={tip.side} style={{ left: tip.x, top: tip.y }} onClick={(e) => e.stopPropagation()}>
+            {lead && <strong className="ms-tooltip-click" data-tooltip-click="">{lead}</strong>}
             {step.text}
           </div>
         )}

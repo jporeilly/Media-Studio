@@ -967,6 +967,8 @@ def test_the_import_makes_the_walkthrough_from_the_parse(rig):
         "id": click["id"], "image": f"step-{click['id']}.png", "width": 10, "height": 6, "hotspot": None, "kind": "tooltip",
         "text": "Click Run.", "instruction": "Click Run.", "placement": "auto", "chapter": "", "note": "Why it ran.",
         "source": {"course": "demo", "slug": "01-first", "image": "_assets/images/blue.png", "alt": "alt text", "launcher": None},
+        # F3, F4: an imported step is a left click with the box - the guide's words say what to do.
+        "click": "left", "marker": "box",
         # W2c: where in the guide the step is - its section (no number) and its first sentence, the first with that key.
         "anchor": {"key": "open it :: click run.", "ordinal": 1},
     }

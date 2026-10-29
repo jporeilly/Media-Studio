@@ -47,13 +47,13 @@
  */
 import type { Size } from "./annotate";
 import { type CaptureKind, type MonitorInfo, type Region, type WindowInfo, monitorFor } from "./capture";
-import { type Hotspot, type WalkthroughDocument, clampHotspot, stepIndex, stepLabel } from "./walkthrough";
+import { type ClickKind, type Hotspot, type WalkthroughDocument, HOTSPOT_DEFAULT, clampHotspot, stepIndex, stepLabel } from "./walkthrough";
 
 export interface Point { x: number; y: number }
 export interface Rect { x: number; y: number; width: number; height: number }
 
-/** The hotspot a guided capture draws round the pointer, in picture pixels (the server clamps it again). */
-export const HOTSPOT_DEFAULT: Size = { width: 160, height: 60 };
+/** The hotspot a guided capture draws round the pointer, in picture pixels (the server clamps it again): the walkthrough's one default (Add hotspot uses it too, F2). */
+export { HOTSPOT_DEFAULT };
 /** The capture bar's size in its second mode, physical pixels at scale 1 (the recorder's is 300 x 56): the thumbnail box at the left (W2d). */
 export const STEPS_BAR_WIDTH = 760;
 export const STEPS_BAR_HEIGHT = 112;
@@ -214,8 +214,15 @@ export function hintLine(clicks: boolean, typing: boolean): string {
 
 /** When the session moves on (W2d, R1): at Next (the default: every capture until then re-takes the step), or at each capture (0.18.0). */
 export type GuidedAdvance = "next" | "capture";
+/**
+ * The guided capture's two modes (F1): "steps" pictures the walkthrough's steps in order (Capture steps…); "record"
+ * makes a NEW step of every capture, appended after the last (Record…) - the same bar, keys, hooks and rules.
+ */
+export type GuidedMode = "steps" | "record";
 
 export interface GuidedOptions {
+  /** Capture the steps the walkthrough has, or record new ones (F1). */
+  mode: GuidedMode;
   kind: CaptureKind;
   cursor: boolean;
   /** Every step, or only those without a picture. */
@@ -256,18 +263,60 @@ export interface GuidedSession {
   byTyping: number;
   landed: Record<string, number>;
   passed: string[];
+  /** Record mode (F1): the session visits no step - every capture makes one - and never reaches an end. */
+  record: boolean;
+  /** The steps made this run, in order, with who made each (record mode); Undo takes the last one back. */
+  made: MadeStep[];
 }
 
-export function sessionOf(ids: string[]): GuidedSession {
-  return { ids: [...ids], at: 0, captured: 0, skipped: 0, taken: [], byClick: 0, byTyping: 0, landed: {}, passed: [] };
+/** A step a recording made (F1): its id and who made it - the click hook, a typed pause, or the key / the bar's button. */
+export interface MadeStep { id: string; by: CaptureBy }
+
+export function sessionOf(ids: string[], record = false): GuidedSession {
+  return { ids: [...ids], at: 0, captured: 0, skipped: 0, taken: [], byClick: 0, byTyping: 0, landed: {}, passed: [], record, made: [] };
 }
 
 export function currentId(s: GuidedSession): string | null {
   return s.at >= 0 && s.at < s.ids.length ? s.ids[s.at] : null;
 }
 
+/** Every step visited - never in record mode, which has no steps to visit. */
 export function atEnd(s: GuidedSession): boolean {
-  return s.at >= s.ids.length;
+  return !s.record && s.at >= s.ids.length;
+}
+
+/** Record mode (F1): a capture landed as a new step `id` - counted as any capture is, and kept in `made` with who made it. */
+export function recordMade(s: GuidedSession, id: string, by: CaptureBy): GuidedSession {
+  return { ...recordCapture(s, id, by), made: [...s.made, { id, by }] };
+}
+
+/** Undo (F1): the LAST step made this run leaves the session; the captures that landed stay counted. Unchanged with none. */
+export function undoMade(s: GuidedSession): GuidedSession {
+  return s.made.length ? { ...s, made: s.made.slice(0, -1) } : s;
+}
+
+/** The recorded row's counts (F1): the steps kept, and how many of them a click or a typed pause made. */
+export function madeCounts(s: GuidedSession): { steps: number; byClick: number; byTyping: number } {
+  return { steps: s.made.length, byClick: s.made.filter((m) => m.by === "click").length, byTyping: s.made.filter((m) => m.by === "typing").length };
+}
+
+/** The bar's label in record mode: "Recording · 3 steps". */
+export function recordLabel(s: GuidedSession): string {
+  const n = s.made.length;
+  return `Recording · ${n} step${n === 1 ? "" : "s"}`;
+}
+
+/** What the bar's line reads in record mode, in place of a step's text. */
+export const RECORD_BAR_TEXT = "Every click in the application makes a step - typing and Shift+F8 too. Undo takes the last step back; Done goes back to the builder.";
+
+/** The click kind a recorded step gets (F1, F3): the button pressed for a click; "none" for the key, the bar's button and a typed pause. */
+export function clickKindOf(by: CaptureBy, button: ClickButton | undefined): ClickKind {
+  return by === "click" ? button ?? "left" : "none";
+}
+
+/** The text a recorded step starts with, by its click kind (so the player works at once; the author rewrites it after). */
+export function recordedText(click: ClickKind): string {
+  return click === "left" ? "Click here" : click === "right" ? "Right-click here" : click === "double" ? "Double-click here" : "";
 }
 
 /** The skipped count: the distinct steps skipped (`passed`) that got no picture since. */
@@ -483,6 +532,10 @@ export interface BarPayload {
   stillsThisStep: number;
   /** The LAST capture that landed in the run, whichever step: its number and a thumbnail (a data URL made by the page); null before the first, or when none could be made. */
   lastStill: LastStill | null;
+  /** Record mode (F1): the label reads "Recording · N steps", the one button is Undo, Back is hidden. */
+  record: boolean;
+  /** Undo may be pressed: a step was made this run and nothing is in flight (record mode only). */
+  canUndo: boolean;
 }
 
 /** The last still of the run, as the bar shows it (R4): the step's number and a JPEG data URL `THUMB_WIDTH` wide. */
@@ -497,6 +550,13 @@ export function barPayload(
   name: string, doc: WalkthroughDocument, s: GuidedSession, phase: GuidedPhase, message: string | null = null, clicks = false, typing = false,
   lastStill: LastStill | null = null,
 ): BarPayload {
+  if (s.record) {
+    return {
+      mode: BAR_MODE, phase, name, label: recordLabel(s), text: RECORD_BAR_TEXT, instruction: "",
+      remaining: 0, canBack: false, canCapture: phase === "ready",
+      message, clicks, typing, stillsThisStep: 0, lastStill, record: true, canUndo: phase === "ready" && s.made.length > 0,
+    };
+  }
   const id = currentId(s);
   const index = id ? stepIndex(doc, id) : -1;
   const step = index >= 0 ? doc.steps[index] : null;
@@ -507,7 +567,7 @@ export function barPayload(
     text: done ? "Press Done to close the bar and go back to the builder." : step.text || "(no text yet)",
     instruction: done ? "" : step.instruction,
     remaining: remaining(s), canBack: s.at > 0, canCapture: !done && phase === "ready",
-    message, clicks, typing, stillsThisStep: stillsThisStep(s), lastStill,
+    message, clicks, typing, stillsThisStep: stillsThisStep(s), lastStill, record: false, canUndo: false,
   };
 }
 

@@ -14,14 +14,24 @@ pixels, inside it, at least ``MIN_HOTSPOT_SIDE`` a side, or null), ``kind``
 walkthrough's transcript, and later its narration; "" when not written),
 ``placement``, ``chapter`` (the name of the chapter this step starts, or ""),
 ``note`` (W2: the guide's "Under the hood" hint that followed the step, plain
-text, for the narrated video to come - the player does not show it) and
+text, for the narrated video to come - the player does not show it),
 ``source`` (where the picture came from, informational only: ``{capture_id,
 annotated}`` for a still, ``{course, slug, image, alt, launcher}`` for a step
 imported from a course workshop - and, since W2c, the two merged once a
 capture replaced an imported step's picture: the workshop fields kept,
-``image`` null, :func:`captured_source`). A record from before ``instruction``
-or ``note`` existed reads as ``""`` for every step (:func:`get_walkthrough`
-fills them in).
+``image`` null, :func:`captured_source`), ``click`` (F3: the real click the
+learner makes - one of ``CLICKS``, "left" by default) and ``marker`` (F4: how
+the player draws the hotspot - one of ``MARKERS``, "box" by default; Record
+and Capture steps set "beacon"). A record from before ``instruction``,
+``note``, ``click`` or ``marker`` existed reads as ``""`` / the defaults for
+every step (:func:`get_walkthrough` fills them in), so every existing
+walkthrough looks as it did.
+
+**Record (F1)** makes a step per capture through :func:`add_step`, which
+takes the hotspot, the click kind, the marker, the text, the instruction and
+the chapter a recording sends - and the Window kind's ``frame`` as
+:func:`replace_picture` does - so a recorded step is a step the next save
+accepts as it is.
 
 **An imported step knows where it is in its guide** (W2c): ``anchor``
 (``{key, ordinal}``, ``services.workshops.anchor_key``) is set by the import
@@ -119,6 +129,12 @@ def strip_control_characters(text: str) -> str:
 MAX_PUT_BYTES = 2 * 1024 * 1024
 KINDS = ("tooltip", "modal")
 PLACEMENTS = ("auto", "top", "bottom", "left", "right")
+#: F3: the real click the learner makes at a step - the player's tooltip starts with "Right-click" / "Double-click"
+#: when so; "left" is the default (a record from before the field, an imported step, a step added from a still).
+CLICKS = ("left", "right", "double", "none")
+#: F4: how the player draws the hotspot - the outlined, pulsing box (the default), or a beacon: a pulsing ring
+#: with a dot at the hotspot's centre. The page's ``CLICKS`` / ``MARKERS`` (``lib/walkthrough.ts``) are the same.
+MARKERS = ("box", "beacon")
 STEP_IMAGE_RE = re.compile(r"^step-([0-9a-f]{12})\.png$")
 STALE_MESSAGE = "This walkthrough was changed elsewhere: reload it."
 PNG_MAGIC = captures.PNG_MAGIC
@@ -178,11 +194,14 @@ def get_walkthrough(wid: str) -> dict | None:
         rec = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    # A record from before the instruction or the note existed reads as "" for every step.
+    # A record from before the instruction or the note existed reads as "" for every step; one from before the
+    # click kind and the marker (F3, F4) reads "left" and "box" - every existing walkthrough looks as it did.
     for step in rec.get("steps") or []:
         if isinstance(step, dict):
             step.setdefault("instruction", "")
             step.setdefault("note", "")
+            step.setdefault("click", CLICKS[0])
+            step.setdefault("marker", MARKERS[0])
     return rec
 
 
@@ -384,20 +403,35 @@ def _copy_picture(wid: str, sid: str, cid: str, frame: tuple[int, int] | None = 
     return name, width, height, bool(rec.get("annotated")), placement
 
 
-def _new_step(sid: str, image: str, width: int, height: int, cid: str, annotated: bool) -> dict:
+def _new_step(
+    sid: str, image: str, width: int, height: int, cid: str, annotated: bool, *,
+    hotspot: dict | None = None, click: str = "left", marker: str = "box", text: str = "", instruction: str = "", chapter: str = "",
+) -> dict:
+    """A step as a still makes one: the picture, no hotspot and empty texts unless a recording (F1) gives them -
+    the hotspot (clamped by the caller), the click kind (F3), the marker (F4) and the text."""
     return {
-        "id": sid, "image": image, "width": width, "height": height, "hotspot": None,
-        "kind": "tooltip", "text": "", "instruction": "", "placement": "auto", "chapter": "", "note": "",
-        "source": {"capture_id": cid, "annotated": annotated},
+        "id": sid, "image": image, "width": width, "height": height, "hotspot": hotspot,
+        "kind": "tooltip", "text": text, "instruction": instruction, "placement": "auto", "chapter": chapter, "note": "",
+        "source": {"capture_id": cid, "annotated": annotated}, "click": click, "marker": marker,
     }
 
 
-def add_step(wid: str, capture_id: str, after: str | None = None) -> tuple[dict, int]:
+def add_step(
+    wid: str, capture_id: str, after: str | None = None, *,
+    hotspot: dict | None = None, frame: tuple[int, int] | None = None,
+    click: str = "left", marker: str = "box", text: str = "", instruction: str = "", chapter: str = "",
+) -> tuple[dict, int]:
     """A new step from the capture's picture, inserted after step ``after`` or
-    appended, the record's revision +1. Returns the record and the new step's
-    position (0-based). ``LookupError`` for no such walkthrough or a missing
-    picture, :class:`NoSuchStep` for an ``after`` the walkthrough does not
-    hold, ``ValueError`` at ``MAX_STEPS``."""
+    appended, the record's revision +1. A recording (F1) gives the step its
+    ``hotspot`` (in the still's pixels, clamped into the picture - moved with
+    the still when ``frame`` draws it centred on the run's frame, as
+    :func:`replace_picture` does), its ``click`` kind, its ``marker`` and its
+    ``text`` / ``instruction`` / ``chapter``; a still from the picker gives
+    none. Returns the record and the new step's position (0-based).
+    ``LookupError`` for no such walkthrough or a missing picture,
+    :class:`NoSuchStep` for an ``after`` the walkthrough does not hold,
+    ``ValueError`` at ``MAX_STEPS`` or for a still that does not fit the frame
+    (nothing written)."""
     with _lock(wid):
         rec = get_walkthrough(wid)
         if rec is None:
@@ -412,8 +446,12 @@ def add_step(wid: str, capture_id: str, after: str | None = None) -> tuple[dict,
                 raise NoSuchStep("No such step to insert after.")
             position = found[0] + 1
         sid = new_id()
-        image, width, height, annotated, _ = _copy_picture(wid, sid, capture_id)
-        steps.insert(position, _new_step(sid, image, width, height, capture_id, annotated))
+        image, width, height, annotated, placement = _copy_picture(wid, sid, capture_id, frame=frame)
+        placed = clamp_hotspot(hotspot_in_frame(hotspot, placement), width, height)
+        steps.insert(position, _new_step(
+            sid, image, width, height, capture_id, annotated,
+            hotspot=placed, click=click, marker=marker, text=text, instruction=instruction, chapter=chapter,
+        ))
         rec["steps"] = steps
         rec["revision"] = int(rec.get("revision") or 1) + 1
         rec["updated_at"] = _now()
@@ -518,7 +556,9 @@ def _draw_in_frame(path: Path, frame: tuple[int, int], placement: Placement) -> 
     canvas.save(path, format="PNG")
 
 
-def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT, frame: tuple[int, int] | None = None) -> dict:
+def replace_picture(
+    wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT, frame: tuple[int, int] | None = None, marker: str | None = None,
+) -> dict:
     """Replace a step's picture with the capture's current one (copied again
     through the oracle) - the FIRST picture of a step that had none; the
     hotspot is kept, clamped to the new size, unless ``hotspot`` is given (a
@@ -526,8 +566,10 @@ def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT, f
     capture's pointer rule); with ``frame`` (W2b) a smaller picture is drawn
     centred on a transparent canvas of the frame's size and a given hotspot -
     in the still's pixels - moves with it (a picture that does not fit is a
-    ``ValueError``, nothing written); the revision +1. ``LookupError`` for no
-    such walkthrough or picture, :class:`NoSuchStep` for no such step."""
+    ``ValueError``, nothing written); with ``marker`` (F4) the step's marker is
+    set - Capture steps sets "beacon" on the steps it pictures - else kept; the
+    revision +1. ``LookupError`` for no such walkthrough or picture,
+    :class:`NoSuchStep` for no such step."""
     with _lock(wid):
         rec = get_walkthrough(wid)
         if rec is None:
@@ -541,7 +583,8 @@ def replace_picture(wid: str, sid: str, capture_id: str, hotspot=KEEP_HOTSPOT, f
         # The step's anchor stays (``{**step}``); a workshop step keeps where in the guide it came from (W2c).
         step = {**step, "image": image, "width": width, "height": height,
                 "hotspot": clamp_hotspot(wanted, width, height),
-                "source": captured_source(step.get("source"), capture_id, annotated)}
+                "source": captured_source(step.get("source"), capture_id, annotated),
+                "marker": marker if marker is not None else step.get("marker", MARKERS[0])}
         rec["steps"][index] = step
         rec["revision"] = int(rec.get("revision") or 1) + 1
         rec["updated_at"] = _now()
@@ -706,11 +749,12 @@ def create_from_workshop(name: str, owner_id: str | None, owner_name: str | None
                     image, width, height = None, 0, 0
             if image is None and "image" in step_source:
                 step_source["image"] = None
+            # An imported step is "left" and "box" (F3, F4): the guide's words say what to do.
             made = {
                 "id": sid, "image": image, "width": width, "height": height, "hotspot": None,
                 "kind": "tooltip", "text": parsed.get("text") or "", "instruction": parsed.get("instruction") or "",
                 "placement": "auto", "chapter": parsed.get("chapter") or "", "note": parsed.get("note") or "",
-                "source": step_source,
+                "source": step_source, "click": CLICKS[0], "marker": MARKERS[0],
             }
             if parsed.get("anchor"):
                 # W2c: where in the guide the step is - kept through every replaced picture and save (C1).

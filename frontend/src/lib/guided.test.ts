@@ -16,11 +16,13 @@ import {
   frameFor, guidedHotkey, hintLine, hotspotAround, hotspotOf, insideFrame, keptPictureLine, keysLines, keysUpOf, missedLine, nextHotkey,
   nextLabel, noPictureLine, noWindowLine, outsideLine, pointerOf, recordCapture, rectsIntersect, remaining, sessionOf, stepBack, stillsThisStep,
   typedAfterNext, typedArea, typedHotspotPoint, typedOf, typedOutsideLine, typedRule, windowUnder, KEYS_AND_CLICKS_OFF, KEY_TAKEN, KEY_TAKEN_CLICK,
+  RECORD_BAR_TEXT, clickKindOf, madeCounts, recordLabel, recordMade, recordedText, undoMade,
 } from "./guided";
 import { type Step, MIN_HOTSPOT_SIDE } from "./walkthrough";
 
 const step = (id: string, over: Partial<Step> = {}): Step => ({
-  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: `Text ${id}`, instruction: `Do ${id}`, placement: "auto", chapter: "", note: "", source: null, ...over,
+  id, image: `step-${id}.png`, width: 200, height: 100, hotspot: null, kind: "tooltip", text: `Text ${id}`, instruction: `Do ${id}`, placement: "auto", chapter: "", note: "", source: null,
+  click: "left", marker: "box", ...over,
 });
 const monitors: MonitorInfo[] = [
   { index: 0, name: "A", x: 0, y: 0, width: 1920, height: 1080, scale: 1, primary: true },
@@ -209,7 +211,7 @@ describe("the session", () => {
     const s = sessionOf(["b", "c"]);
     expect(barPayload("Tour", doc, s, "ready")).toEqual({
       mode: BAR_MODE, phase: "ready", name: "Tour", label: "Step 2 of 3", text: "Text b", instruction: "Do b", remaining: 2, canBack: false, canCapture: true,
-      message: null, clicks: false, typing: false, stillsThisStep: 0, lastStill: null,
+      message: null, clicks: false, typing: false, stillsThisStep: 0, lastStill: null, record: false, canUndo: false,
     });
     // A refusal the capture goes on under rides in the payload: the bar shows it under the step.
     expect(barPayload("Tour", doc, s, "ready", "Shift+F8 is taken by another program")).toMatchObject({ message: "Shift+F8 is taken by another program", canCapture: true });
@@ -509,5 +511,56 @@ describe("a click (W2b)", () => {
     // A region and a monitor have one size already.
     expect(frameFor("region", null, dialog)).toEqual({ frame: null, send: null });
     expect(frameFor("screen", spoon, dialog)).toEqual({ frame: null, send: null });
+  });
+});
+
+describe("record mode (F1): every capture makes a step", () => {
+  it("a record session visits no step and never ends; each capture made is kept with who made it, Undo takes the last back, the counts follow", () => {
+    let s = sessionOf([], true);
+    expect([s.record, s.made, currentId(s), atEnd(s), remaining(s)]).toEqual([true, [], null, false, 0]);
+    // A steps session is as it was.
+    expect([sessionOf(["b"]).record, sessionOf(["b"]).made, atEnd(sessionOf([]))]).toEqual([false, [], true]);
+    expect(claimStep(s, "next")).toBeNull();
+    s = recordMade(s, "s1", "click");
+    s = recordMade(s, "s2", "typing");
+    s = recordMade(s, "s3", "key");
+    expect(s.made).toEqual([{ id: "s1", by: "click" }, { id: "s2", by: "typing" }, { id: "s3", by: "key" }]);
+    expect([s.captured, s.byClick, s.byTyping, capturedSteps(s), atEnd(s)]).toEqual([3, 1, 1, 3, false]);
+    expect(madeCounts(s)).toEqual({ steps: 3, byClick: 1, byTyping: 1 });
+    expect(recordLabel(s)).toBe("Recording · 3 steps");
+    const undone = undoMade(s);
+    expect(undone.made.map((m) => m.id)).toEqual(["s1", "s2"]);
+    // What landed stays counted (the row's "captures"); `made` is the truth for the steps kept, by who made them.
+    expect([undone.captured, capturedSteps(undone), madeCounts(undone)]).toEqual([3, 3, { steps: 2, byClick: 1, byTyping: 1 }]);
+    expect(recordLabel(undoMade(undoMade(undone)))).toBe("Recording · 0 steps");
+    expect(recordLabel(recordMade(sessionOf([], true), "x", "click"))).toBe("Recording · 1 step");
+    expect(undoMade(sessionOf([], true))).toEqual(sessionOf([], true));
+  });
+
+  it("the click kind of a capture is the button pressed, none for the key, the bar's button and a typed pause; the recorded text follows it", () => {
+    expect(clickKindOf("click", "left")).toBe("left");
+    expect(clickKindOf("click", "right")).toBe("right");
+    expect(clickKindOf("click", undefined)).toBe("left");
+    expect(clickKindOf("key", "left")).toBe("none");
+    expect(clickKindOf("typing", "right")).toBe("none");
+    expect(recordedText("left")).toBe("Click here");
+    expect(recordedText("right")).toBe("Right-click here");
+    expect(recordedText("double")).toBe("Double-click here");
+    expect(recordedText("none")).toBe("");
+  });
+
+  it("the bar in record mode: Recording · N steps, the walkthrough's name, what to do, Undo while there is a step to take back, no Back", () => {
+    const doc = { name: "Tour", steps: [step("a")] };
+    const s = recordMade(sessionOf([], true), "a", "click");
+    const told = barPayload("Tour", doc, s, "ready", null, true, true, null);
+    expect(told).toEqual({
+      mode: BAR_MODE, phase: "ready", name: "Tour", label: "Recording · 1 step", text: RECORD_BAR_TEXT, instruction: "", remaining: 0, canBack: false, canCapture: true,
+      message: null, clicks: true, typing: true, stillsThisStep: 0, lastStill: null, record: true, canUndo: true,
+    });
+    expect(barPayload("Tour", doc, sessionOf([], true), "ready")).toMatchObject({ label: "Recording · 0 steps", canUndo: false, canCapture: true, record: true });
+    // Undo waits while a still is in flight, as Back and Done do.
+    expect(barPayload("Tour", doc, s, "capturing")).toMatchObject({ canUndo: false, canCapture: false, record: true });
+    // A steps payload says it is none of this.
+    expect(barPayload("Tour", doc, sessionOf(["a"]), "ready")).toMatchObject({ record: false, canUndo: false, label: "Step 1 of 1" });
   });
 });
