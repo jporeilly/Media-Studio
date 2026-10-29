@@ -77,7 +77,7 @@ NO_ISSUE_TEXT = "None"
 VISION_FAMILIES = frozenset(
     entry["name"].split(":", 1)[0] for entry in ollama_client.MODEL_CATALOG if entry["category"] == "Vision"
 ) | {"llama3.2-vision", "qwen2.5vl", "qwen2-vl", "minicpm-v", "llava-llama3", "bakllava"}
-REAL_RENDERS = ("powerpoint", "pdf")
+REAL_RENDERS = ("powerpoint", "pdf", "walkthrough")
 
 JOB_KINDS = ("ai-notes", "ai-enhance", "ai-qa", "ai-tone", "ai-translate", "ai-pacing", "ai-qa-doc")
 CUSTOM_TONE = "Custom"
@@ -1039,11 +1039,36 @@ def _pdf_slide_data(source: Path) -> list[dict]:
     return data
 
 
+def _walkthrough_slide_data(pid: str) -> list[dict]:
+    """``core.slide_analyzer.extract_slide_data`` for a walkthrough project
+    (W3): from its snapshot - each step's text (what the viewer reads) as the
+    slide's text and its picture as the visual (a step without one is a text
+    card, so no visual); the narration is overlaid by ``analyze`` as every
+    kind's notes are. The snapshot is the project's own copy, so a deleted or
+    edited walkthrough changes nothing here."""
+    from services import walkthrough_video
+
+    try:
+        plan = walkthrough_video.plan_slides(walkthrough_video.load_snapshot(slides.source_path(pid)))
+    except ValueError as exc:
+        logger.warning("The walkthrough snapshot of %s could not be read for analysis: %s", pid, exc)
+        raise ValueError("The walkthrough's snapshot could not be read; the server log has the reason.") from exc
+    data = []
+    for item in plan:
+        text = (item.get("text") or "").strip()
+        data.append({
+            "index": item["index"], "text": text, "notes": "", "has_images": bool(item.get("image")),
+            "word_count": len(text.split()) if text else 0, "notes_word_count": 0,
+        })
+    return data
+
+
 def analyze(pid: str) -> dict:
     """``core.slide_analyzer.analyze_slide_content`` over the deck (or the
-    PDF's pages) with the EDITOR's notes overlaid - they are what narrates,
-    not the file's own. The rules run always; the model's prose suggestions
-    only when Ollama answers (rules only otherwise, and ``ai`` says which)."""
+    PDF's pages, or a walkthrough's steps from its snapshot) with the
+    EDITOR's notes overlaid - they are what narrates, not the file's own. The
+    rules run always; the model's prose suggestions only when Ollama answers
+    (rules only otherwise, and ``ai`` says which)."""
     record = slides.project_record(pid)
     source = slides.source_path(pid)
     if record["kind"] == "deck":
@@ -1052,6 +1077,8 @@ def analyze(pid: str) -> dict:
         except Exception as exc:
             logger.warning("The deck %s could not be read for analysis: %s", source.name, exc)
             raise ValueError("The deck could not be read; the server log has the reason.") from exc
+    elif record["kind"] == "walkthrough":
+        data = _walkthrough_slide_data(pid)
     else:
         data = _pdf_slide_data(source)
     notes = {s["index"]: s["speaker_notes"] or "" for s in slides.list_slides(pid)}

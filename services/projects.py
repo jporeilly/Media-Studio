@@ -1,8 +1,10 @@
-"""Project store: imported decks, PDFs and videos — one directory per project.
+"""Project store: imported decks, PDFs and videos, and the videos made from
+walkthroughs — one directory per project.
 
 A deliberately small filesystem store (``data/projects/<id>/`` holding the
-uploaded source file plus ``project.json``). The render/transcribe pipeline
-attaches to a project id.
+uploaded source file plus ``project.json``; for a walkthrough project (W3,
+``create_walkthrough_project``) a snapshot of the walkthrough and its pictures
+in place of an upload). The render/transcribe pipeline attaches to a project id.
 
 **Ownership** lives on the record (``owner_id`` + the denormalised
 ``owner_name``), not in SQLite: a project stays "a directory you can zip", and
@@ -279,6 +281,81 @@ def import_from_path(path: Path, display_name: str, *,
         "owner_name": owner_name,
     }
     _meta_path(pid).write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return record
+
+
+#: What a walkthrough with no steps is refused with (W3): nothing to make a video of.
+NO_STEPS_MESSAGE = "This walkthrough has no steps yet."
+
+
+def create_walkthrough_project(
+    wid: str, *, name: str, notes: bool, zoom: bool,
+    owner_id: str | None = None, owner_name: str | None = None,
+) -> dict:
+    """Create a project of kind ``walkthrough`` from the walkthrough ``wid``
+    (W3): a directory like any other, holding a SNAPSHOT of the walkthrough's
+    record as it is now (``<safe name>.walkthrough.json``, the record's
+    ``source_filename``) and the steps' pictures copied beside it
+    (``services.walkthrough_video.PICTURES_DIR``), so the project is
+    self-contained - deleting or editing the walkthrough afterwards changes
+    nothing in it. The inner engine project is created at once from the
+    snapshot (``FileItem.load_walkthrough``: every slide with its composed
+    still, its narration - the note too with ``notes`` - its focus with
+    ``zoom`` and its chapter), so a generate never reaches PowerPoint. The
+    record carries ``walkthrough_id`` and ``walkthrough_name`` beside the
+    fields every kind has, and ``images_source`` "walkthrough".
+
+    ``LookupError`` for no such walkthrough; ``ValueError``
+    (:data:`NO_STEPS_MESSAGE`) for one with no steps; nothing is left behind
+    when the project cannot be made.
+    """
+    from services import walkthroughs
+    from services.file_item import FileItem
+    from services.recordings import safe_stem
+    from services.walkthrough_video import PICTURES_DIR, SNAPSHOT_SUFFIX, make_snapshot
+
+    rec = walkthroughs.get_walkthrough(wid)
+    if rec is None:
+        raise LookupError("No such walkthrough.")
+    if not rec.get("steps"):
+        raise ValueError(NO_STEPS_MESSAGE)
+    title = (name or "").strip() or rec.get("name") or "Walkthrough"
+
+    pid = uuid.uuid4().hex[:12]
+    pdir = PROJECTS_DIR / pid
+    pdir.mkdir(parents=True, exist_ok=True)
+    try:
+        # The record and its pictures, under the walkthrough's own lock.
+        rec, size = walkthroughs.copy_for_video(wid, pdir / PICTURES_DIR)
+        if not rec.get("steps"):
+            raise ValueError(NO_STEPS_MESSAGE)
+        source = pdir / f"{safe_stem(title, 'walkthrough')}{SNAPSHOT_SUFFIX}"
+        source.write_text(json.dumps(make_snapshot(rec, name=title, notes=notes, zoom=zoom), indent=2), encoding="utf-8")
+        size += source.stat().st_size
+        item = FileItem(source, projects_base=pdir)
+        if not item.load_walkthrough() or item.project_manager is None or item.project_manager.state is None:
+            raise RuntimeError("The walkthrough's stills could not be composed; the server log has the reason.")
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": pid,
+            "name": title,
+            "kind": "walkthrough",
+            "source_filename": source.name,
+            "size_bytes": size,
+            "slide_count": item.slide_count,
+            "created_at": now,
+            "owner_id": owner_id,
+            "owner_name": owner_name,
+            "walkthrough_id": wid,
+            "walkthrough_name": rec.get("name") or "",
+            "engine_project_dir": item.project_manager.project_dir.name,
+            "images_source": "walkthrough",
+            "images_rendered_at": now,
+        }
+        _meta_path(pid).write_text(json.dumps(record, indent=2), encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(pdir, ignore_errors=True)
+        raise
     return record
 
 

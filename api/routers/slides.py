@@ -29,7 +29,7 @@ router = APIRouter(prefix="/projects", tags=["slides"])
 PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 RENDER_JOB_KIND = "render-slides"
 
-NOT_A_DECK = "Only deck and PDF projects have slides."
+NOT_A_DECK = "Only deck, PDF and walkthrough projects have slides."
 
 
 def guard(pid: str, user: dict) -> dict:

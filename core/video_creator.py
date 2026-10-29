@@ -96,15 +96,16 @@ def fps_for_transition(slide_transition: str, transition_duration: float = 0.5) 
     return STATIC_FPS
 
 
-def deck_fps(slide_transition: str, transition_duration: float = 0.5, animated: bool = False) -> int:
+def deck_fps(slide_transition: str, transition_duration: float = 0.5, animated: bool = False, motion: bool = False) -> int:
     """The frame rate a deck renders at: ``fps_for_transition``'s, raised to
-    ``TRANSITION_FPS`` when any slide is ``animated`` (has a video clip).
+    ``TRANSITION_FPS`` when any slide is ``animated`` (has a video clip) or
+    the run has ``motion`` (a walkthrough slide that zooms to its focus, W3).
 
     The whole picture is sampled at one rate, so at ``STATIC_FPS`` an
     animated slide played as two pictures a second - which is what every
     static deck with an animated slide did before T1 (moviepy's writer
-    sampled the composite at the creator's fps)."""
-    if animated:
+    sampled the composite at the creator's fps) - and a zoom would step."""
+    if animated or motion:
         return TRANSITION_FPS
     return fps_for_transition(slide_transition, transition_duration)
 
@@ -144,6 +145,33 @@ def chapter_spans(
         if i < len(durations) - 1:
             current += pauses[i] if pauses is not None and i < len(pauses) else transition_pause
     return spans
+
+
+def chapter_groups(
+    spans: List[Tuple[int, int]], chapters: List[Optional[str]], titles: List[str],
+) -> List[Tuple[int, int, str]]:
+    """The MP4's chapters from the slides' ``spans`` (``chapter_spans``) and
+    the chapter each slide STARTS (``chapters``, None for one that continues
+    the chapter before it): a named slide opens a chapter of that name, the
+    slides after it extend it to their end. A walkthrough's (W3): a step whose
+    chapter is set starts one, the steps before the first are one chapter
+    named after the walkthrough (the snapshot names the first slide so). A
+    slide before any named one is a chapter of its own titled as a deck's are
+    (``titles``, else "Slide N"), so a list with no name at all is the deck's
+    one-per-slide. Pure."""
+    groups: List[list] = []
+    named = False
+    for i, (start_ms, end_ms) in enumerate(spans):
+        name = ((chapters[i] if i < len(chapters) else None) or "").strip()
+        if name:
+            groups.append([start_ms, end_ms, name])
+            named = True
+        elif named:
+            groups[-1][1] = end_ms
+        else:
+            title = titles[i] if i < len(titles) and titles[i] and titles[i].strip() else f"Slide {i + 1}"
+            groups.append([start_ms, end_ms, title])
+    return [(start, end, title) for start, end, title in groups]
 
 
 def _ffmeta_escape(text: str) -> str:
@@ -1342,6 +1370,10 @@ class SlideClipInfo:
     audio_path: Optional[Path] = None
     duration: Optional[float] = None  # If None, uses audio duration
     pause_after: Optional[float] = None  # Seconds of pause after this slide; None = the creator's transition_pause
+    # A walkthrough slide (W3): the rectangle in the still's pixels the picture zooms to ({x, y, width,
+    # height}; None for no zoom) and the chapter the slide starts (None when it continues the one before).
+    focus: Optional[dict] = None
+    chapter: Optional[str] = None
 
 
 # ── the deck render: ffmpeg composes the picture (T1) ─────────────────────────
@@ -1400,6 +1432,73 @@ class SlideClipInfo:
 
 # The zoom-in starts at this scale and settles at 1.0 over the transition.
 ZOOM_FROM = 1.3
+# ── the zoom to a hotspot (W3) ───────────────────────────────────────────────
+# A slide that carries a ``focus`` (a walkthrough step's hotspot, in the still's
+# pixels) plays with motion: the full frame from its start, then from
+# ZOOM_AT_S a smooth zoom (ease in-out) over ZOOM_IN_S to ZOOM_FACTOR times,
+# centred on the focus rectangle's centre with the viewport clamped inside the
+# frame; held until ZOOM_OUT_S before the slide's end, then zoomed back out -
+# over ZOOM_OUT_S less ZOOM_SETTLE_S, the full frame held for the last
+# ZOOM_SETTLE_S - so every cut and transition is between full frames whatever
+# the rate. A slide shorter than the motion's ZOOM_MOTION_S (a silent 5 s never
+# is, a one-word narration can be) holds the full frame without motion. The
+# viewport is ``focus_viewport``; ffmpeg draws it with the chain the zoom
+# transition already uses - a per-frame ``scale`` and a ``crop`` toward the
+# centre point (``_focus_filter``) - rather than ``zoompan``, whose output
+# origin is rounded to whole input pixels each frame and jitters on a slow
+# zoom unless the input is first enlarged many times over (at 1080p, a
+# memory and time cost for nothing the scale + crop pair does not do).
+ZOOM_AT_S = 0.6
+ZOOM_IN_S = 0.8
+ZOOM_OUT_S = 0.6
+ZOOM_SETTLE_S = 0.1
+ZOOM_FACTOR = 1.8
+# The whole of the motion: 2.0 s (rounded, so that a slide of exactly that length moves).
+ZOOM_MOTION_S = round(ZOOM_AT_S + ZOOM_IN_S + ZOOM_OUT_S, 6)
+
+
+def ease_in_out(u: float) -> float:
+    """Smoothstep: 0 at 0, 1 at 1, flat at both ends; clamped outside [0, 1]."""
+    u = min(1.0, max(0.0, float(u)))
+    return u * u * (3 - 2 * u)
+
+
+def wants_motion(focus: Optional[dict], seconds: float) -> bool:
+    """Whether a slide of ``seconds`` with ``focus`` plays the zoom: a focus,
+    and at least ``ZOOM_MOTION_S`` to play it in."""
+    return bool(focus) and float(seconds) >= ZOOM_MOTION_S
+
+
+def zoom_at(t: float, seconds: float) -> float:
+    """The zoom factor at ``t`` of a slide of ``seconds`` that plays the motion:
+    1 until ``ZOOM_AT_S``, eased up to ``ZOOM_FACTOR`` over ``ZOOM_IN_S``, held,
+    eased back to 1 over the zoom-out, 1 again for the last ``ZOOM_SETTLE_S``."""
+    if seconds < ZOOM_MOTION_S:
+        return 1.0
+    e_in = ease_in_out((t - ZOOM_AT_S) / ZOOM_IN_S)
+    e_out = ease_in_out((seconds - ZOOM_SETTLE_S - t) / (ZOOM_OUT_S - ZOOM_SETTLE_S))
+    return 1.0 + (ZOOM_FACTOR - 1.0) * e_in * e_out
+
+
+def focus_viewport(frame: Tuple[int, int], focus: Optional[dict], t: float, seconds: float) -> Tuple[float, float, float, float]:
+    """The part of the frame shown at ``t`` of a slide of ``seconds``: ``(x, y,
+    w, h)`` in frame pixels - the frame divided by ``zoom_at``, centred on the
+    focus rectangle's centre and clamped inside the frame; the whole frame
+    without a focus or when the slide is too short for the motion. Pure; the
+    ffmpeg chain (``_focus_filter``) draws the same numbers."""
+    width, height = frame
+    if not wants_motion(focus, seconds):
+        return (0, 0, width, height)
+    factor = zoom_at(t, seconds)
+    w, h = width / factor, height / factor
+    cx = float(focus["x"]) + float(focus["width"]) / 2
+    cy = float(focus["y"]) + float(focus["height"]) / 2
+    x = min(max(cx - w / 2, 0.0), width - w)
+    y = min(max(cy - h / 2, 0.0), height - h)
+    return (x, y, w, h)
+
+
+
 # The edge each slide transition brings the incoming slide in from. (Before T1
 # "slide-left" and "slide-right" drew the same - both came in from the left -
 # and "slide-up" and "slide-down" both came in from the top.)
@@ -1516,6 +1615,34 @@ class DeckSegment:
     effect_out: str = ""           # "fade"
     effect_seconds: float = 0.0
     effect_color: str = "black"
+    # W3: the rectangle the still zooms to ({x, y, width, height}); drawn only when the segment is long
+    # enough for the motion (``wants_motion``).
+    focus: Optional[dict] = None
+
+
+def _focus_filter(seg: DeckSegment, size: Tuple[int, int], shift: float) -> str:
+    """The ffmpeg filters that play the zoom to ``seg.focus`` on a slide's RGB
+    frames whose timestamps are the slide's own seconds plus ``shift``: a
+    per-frame ``scale`` by the factor ``zoom_at`` gives - 1 until ZOOM_AT_S,
+    smoothstep up to ZOOM_FACTOR over ZOOM_IN_S, back down to 1 over the
+    zoom-out and 1 for the last ZOOM_SETTLE_S - and a ``crop`` of the frame's
+    size whose origin is the focus centre scaled, less half the frame, clamped
+    inside the scaled picture: ``focus_viewport`` in ffmpeg's expressions
+    (``crop`` is told the scaled size by the same expression as ``scale``,
+    since its own ``iw`` keeps the first frame's width)."""
+    w, h = size
+    cx = float(seg.focus["x"]) + float(seg.focus["width"]) / 2
+    cy = float(seg.focus["y"]) + float(seg.focus["height"]) / 2
+    own = f"(t-{shift:g})"
+    u_in = f"clip(({own}-{ZOOM_AT_S:g})/{ZOOM_IN_S:g},0,1)"
+    e_in = f"{u_in}*{u_in}*(3-2*{u_in})"
+    u_out = f"clip(({seg.seconds - ZOOM_SETTLE_S:.6f}-{own})/{ZOOM_OUT_S - ZOOM_SETTLE_S:g},0,1)"
+    e_out = f"{u_out}*{u_out}*(3-2*{u_out})"
+    s = f"(1+{ZOOM_FACTOR - 1:g}*{e_in}*{e_out})"
+    zw, zh = f"trunc({w}*{s})", f"trunc({h}*{s})"
+    return (f"scale=w='{zw}':h='{zh}':eval=frame:flags=lanczos,"
+            f"crop=w={w}:h={h}:x='clip(trunc({cx:.1f}*{s}-{w / 2:g}),0,{zw}-{w})'"
+            f":y='clip(trunc({cy:.1f}*{s}-{h / 2:g}),0,{zh}-{h})':exact=1")
 
 
 def _transition_filter(effect: str, opening: bool, seg: DeckSegment, size: Tuple[int, int], shift: float) -> str:
@@ -1653,14 +1780,29 @@ def deck_chunk_graph(
             labels.append(f"[{label}]")
         elif seg.image:
             inputs += ["-i", str(seg.image)]
-            parts = _segment_parts(seg, frames, lead, fps)
+            # A slide that zooms to its focus (W3) is drawn frame by frame over
+            # its whole span - the motion, then any transition it carries - on
+            # the same shifted clock; a still slide splits off its transitions only.
+            if wants_motion(seg.focus, seg.seconds):
+                parts = [(0, frames, "motion")]
+            else:
+                parts = _segment_parts(seg, frames, lead, fps)
             names = [f"[{label}p{part}]" for part in range(len(parts))]
             chains.append(f"[{count}:v]{UNTAGGED},scale={w}:{h}:flags=lanczos,format=rgb24,setsar=1"
                           + (f",split={len(parts)}" if len(parts) > 1 else "") + "".join(names))
             count += 1
             for part, (start, end, where) in enumerate(parts):
                 out = f"[{label}x{part}]"
-                if where:
+                if where == "motion":
+                    effects = [_transition_filter(effect, opening, seg, size, shift)
+                               for effect, opening in ((seg.effect_in, True), (seg.effect_out, False)) if effect]
+                    chains.append(
+                        f"{names[part]}loop=loop={end - start - 1}:size=1:start=0,settb=AVTB,"
+                        f"setpts=(N+{start + lead:.6f})/{fps}/TB+{shift:g}/TB,"
+                        + ",".join([_focus_filter(seg, size, shift), *effects])
+                        + f",format=yuv420p,setpts=PTS-STARTPTS{out}"
+                    )
+                elif where:
                     effect = seg.effect_in if where == "in" else seg.effect_out
                     chains.append(
                         f"{names[part]}loop=loop={end - start - 1}:size=1:start=0,settb=AVTB,"
@@ -1822,8 +1964,13 @@ class VideoCreator:
         outro_duration: float = 3.0,
         voice_start_delay: float = 1.0,
         onset_profile: Optional[OnsetProfile] = None,
+        pause_colour: Optional[str] = None,
     ):
         self.resolution = resolution
+        # The colour of a pause between slides when the transition does not
+        # fade (W3: a walkthrough's stage colour); None = black, the deck's.
+        # A fade's pause is the fade's own colour whatever this says.
+        self.pause_colour = pause_colour
         # Set by ``create_video``: whether its last run stopped on a cancel.
         self.cancelled = False
         self.video_bitrate = video_bitrate
@@ -1914,7 +2061,13 @@ class VideoCreator:
             segments.append(DeckSegment(intro_ms / 1000.0, kind="card", card=(self.intro_text, self.intro_subtitle)))
         count = len(slide_clips)
         followed = gaps is not None and len(gaps) == count
-        pause_colour = "white" if self.slide_transition == "fade-to-white" else "black"
+        # A fade's pause is the fade's colour (white for fade-to-white, black
+        # for the others - the deck's rule, unchanged); otherwise the creator's
+        # ``pause_colour`` (a walkthrough's stage colour, W3), else black.
+        if self.slide_transition in FADE_COLOURS:
+            pause_colour = FADE_COLOURS[self.slide_transition]
+        else:
+            pause_colour = self.pause_colour or "black"
         for i, info in enumerate(slide_clips):
             if slide_durations and i < len(slide_durations):
                 seconds = float(slide_durations[i])
@@ -1924,6 +2077,7 @@ class VideoCreator:
             segments.append(DeckSegment(
                 seconds, kind="slide", image=info.image_path, video=info.video_path,
                 effect_in=effect_in, effect_out=effect_out, effect_seconds=fade, effect_color=colour,
+                focus=getattr(info, "focus", None),
             ))
             if i < count - 1:
                 if followed:
@@ -2052,13 +2206,18 @@ class VideoCreator:
                 name = black
             seg.image = name
 
-    def _embed_chapters(self, video_path: Path, slide_clips: List[SlideClipInfo], slide_titles: List[str]):
+    def _embed_chapters(
+        self, video_path: Path, slide_clips: List[SlideClipInfo], slide_titles: List[str],
+        slide_chapters: Optional[List[Optional[str]]] = None,
+    ):
         """Embed chapter markers into the MP4 using ffmpeg metadata.
 
         Computes the deck's spans - one chapter per slide - and hands them to
         :func:`embed_chapters`, which writes the metadata file and remuxes
         the video to embed it. Players like VLC and YouTube recognize these
-        chapters.
+        chapters. With ``slide_chapters`` naming the chapter a slide STARTS
+        (a walkthrough's, W3) the spans are grouped by :func:`chapter_groups`
+        instead: a chapter runs over its steps' slides.
         """
         try:
             # Each slide's on-screen time: its narration plus the voice start
@@ -2085,7 +2244,10 @@ class VideoCreator:
             # gap after each slide is its own pause override, else the job's.
             pauses = [pause_after(clip_info, self.transition_pause) for clip_info in slide_clips]
             spans = chapter_spans(durations, self.transition_pause, self.intro_offset, pauses)
-            chapters = [(start_ms, end_ms, title) for (start_ms, end_ms), title in zip(spans, titles)]
+            if slide_chapters and any((name or "").strip() for name in slide_chapters):
+                chapters = chapter_groups(spans, list(slide_chapters), titles)
+            else:
+                chapters = [(start_ms, end_ms, title) for (start_ms, end_ms), title in zip(spans, titles)]
 
             if not chapters:
                 return
@@ -2277,10 +2439,13 @@ class VideoCreator:
         encoding_callback: Optional[Callable[[int, int], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         slide_titles: Optional[List[str]] = None,
+        slide_chapters: Optional[List[Optional[str]]] = None,
     ) -> bool:
         """Render the deck into ``output_path``: the master narration track,
         the stills, then ffmpeg composes and encodes the picture (see "the
-        deck render" above) and the chapters are embedded.
+        deck render" above) and the chapters are embedded - one per slide
+        titled by ``slide_titles``, or grouped by the chapter each slide
+        starts when ``slide_chapters`` names any (a walkthrough's, W3).
 
         ``encoding_callback(frame, total)`` is told the frames encoded so far
         (from ffmpeg's ``-progress``) while ffmpeg runs; ``cancel_check`` is
@@ -2358,8 +2523,8 @@ class VideoCreator:
             logger.info("Video written in %.1fs", time.time() - t1)
 
             # Embed chapter markers if slide titles are available
-            if slide_titles:
-                self._embed_chapters(output_path, slide_clips, slide_titles)
+            if slide_titles or (slide_chapters and any(slide_chapters)):
+                self._embed_chapters(output_path, slide_clips, slide_titles or [], slide_chapters)
 
             if progress_callback:
                 progress_callback(total, total, "Complete!")

@@ -697,9 +697,15 @@ class VideoProcessor:
         export_gif: bool = False,
         export_audio_only: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
+        pause_colour: Optional[str] = None,
     ):
         self.voice_id = voice_id
         self.resolution = resolution
+        # The colour of a pause between slides, as ffmpeg's ``color`` source
+        # takes it (W3: the stage colour for a walkthrough project, passed by
+        # the generate route); None = the creator's own rule (a deck's black,
+        # white for fade-to-white). A fade's pause keeps the fade's colour.
+        self.pause_colour = pause_colour
         self.background_music_paths = background_music_paths or []
         self.transition_sound_path = transition_sound_path
         self.speed = speed
@@ -1867,6 +1873,10 @@ class VideoProcessor:
                     # The slide's own pause override (the editor's "Pause after
                     # slide"); None lets the creator use the job's pause.
                     pause_after=getattr(s, "pause_override", None),
+                    # A walkthrough slide's focus (the zoom to its hotspot) and
+                    # the chapter it starts (W3); None on a deck's slides.
+                    focus=getattr(s, "focus", None),
+                    chapter=getattr(s, "chapter", None),
                 ))
 
                 # Deduct this slide's duration from preview budget
@@ -1884,10 +1894,11 @@ class VideoProcessor:
             if self.outro_text:
                 video_duration += self.outro_duration
             # A transition needs real frames to play on, and so does an animated
-            # slide (at 2 fps it played as two pictures a second); a static deck
-            # stays at 2 fps.
+            # slide (at 2 fps it played as two pictures a second) or a slide that
+            # zooms to its focus (W3); a static deck stays at 2 fps.
             fps = deck_fps(self.slide_transition, self.transition_duration,
-                           animated=any(info.video_path for info in clip_infos))
+                           animated=any(info.video_path for info in clip_infos),
+                           motion=any(info.focus for info in clip_infos))
             total_frames = int(video_duration * fps)
 
             logger.info("-- %d slides ready for video --", len(clip_infos))
@@ -1957,6 +1968,7 @@ class VideoProcessor:
                 outro_text=self.outro_text,
                 outro_duration=self.outro_duration,
                 voice_start_delay=self.voice_start_delay,
+                pause_colour=self.pause_colour,
             )
 
             # Collect slide titles for chapter metadata
@@ -1967,6 +1979,9 @@ class VideoProcessor:
                     first_line = s.speaker_notes.strip().split("\n")[0][:60]
                     title = first_line
                 slide_titles.append(title)
+            # The chapter each slide starts (a walkthrough's, W3; None on a
+            # deck's slides, which keep a chapter per slide).
+            slide_chapters = [getattr(s, "chapter", None) for s in pm.state.slides]
 
             ok = creator.create_video(
                 slide_clips=clip_infos, output_path=output_path,
@@ -1974,6 +1989,7 @@ class VideoProcessor:
                 encoding_callback=_on_encode_progress,
                 cancel_check=self._cancel_asked,
                 slide_titles=slide_titles,
+                slide_chapters=slide_chapters,
             )
             # The creator says whether it stopped on the cancel (ffmpeg
             # killed, the part file gone, ``output_path`` untouched) rather
@@ -2003,6 +2019,19 @@ def _fmt_eta(seconds: float) -> str:
 # SRT subtitle generation (stateless, so a module-level function)
 # ------------------------------------------------------------------
 
+def srt_cue_text(text: str) -> str:
+    """A cue's text as SRT allows it: the lines of ``text``, each stripped,
+    with the blank ones dropped, joined by a line break. A blank line inside
+    a cue ENDS the cue in every reader (the block after it has no index and
+    no timing), and a walkthrough's narrated note is a paragraph of its own
+    in the narration (W3: ``services.walkthroughs.step_narration``), so the
+    paragraph break becomes a line break inside the step's cue; a deck whose
+    notes hold a blank line is cured the same way. The chapter title's
+    first-line rule (``_build_video``) reads the notes, not this."""
+    lines = (line.strip() for line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+    return "\n".join(line for line in lines if line)
+
+
 def _generate_srt(
     pm: ProjectManager, video_path: Path, *,
     transition_pause: float, voice_start_delay: float = 0.0, intro_offset: float = 0.0,
@@ -2015,7 +2044,8 @@ def _generate_srt(
     silence before its audio, with ``transition_pause`` between slides - or
     a slide's own ``pause_override`` after that slide, as the master track
     and the chapters use it. Slides without notes are skipped but still
-    advance the timeline. Returns the SRT path, or None when no slide had notes.
+    advance the timeline. A cue's text holds no blank line (``srt_cue_text``).
+    Returns the SRT path, or None when no slide had notes.
     """
     srt_path = video_path.with_suffix(".srt")
     lines: List[str] = []
@@ -2041,7 +2071,7 @@ def _generate_srt(
 
         lines.append(str(sub_index))
         lines.append(f"{_srt_time(start)} --> {_srt_time(end)}")
-        lines.append(slide.speaker_notes.strip())
+        lines.append(srt_cue_text(slide.speaker_notes))
         lines.append("")
         sub_index += 1
 

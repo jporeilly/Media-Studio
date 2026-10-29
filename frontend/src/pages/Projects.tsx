@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Camera, FileText, Film, FolderOpen, Pause, Play, Presentation, Square, Trash2, Upload } from "lucide-react";
+import { Camera, FileText, Film, FolderOpen, MousePointerClick, Pause, Play, Presentation, Square, Trash2, Upload } from "lucide-react";
 import { useConfirm } from "../components/ConfirmDialog";
 import { api, errorMessage } from "../api/client";
 import { useAuth } from "../context/AuthContext";
@@ -21,7 +21,8 @@ import { useFollowedJob } from "../lib/useFollowedJob";
 interface Project {
   id: string;
   name: string;
-  kind: "deck" | "pdf" | "video";
+  /** A deck, a PDF, a video, or (W3) a walkthrough compiled into a video - each step a slide. */
+  kind: "deck" | "pdf" | "video" | "walkthrough";
   source_filename: string;
   size_bytes: number;
   slide_count: number | null;
@@ -30,6 +31,9 @@ interface Project {
   owner_id?: string | null;
   /** Their display name as it was at import, so it still reads after the account is gone. */
   owner_name?: string | null;
+  /** The walkthrough a walkthrough project was made from (it may since be deleted). */
+  walkthrough_id?: string | null;
+  walkthrough_name?: string | null;
 }
 
 const ACCEPT = ".pptx,.pdf,.mp4,.mov,.mkv,.avi,.webm,.m4v";
@@ -38,6 +42,7 @@ const KIND: Record<Project["kind"], { icon: typeof FileText; label: string; colo
   deck: { icon: Presentation, label: "Deck", color: "var(--brand)" },
   pdf: { icon: FileText, label: "PDF", color: "var(--warn)" },
   video: { icon: Film, label: "Video", color: "var(--info)" },
+  walkthrough: { icon: MousePointerClick, label: "Walkthrough", color: "var(--good)" },
 };
 
 function fmtBytes(n: number): string {

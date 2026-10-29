@@ -42,6 +42,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from core.project_manager import ProjectManager, SlideRenderState, get_project_dir
 from services import projects as store
@@ -53,13 +54,22 @@ WAITING_FOR_EXPORT = "Waiting for PowerPoint to finish another export…"
 
 MAX_NOTES_CHARS = 20_000
 MAX_PAUSE_SECONDS = 30.0
-SLIDE_KINDS = ("deck", "pdf")
-IMAGE_SOURCES = ("powerpoint", "pillow", "pdf")
+# The kinds of project that have slides: a deck, a PDF and (W3) a walkthrough
+# compiled into a video - each step a slide whose still is composed from the
+# walkthrough's snapshot (``services.walkthrough_video``).
+SLIDE_KINDS = ("deck", "pdf", "walkthrough")
+IMAGE_SOURCES = ("powerpoint", "pillow", "pdf", "walkthrough")
 
 # The exporters' file names by project kind, 1-based: PPTXExporter writes
-# slide_NNN.png, PDFReader page_NNN.png. Derived from the index, never read
-# back from the stored absolute string.
-_IMAGE_NAME = {"deck": "slide_{n:03d}.png", "pdf": "page_{n:03d}.png"}
+# slide_NNN.png, PDFReader page_NNN.png, a walkthrough's stills step_NNN.png.
+# Derived from the index, never read back from the stored absolute string.
+_IMAGE_NAME = {"deck": "slide_{n:03d}.png", "pdf": "page_{n:03d}.png", "walkthrough": "step_{n:03d}.png"}
+
+
+def image_name(kind: str, index: int) -> str:
+    """The file name of slide ``index`` (0-based) of a project of ``kind``, the one rule
+    (``services.walkthrough_video`` names the stills it composes by it)."""
+    return _IMAGE_NAME[kind].format(n=index + 1)
 
 _UNSET = object()
 
@@ -119,7 +129,7 @@ def _record(pid: str) -> dict:
     if not record:
         raise ProjectNotFound("Project not found.")
     if record.get("kind") not in SLIDE_KINDS:
-        raise ValueError("Only deck and PDF projects have slides.")
+        raise ValueError("Only deck, PDF and walkthrough projects have slides.")
     return record
 
 
@@ -152,6 +162,17 @@ def _materialise(pid: str, record: dict, source: Path, pm: ProjectManager) -> Pr
         if not item.load_pdf() or item.project_manager is None or item.project_manager.state is None:
             raise ValueError("The PDF could not be read.")
         record_images_source(pid, "pdf")
+        return item.project_manager
+    if record["kind"] == "walkthrough":
+        # The snapshot and the pictures beside it are the source: the stills
+        # are composed again, the narration, focus and chapters read back
+        # (``services.walkthrough_video.materialise``).
+        from services.file_item import FileItem
+
+        item = FileItem(source, projects_base=store.PROJECTS_DIR / pid)
+        if not item.load_walkthrough() or item.project_manager is None or item.project_manager.state is None:
+            raise ValueError("The walkthrough's snapshot could not be read.")
+        record_images_source(pid, "walkthrough")
         return item.project_manager
 
     from core.pptx_reader import PPTXReader
@@ -208,9 +229,11 @@ def manager(pid: str) -> ProjectManager:
 # -- reading ---------------------------------------------------------------
 
 def _deck_info(pid: str, record: dict) -> list:
-    """The deck's own slides (``SlideInfo``: notes, title, body text), read
-    fresh when the source file changed and cached otherwise. [] for a PDF."""
-    if record["kind"] != "deck":
+    """The source's own slides (``SlideInfo``: notes, title, body text), read
+    fresh when the source file changed and cached otherwise: a deck's from
+    the ``.pptx``; a walkthrough's from its snapshot (the step's narration as
+    the notes a Reset goes back to, "Step N", the step's text). [] for a PDF."""
+    if record["kind"] not in ("deck", "walkthrough"):
         return []
     source = _source(pid, record)
     stat = source.stat()
@@ -219,10 +242,18 @@ def _deck_info(pid: str, record: dict) -> list:
     if cached and cached[0] == key:
         return cached[1]
 
-    from core.pptx_reader import PPTXReader
+    if record["kind"] == "walkthrough":
+        from services import walkthrough_video
 
-    reader = PPTXReader(source)
-    info = list(reader.slides) if reader.load() else []
+        try:
+            info = walkthrough_video.source_info(walkthrough_video.load_snapshot(source))
+        except ValueError:
+            info = []
+    else:
+        from core.pptx_reader import PPTXReader
+
+        reader = PPTXReader(source)
+        info = list(reader.slides) if reader.load() else []
     _deck_cache[pid] = (key, info)
     return info
 
@@ -533,6 +564,18 @@ def ensure_images(pid: str, progress=None, force: bool = False) -> dict:
             record_images_source(pid, "pdf")
             report(1.0, "Slide previews ready")
             return {"cached": False, "images_source": "pdf", "slides": item.slide_count}
+        if kind == "walkthrough":
+            # The stills composed from the snapshot's pictures (W3): Pillow, no
+            # COM, seconds; under the project lock as the PDF's render is.
+            report(0.1, "Composing the steps' stills…")
+            from services.file_item import FileItem
+
+            item = FileItem(source, projects_base=store.PROJECTS_DIR / pid)
+            if not item.load_walkthrough():
+                raise RuntimeError("The walkthrough's stills could not be composed.")
+            record_images_source(pid, "walkthrough")
+            report(1.0, "Slide previews ready")
+            return {"cached": False, "images_source": "walkthrough", "slides": item.slide_count}
 
     # The export itself runs outside the project lock - a minute or two for a
     # large deck, and notes saves must not queue behind it - and inside the
@@ -593,22 +636,45 @@ LETTERBOX_BACKGROUND = (255, 255, 255)
 BORDER_SHARE = 0.01
 
 
-def letterbox(image, size: tuple[int, int], background=LETTERBOX_BACKGROUND):
-    """``image`` fitted inside ``size`` with its aspect kept and the rest
-    filled with ``background`` (a transparent still is flattened onto it).
-    A still already of that aspect fills the frame; one wider or taller gets
-    bars - never a stretch, which is what the render would otherwise do to
-    an image whose aspect differs from the slide's."""
+class Fit(NamedTuple):
+    """Where a picture goes on a frame: the scale it is drawn at, its top-left and its drawn size."""
+
+    scale: float
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+def fit_in_frame(width: int, height: int, frame: tuple[int, int], upscale: bool = True) -> Fit:
+    """Where a ``width`` x ``height`` picture goes on ``frame`` with its aspect
+    kept: scaled to fit, centred by whole pixels - the ONE place the fit is
+    written (``letterbox`` draws by it, and the walkthrough video's focus is
+    the hotspot through it). With ``upscale`` off a smaller picture is never
+    enlarged (the walkthrough's stills: a screenshot is shown at its own size)."""
+    frame_w, frame_h = frame
+    scale = min(frame_w / width, frame_h / height)
+    if not upscale:
+        scale = min(scale, 1.0)
+    w, h = max(1, round(width * scale)), max(1, round(height * scale))
+    return Fit(scale, (frame_w - w) // 2, (frame_h - h) // 2, w, h)
+
+
+def letterbox(image, size: tuple[int, int], background=LETTERBOX_BACKGROUND, upscale: bool = True):
+    """``image`` fitted inside ``size`` (``fit_in_frame``) with its aspect kept
+    and the rest filled with ``background`` (a transparent still is flattened
+    onto it). A still already of that aspect fills the frame; one wider or
+    taller gets bars - never a stretch, which is what the render would
+    otherwise do to an image whose aspect differs from the slide's. A deck's
+    new slide takes a smaller still enlarged to the slide; the walkthrough
+    video's stills (``upscale`` off) never enlarge a picture."""
     from PIL import Image
 
-    target_w, target_h = size
     src = image.convert("RGBA")
-    scale = min(target_w / src.width, target_h / src.height)
-    w, h = max(1, round(src.width * scale)), max(1, round(src.height * scale))
-    fitted = src.resize((w, h), Image.LANCZOS) if (w, h) != src.size else src
-    canvas = Image.new("RGB", (target_w, target_h), background)
-    x, y = (target_w - w) // 2, (target_h - h) // 2
-    canvas.paste(fitted, (x, y), fitted)
+    fit = fit_in_frame(src.width, src.height, size, upscale=upscale)
+    fitted = src.resize((fit.width, fit.height), Image.LANCZOS) if (fit.width, fit.height) != src.size else src
+    canvas = Image.new("RGB", size, background)
+    canvas.paste(fitted, (fit.x, fit.y), fitted)
     return canvas
 
 

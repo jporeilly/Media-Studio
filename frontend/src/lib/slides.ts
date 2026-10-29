@@ -24,11 +24,11 @@ export interface Slide {
   has_animation: boolean;
 }
 
-/** Where the previews came from: PowerPoint, the title-only Pillow fallback, a PDF's page renders, or unknown (null). */
-export type ImagesSource = "powerpoint" | "pillow" | "pdf" | null;
+/** Where the previews came from: PowerPoint, the title-only Pillow fallback, a PDF's page renders, a walkthrough's composed stills, or unknown (null). */
+export type ImagesSource = "powerpoint" | "pillow" | "pdf" | "walkthrough" | null;
 
-/** The kinds of project that have slides. */
-export type SlideProjectKind = "deck" | "pdf";
+/** The kinds of project that have slides: a deck, a PDF, and a walkthrough compiled into a video (each step a slide). */
+export type SlideProjectKind = "deck" | "pdf" | "walkthrough";
 
 /** What GET /api/projects/{id}/slides returns. */
 export interface SlidesPayload {
@@ -239,11 +239,11 @@ export function needsRenderAgain(source: ImagesSource, ready: boolean): boolean 
   return ready && source === null;
 }
 
-/** What rendering the previews costs, by kind: a deck goes through PowerPoint, a PDF's pages render in seconds. */
+/** What rendering the previews costs, by kind: a deck goes through PowerPoint, a PDF's pages and a walkthrough's stills render in seconds. */
 export function renderHint(kind: SlideProjectKind): string {
-  return kind === "pdf"
-    ? "Renders the PDF pages on the server — a few seconds."
-    : "Uses PowerPoint on the server — a minute or two for a large deck.";
+  if (kind === "pdf") return "Renders the PDF pages on the server — a few seconds.";
+  if (kind === "walkthrough") return "Composes the steps' stills from the walkthrough's pictures on the server — a few seconds.";
+  return "Uses PowerPoint on the server — a minute or two for a large deck.";
 }
 
 /** Why the editor is read-only while a job runs: the job holds its own copy of the slides and would overwrite the edit. */

@@ -2,13 +2,15 @@
 
 The Projects page is where every deck, PDF and video enters the studio: import a file, open it, and delete it when it is done with.
 
+A fourth kind of project is not imported but made: a **walkthrough** compiled into a video (**Make a video…** in the walkthrough builder; [Walkthroughs](walkthroughs.md)) lands here as a project of its own, rendered as a deck is.
+
 ## What you see
 
 **Import** in the page header opens a file picker that accepts `.pptx`, `.pdf`, `.mp4`, `.mov`, `.mkv`, `.avi`, `.webm` and `.m4v`. On a page with no projects the header button is replaced by **Import a file** in the centre, under "No projects yet". A status line reports the import ("Imported "name".") or the refusal, with a **Dismiss** cross.
 
 In the desktop app the header also has **Capture**, which records the screen or takes a still: see [Screen capture](capture.md). Below the projects, in the browser edition as in the desktop app, the **Captures** card lists the stills, each with **Annotate**, **Add to deck…**, **Copy**, **Save as…** and **Delete still**; above them, in the desktop app, **Recordings not saved yet** appears only when a recording was stopped and never saved.
 
-The table has one row per project: **Name** (a link to the project, with the source file's name under it), **Type** (Deck, PDF or Video), **Slides** (the number of slides or pages; a dash for a video, and for a PDF until it has been opened), **Size**, **Owner** (administrators only), **Imported** (how long ago), and a **Delete project** button at the end of the row.
+The table has one row per project: **Name** (a link to the project, with the source file's name under it - for a walkthrough project, its snapshot's), **Type** (Deck, PDF, Video or Walkthrough, each with its own icon), **Slides** (the number of slides or pages, or a walkthrough's steps; a dash for a video, and for a PDF until it has been opened), **Size**, **Owner** (administrators only), **Imported** (how long ago; for a walkthrough project, when it was made), and a **Delete project** button at the end of the row.
 
 In the Owner column a project imported before the app had owners shows **unassigned**, with a tooltip saying only administrators can see it.
 
@@ -18,13 +20,13 @@ In the Owner column a project imported before the app had owners shows **unassig
 
 **Open.** Click the name. Every feature lives on the project page.
 
-**Delete.** Press the bin at the end of the row. The confirmation, **Delete project**, says "Delete *name*? This removes its files." The delete removes the project's whole directory: the source file, the transcript, every render and every export. There is no undo and no recycle bin.
+**Delete.** Press the bin at the end of the row. The confirmation, **Delete project**, says "Delete *name*? This removes its files." The delete removes the project's whole directory: the source file, the transcript, every render and every export. There is no undo and no recycle bin. Deleting a walkthrough project deletes only the project: the walkthrough it was made from is not touched, and nor is the project when the walkthrough is deleted.
 
 **A project busy with a job.** Each project runs one job at a time: a transcription, a render, a re-voice, the slide previews or an AI action. While one is queued or running, every other job, every change to the project's content and deleting the project are refused with "A job is running for this project (*kind*). Wait for it to finish, then try again."; the Projects page shows that message in its status line. Reads still work: you can look at the slides, play a sentence, download the transcript. See [Jobs](jobs.md).
 
 ## Under the hood
 
-A project is a directory, `data\projects\<id>\`, named by a twelve-character hexadecimal id, holding the uploaded file exactly as it was sent and a `project.json` record: the name (the file's stem), the kind, the source filename, the size, a deck's slide count, the import time, and the owner's id and display name. Everything the project gains later, the transcript, the edit, the renders and the inner slide-editor project, lands in the same directory, so a project can be copied or zipped as one folder.
+A project is a directory, `data\projects\<id>\`, named by a twelve-character hexadecimal id, holding the uploaded file exactly as it was sent and a `project.json` record: the name (the file's stem), the kind, the source filename, the size, a deck's slide count, the import time, and the owner's id and display name. Everything the project gains later, the transcript, the edit, the renders and the inner slide-editor project, lands in the same directory, so a project can be copied or zipped as one folder. A walkthrough project (kind `walkthrough`) holds, in place of an upload, a snapshot of the walkthrough as it was when the video was asked for (`<name>.walkthrough.json`, its source file) and the steps' pictures beside it in `steps\`, so it is self-contained; its record also names the walkthrough it came from (`walkthrough_id`, `walkthrough_name`), and its inner project is made at once from the snapshot, every slide with its still already composed ([Walkthroughs](walkthroughs.md), *Make a video*).
 
 Ownership is decided in one place. An administrator may see and act on every project; an editor only on projects they imported; a project with no owner (imported before ownership existed) is treated as administrator-owned. The list you see is already filtered, and a direct request for someone else's project is refused.
 

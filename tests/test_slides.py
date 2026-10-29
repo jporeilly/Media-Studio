@@ -47,6 +47,8 @@ LEGACY_SLIDE_KEYS = {
     "audio_speed", "audio_stability", "audio_similarity_boost", "audio_style",
     "needs_regeneration", "ai_enhanced", "pause_override", "has_animation", "voice_override",
     "alt_text", "notes_history", "original_start_time", "original_end_time", "original_segments",
+    # a walkthrough project's slide (W3, #walkthrough-video): the zoom's focus and the chapter it starts; None on a deck's
+    "focus", "chapter",
 }
 
 

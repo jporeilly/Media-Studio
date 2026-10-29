@@ -14,6 +14,7 @@
  * step's picture is replaced by a smaller one.
  */
 import type { Rect, Size } from "./annotate";
+import { parseDate } from "./format";
 
 // ---- limits and constants ------------------------------------------------------------------------------
 
@@ -445,6 +446,68 @@ export function tooltipPlacement(target: Rect, tip: Size, container: Size, place
   }
   const clamp = (v: number, size: number, extent: number) => Math.max(margin, Math.min(Math.max(margin, extent - size - margin), v));
   return { x: Math.round(clamp(x, tip.width, container.width)), y: Math.round(clamp(y, tip.height, container.height)), side };
+}
+
+// ---- make a video (W3) -----------------------------------------------------------------------------------
+
+export const SAVE_BEFORE_VIDEO = {
+  title: "Save before making the video?",
+  message: "The video is made from the walkthrough as it is saved. Save the walkthrough now, then make the video?",
+  confirmLabel: "Save and make",
+};
+export const NO_NOTES = "No step has a note.";
+export const NO_HOTSPOTS = "No step has a hotspot.";
+
+/** The body of `POST /api/walkthroughs/{wid}/video`: the project's name, the notes narrated, the zoom. */
+export interface MakeVideoBody { name: string; notes: boolean; zoom: boolean }
+/** Its answer: the project made and its generate job, already running. */
+export interface MadeVideo { project_id: string; job_id: string }
+
+export function makeVideoUrl(wid: string): string {
+  return `/api/walkthroughs/${wid}/video`;
+}
+
+/** Whether any step carries a note (the guide's "Under the hood" hint): the dialog's notes box is for those. */
+export function hasNotes(doc: Pick<WalkthroughDocument, "steps">): boolean {
+  return doc.steps.some((s) => (s.note ?? "").trim() !== "");
+}
+
+/** Whether any step has a hotspot: the dialog's zoom box is for those. */
+export function hasHotspots(doc: Pick<WalkthroughDocument, "steps">): boolean {
+  return doc.steps.some((s) => !!s.hotspot);
+}
+
+/** "12 steps, 2 without a picture, 1 without any text" - what the video will be made of; the parts that are 0 left out. */
+export function stepsLine(doc: Pick<WalkthroughDocument, "steps">): string {
+  const n = doc.steps.length;
+  const noPicture = doc.steps.filter((s) => !hasPicture(s)).length;
+  const noText = doc.steps.filter((s) => !narrationOf(s).trim()).length;
+  const parts = [`${n} step${n === 1 ? "" : "s"}`];
+  if (noPicture) parts.push(`${noPicture} without a picture`);
+  if (noText) parts.push(`${noText} without any text`);
+  return parts.join(", ");
+}
+
+/** A row of `GET /api/projects` as the dialog reads it: a project made from a walkthrough names it. */
+export interface MadeProject { id: string; name: string; kind: string; created_at: string; walkthrough_id?: string | null }
+
+/** The projects made from the walkthrough `wid`, newest first. */
+export function madeFrom(projects: MadeProject[], wid: string): MadeProject[] {
+  return projects
+    .filter((p) => p.kind === "walkthrough" && p.walkthrough_id === wid)
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+}
+
+/** When a project was made, as "2026-10-22 14:02" in local time; "" for no date. */
+export function madeWhen(value: string | null | undefined): string {
+  const d = parseDate(value);
+  if (!d) return "";
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+export function projectUrl(pid: string): string {
+  return `/projects/${pid}`;
 }
 
 // ---- keys and urls --------------------------------------------------------------------------------------
