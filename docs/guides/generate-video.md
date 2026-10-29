@@ -23,6 +23,8 @@ Under the fields: "A job is running for this project (*kind*) — it must finish
 
 Once rendered: a preview player ("Preview — the first 15 seconds"), the video player, **Download video**, and a button per sidecar that exists: **Subtitles (SRT)**, **Subtitles (VTT)**, **WebM**, **GIF**, **Audio (MP3)**.
 
+Under the downloads, the **Vimeo** panel: **Publish to Vimeo…** uploads the rendered video to Vimeo as a job - the title, the description and the privacy in a dialog; an administrator stores the access token and the default privacy in Settings › Studio - and the panel then reads "On Vimeo: https://vimeo.com/123456789/abcdef1234 (Unlisted)" with **Copy**, **Open** and **Publish again…** (a new video; the earlier one stays). A walkthrough project made from a course workshop also offers **Place in the course…**, which writes the link into the workshop's guide by the course standard ([Walkthroughs](walkthroughs.md), *Publish to Vimeo* and *Place in the course*).
+
 ## What to do
 
 1. Write the notes first; see [The slide editor](slide-editor.md). A slide without notes shows for a few seconds in silence.
@@ -57,9 +59,12 @@ A cancel is never reported as a failure, and a failure never as a cancel. The jo
 
 The job is recorded in the audit log as `project.generate` with the job id, the preset (or "preview" for **Preview 15 s**), and the provider and voice.
 
+**Publish to Vimeo** is a job of its own kind, `vimeo_publish` (`api/routers/vimeo.py`, `services/vimeo.py`): `POST /api/projects/{id}/vimeo/publish` creates the video on Vimeo with the tus upload approach, sends the MP4 in 50 MB pieces, polls until Vimeo has processed it and writes `vimeo` - the id, the link (an Unlisted video's with its hash), the privacy - onto the project record; one job per project, so a publish waits for a render and a render for a publish. It is recorded as `project.vimeo_publish` ("name -> vimeo 123456789 (unlisted)") once the video is there - never the token. The details, the refusals and the place in the course are in [Walkthroughs](walkthroughs.md), *Under the hood*.
+
 ## See also
 
+- [Walkthroughs](walkthroughs.md): Publish to Vimeo and Place in the course
 - [Output presets](../reference/output-presets.md): the resolution and the encode of each preset
-- [Studio settings](../admin/studio-settings.md): the defaults the card starts from
+- [Studio settings](../admin/studio-settings.md): the defaults the card starts from, the Vimeo access token
 - [Narration engines](../ai/narration-engines.md): Edge TTS and Kokoro
 - [Jobs](jobs.md)

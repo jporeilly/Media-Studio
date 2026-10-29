@@ -70,6 +70,11 @@ PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
     ("POST", "/api/projects/{pid}/ai/analyze"): {},
     ("POST", "/api/projects/{pid}/slides/{index}/ai/enhance"): {},
     ("POST", "/api/projects/{pid}/slides/{index}/ai/qa-fix"): {"criterion": "grammar", "issue": "x"},
+    # Publish to Vimeo and Place in the course (api/routers/vimeo.py): the project's owner or an admin, like the rest.
+    ("GET", "/api/projects/{pid}/vimeo"): None,
+    ("POST", "/api/projects/{pid}/vimeo/publish"): {"title": "T", "description": "", "privacy": "unlisted"},
+    ("POST", "/api/projects/{pid}/vimeo/place/plan"): {},
+    ("POST", "/api/projects/{pid}/vimeo/place"): {"guide_sha256": "a" * 64},
 }
 
 # Routes that carry no ``{pid}`` ON PURPOSE and so are outside the sweep: the

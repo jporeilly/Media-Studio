@@ -25,6 +25,23 @@ export interface StudioSettings {
   courses_folder: string;
   /** "Allow export into the Courses folder" (W2c): off by default; on, Export to course may write into a course. */
   courses_export: boolean;
+  /** Publish to Vimeo (V1): whether a token is set - the token itself is write-only and never answered. */
+  vimeo_token_set: boolean;
+  /** Whether MEDIA_STUDIO_VIMEO_TOKEN in the server's environment sets it for this run (the stored one is then not used). */
+  vimeo_token_env: boolean;
+  /** The privacy a published video starts with: unlisted (the default), private or anybody. */
+  vimeo_privacy: string;
+}
+
+/** The PUT body: the changed settings, and the write-only token when it is being set ("" clears it). */
+export type StudioChanges = Partial<StudioSettings> & { vimeo_token?: string };
+
+/** What the Studio card says under the token field: the environment's, a stored one, none, or the clear to come (`draft`: null untouched, "" to clear). */
+export function tokenState(settings: Pick<StudioSettings, "vimeo_token_set" | "vimeo_token_env">, draft: string | null): string {
+  if (settings.vimeo_token_env) return "Set by the environment (MEDIA_STUDIO_VIMEO_TOKEN) for this run; the stored token is not used.";
+  if (draft === "" && settings.vimeo_token_set) return "The token will be cleared when you save.";
+  if (draft) return "The new token will be stored when you save.";
+  return settings.vimeo_token_set ? "A token is set." : "No token is set.";
 }
 
 /** One selectable value, with the note the form shows as its hint. */
@@ -52,6 +69,8 @@ export interface StudioOptions {
   transition_duration: Range;
   watermark_position: { options: Option[] };
   watermark_opacity: Range;
+  /** The Vimeo privacies (V1); a backend older than this card answers without them. */
+  vimeo_privacy?: { options: Option[] };
 }
 
 /** What GET/PUT /api/settings/studio return. */

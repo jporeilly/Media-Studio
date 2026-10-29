@@ -65,6 +65,10 @@ PROJECT_REVOICE = "project.revoice"
 # cleared. The detail carries the range count and the seconds removed - never
 # the times, which would say where every cut is, and never any text.
 PROJECT_EDIT = "project.edit"
+# A rendered video published to Vimeo (``services.vimeo``): the row is written by
+# the job once the video is there - "<name> -> vimeo <id> (<privacy>)" - never
+# the token, never the description.
+PROJECT_VIMEO_PUBLISH = "project.vimeo_publish"
 
 # Screen capture (T3). A recording's start, its save (the finish job; the
 # project it makes is a ``project.import`` row of its own) and its discard;
@@ -111,6 +115,9 @@ WALKTHROUGH_EXPORT_COURSE = "walkthrough.export_course"
 # started (the job itself is a ``project.generate`` row, as any render's). The detail names the project
 # and counts the steps, never a step's text.
 WALKTHROUGH_MAKE_VIDEO = "walkthrough.make_video"
+# The Vimeo link of a walkthrough's video written into its course workshop's guide (``services.course_video``):
+# "<course>/<slug>: vimeo <id>", ", welcome tour" when course.json took it too. The plan is a read.
+WALKTHROUGH_PLACE_VIDEO = "walkthrough.place_video"
 
 # The music library (``services.music``): studio-wide, so the row is what says
 # who put a file there or took it away. The detail carries the name and the
@@ -146,7 +153,7 @@ ACTIONS: tuple[str, ...] = (
     USER_CREATE, USER_UPDATE, USER_RESET_PASSWORD,
     SETTINGS_UPDATE, SETTINGS_PASSWORD_POLICY,
     PROJECT_IMPORT, PROJECT_DELETE, PROJECT_TRANSCRIBE, PROJECT_TRANSCRIPT_EDIT,
-    PROJECT_TRANSCRIPT_TIMING, PROJECT_GENERATE, PROJECT_REVOICE, PROJECT_EDIT,
+    PROJECT_TRANSCRIPT_TIMING, PROJECT_GENERATE, PROJECT_REVOICE, PROJECT_EDIT, PROJECT_VIMEO_PUBLISH,
     MUSIC_UPLOAD, MUSIC_DELETE,
     SLIDES_UPDATE, SLIDES_BULK_UPDATE, SLIDES_RENDER, SLIDES_UNDO, SLIDES_RESET,
     AI_NOTES, AI_ENHANCE, AI_QA, AI_TONE, AI_TRANSLATE, AI_PACING, AI_QA_DOC, AI_QA_FIX,
@@ -155,6 +162,7 @@ ACTIONS: tuple[str, ...] = (
     CAPTURE_REFUSED, CAPTURE_ANNOTATE, CAPTURE_REVERT,
     WALKTHROUGH_CREATE, WALKTHROUGH_UPDATE, WALKTHROUGH_ADD_STEP, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_DUPLICATE,
     WALKTHROUGH_DELETE, WALKTHROUGH_IMPORT, WALKTHROUGH_GUIDED_CAPTURE, WALKTHROUGH_EXPORT_COURSE, WALKTHROUGH_MAKE_VIDEO,
+    WALKTHROUGH_PLACE_VIDEO,
 )
 
 # What the action was done to (the ``entity`` column).

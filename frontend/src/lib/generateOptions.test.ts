@@ -27,6 +27,9 @@ const STUDIO: StudioSettings = {
   watermark_opacity: 0.3,
   courses_folder: "",
   courses_export: false,
+  vimeo_token_set: false,
+  vimeo_token_env: false,
+  vimeo_privacy: "unlisted",
 };
 
 const TRANSITIONS: Option[] = [

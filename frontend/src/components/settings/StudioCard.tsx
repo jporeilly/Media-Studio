@@ -10,11 +10,17 @@ import {
   useStudioSettings,
   useVoices,
   withCurrent,
+  tokenState,
   type Option,
+  type StudioChanges,
   type StudioPayload,
   type StudioSettings,
 } from "../../lib/studioSettings";
+import { PRIVACIES } from "../../lib/vimeo";
 import { Button, Card, ErrorBox, Field, Input, Select, Spinner } from "../ui";
+
+const VIMEO_TOKEN_HINT =
+  "A personal access token from developer.vimeo.com (My apps › your app › Generate an access token) with the scopes public private upload edit video_files. Stored in the studio's config and never shown again; MEDIA_STUDIO_VIMEO_TOKEN in the server's environment overrides it. Unlisted and Private videos need Vimeo Plus or higher.";
 
 function Options({ options }: { options: Option[] }) {
   return <>{options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</>;
@@ -29,11 +35,15 @@ export function StudioCard() {
   const edge = useVoices("edge_tts");
   const kokoro = useVoices("kokoro");
   const [draft, setDraft] = useState<StudioSettings | null>(null);
+  // The Vimeo token is write-only: typed here, sent once, never read back (null = untouched; "" = clear it).
+  const [vimeoToken, setVimeoToken] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const form = draft ?? studio.data?.settings ?? null;
   const options = studio.data?.options ?? null;
-  const changes = form && studio.data ? changedSettings(studio.data.settings, form) : {};
+  const settingChanges: StudioChanges = form && studio.data ? changedSettings(studio.data.settings, form) : {};
+  const tokenChange = vimeoToken !== null && (vimeoToken !== "" || !!form?.vimeo_token_set);
+  const changes: StudioChanges = tokenChange ? { ...settingChanges, vimeo_token: vimeoToken ?? "" } : settingChanges;
   const dirty = Object.keys(changes).length > 0;
   const pauseOk = !!form && !!options && inRange(form.transition_pause, options.transition_pause);
   const volumeOk = !!form && !!options && inRange(form.music_volume, options.music_volume);
@@ -43,13 +53,14 @@ export function StudioCard() {
   const valid = pauseOk && volumeOk && durationOk && opacityOk && textOk;
 
   const save = useMutation({
-    mutationFn: (body: Partial<StudioSettings>) => api.put<StudioPayload>("/api/settings/studio", body),
+    mutationFn: (body: StudioChanges) => api.put<StudioPayload>("/api/settings/studio", body),
     onSuccess: (r) => {
       qc.setQueryData(STUDIO_QUERY_KEY, r);
       qc.invalidateQueries({ queryKey: STUDIO_QUERY_KEY });
       // The default provider changed, or a voice list may have (the Kokoro model landing).
       qc.invalidateQueries({ queryKey: ["voices"] });
       setDraft(null);
+      setVimeoToken(null);
       setSaved(true);
     },
     onError: () => setSaved(false),
@@ -66,6 +77,8 @@ export function StudioCard() {
   const volume = options?.music_volume;
   const duration = options?.transition_duration;
   const opacity = options?.watermark_opacity;
+  // The server's list of privacies, else the page's own (a backend older than this card).
+  const privacyOptions = options?.vimeo_privacy?.options ?? PRIVACIES;
 
   return (
     <Card title="Studio" subtitle="Narration, transcription and output defaults for everyone.">
@@ -117,6 +130,31 @@ export function StudioCard() {
                 <input type="checkbox" checked={!!form.courses_export} disabled={readOnly} onChange={(e) => update({ courses_export: e.target.checked })} data-courses-export="" />
                 <span>Allow export into the Courses folder</span>
               </label>
+            </Field>
+
+            <Field label="Vimeo access token" hint={VIMEO_TOKEN_HINT}>
+              <div style={{ display: "grid", gap: 6 }}>
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={vimeoToken ?? ""}
+                  disabled={readOnly}
+                  placeholder={form.vimeo_token_set ? "(set — paste a new token to replace it)" : "(not set)"}
+                  onChange={(e) => { setSaved(false); setVimeoToken(e.target.value); }}
+                  data-vimeo-token=""
+                />
+                <span className="os-muted os-small" data-vimeo-token-state="">{tokenState(form, vimeoToken)}</span>
+                {isAdmin && form.vimeo_token_set && vimeoToken !== "" && (
+                  <div>
+                    <Button size="sm" onClick={() => { setSaved(false); setVimeoToken(""); }} data-vimeo-token-clear="">Clear the token</Button>
+                  </div>
+                )}
+              </div>
+            </Field>
+            <Field label="Vimeo privacy" hint={noteOf(privacyOptions, form.vimeo_privacy ?? "unlisted") ?? "The privacy a published video starts with; the Publish dialog can change it per video."}>
+              <Select value={form.vimeo_privacy ?? "unlisted"} disabled={readOnly} onChange={(e) => update({ vimeo_privacy: e.target.value })} data-vimeo-privacy="">
+                <Options options={privacyOptions} />
+              </Select>
             </Field>
 
             <Field label="Transition pause" hint={`Seconds of silence between slides (${pause.min} to ${pause.max}).`}>

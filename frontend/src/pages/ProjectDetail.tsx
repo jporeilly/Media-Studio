@@ -6,6 +6,7 @@ import { api, errorMessage } from "../api/client";
 import { CancelJobButton, JobNotice, JobProgress } from "../components/project/JobProgress";
 import { SlidesCard } from "../components/project/SlidesCard";
 import { TranscriptCard } from "../components/project/TranscriptCard";
+import { VimeoPanel } from "../components/project/VimeoPanel";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import { GENERATE_JOB_KIND, canCancel, cancelTitle } from "../lib/ai";
@@ -30,6 +31,7 @@ import {
   type SubtitleMode,
 } from "../lib/generateOptions";
 import { defaultVoiceFor, pickVoice, useStudioSettings, useVoices, type Option } from "../lib/studioSettings";
+import { VIMEO_JOB_KIND, type VimeoRecord } from "../lib/vimeo";
 
 interface Project {
   id: string;
@@ -57,6 +59,8 @@ interface Project {
   revoiced_language?: string;
   narration_audio?: string;
   revoice_failed_sentences?: number;
+  /** The video as published to Vimeo (V2), once it has been; Publish again replaces it and keeps the earlier ids in `previous`. */
+  vimeo?: VimeoRecord | null;
 }
 interface Lang {
   name: string;
@@ -265,8 +269,11 @@ export default function ProjectDetailPage() {
   const dismissNotice = followedJob.dismissNotice;
   const generateNotice = noticeFor("generate");
   const revoiceNotice = noticeFor("revoice");
+  const vimeoNotice = noticeFor("vimeo");
   const running = generate.isPending || (jobActive && activeKind === "generate");
   const jobError = generate.isError ? errorMessage(generate.error) : activeKind === "generate" ? jobErrText : null;
+  // The Vimeo panel's job (a publish) shows its error on the panel, not on the Generate card.
+  const vimeoError = activeKind === VIMEO_JOB_KIND ? jobErrText ?? null : null;
 
   const providerOptions = studio.data?.options.tts_provider.options ?? [];
   const voiceOptions = voiceList ?? [];
@@ -602,6 +609,23 @@ export default function ProjectDetailPage() {
                       </a>
                     ))}
                   </div>
+                  {/* Publish to Vimeo (V2) and, for a walkthrough from a course workshop, Place in the course (V3): the
+                      panel follows the publish job through the page's one followed job, as the cards do. */}
+                  <VimeoPanel
+                    projectId={id}
+                    project={p}
+                    job={jobData}
+                    jobActive={jobActive}
+                    activeKind={activeKind}
+                    mayCancel={mayCancel}
+                    onCancelJob={followedJob.cancel}
+                    cancelPending={followedJob.cancelPending}
+                    cancelError={followedJob.cancelError}
+                    jobError={vimeoError}
+                    jobNotice={vimeoNotice}
+                    onDismissJobNotice={dismissNotice}
+                    onJobStarted={follow}
+                  />
                 </div>
               )}
             </div>

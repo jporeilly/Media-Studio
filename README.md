@@ -46,7 +46,10 @@ the whole app suite looks and feels the same.
   then writes the captured steps back into each step's own workshop guide, each as the content
   manager's annotated figure (previewed as a diff first; written only when an administrator
   allows it, else as a zip) - its pin at the hotspot drawn by a Content Manager from 0.7.42 - and
-  the walkthrough downloads as an interactive player that opens offline in a web browser.
+  the walkthrough downloads as an interactive player that opens offline in a web browser. Make a
+  video compiles it into a narrated MP4, Publish to Vimeo hosts that video (any project's) on
+  Vimeo, and Place in the course writes the Vimeo link into the workshop's guide, where the
+  Content Manager embeds it.
 - **An AI assistant on the slides.** A local Ollama model writes and rewrites speaker
   notes, reviews them for grammar, tone, flow and transitions and fixes what it finds,
   adapts them to an audience, translates them, paces them, scores the deck for video and

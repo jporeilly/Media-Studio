@@ -64,6 +64,9 @@ class StudioSettingsIn(BaseModel):
     watermark_opacity: StrictFloat | None = None
     courses_folder: str | None = None
     courses_export: StrictBool | None = None
+    # Write-only (the GET answers ``vimeo_token_set``); "" clears it.
+    vimeo_token: str | None = None
+    vimeo_privacy: str | None = None
 
 
 class LoginRequest(BaseModel):

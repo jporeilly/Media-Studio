@@ -21,6 +21,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "auth" / "media_studio.db")
     monkeypatch.setattr(config, "_config", {})
     monkeypatch.setattr(config, "save", lambda: None)
+    # The Vimeo token's environment override (V1) never reaches these tests from the developer's shell.
+    monkeypatch.delenv("MEDIA_STUDIO_VIMEO_TOKEN", raising=False)
 
 
 # -- the service -----------------------------------------------------------
@@ -44,6 +46,9 @@ def test_defaults_when_nothing_is_stored():
         "watermark_opacity": 0.5,
         "courses_folder": "",  # W2: not set until an administrator points the app at a courses folder
         "courses_export": False,  # W2c: Export to course writes into the courses folder only once an administrator allows it
+        "vimeo_token_set": False,  # V1: write-only - the token itself is never answered
+        "vimeo_token_env": False,
+        "vimeo_privacy": "unlisted",
     }
     assert DEFAULT_CONFIG["courses_folder"] == ""
     # The generation defaults are the engine's own (utils/config.py DEFAULT_CONFIG).
@@ -151,6 +156,11 @@ def test_empty_update_writes_nothing(monkeypatch):
         ("courses_export", "yes", "is on or off"),
         ("courses_export", 1, "is on or off"),
         ("courses_export", None, "is on or off"),
+        ("vimeo_token", 5, "must be text"),
+        ("vimeo_token", "two words", "one word"),
+        ("vimeo_token", "x" * 201, "longer than 200"),
+        ("vimeo_privacy", "password", "Unknown Vimeo privacy 'password'"),
+        ("vimeo_privacy", None, "Unknown Vimeo privacy"),
         ("brand_colour", "red", "Unknown setting: brand_colour"),
     ],
 )
@@ -243,6 +253,10 @@ def test_describe_lists_the_options_the_form_renders_from():
     assert [o["value"] for o in positions] == ["top-left", "top-right", "bottom-left", "bottom-right", "center"]
     assert positions[-1]["label"] == "Center"
     assert d["watermark_opacity"] == {"min": 0.1, "max": 1.0, "step": 0.05}
+    privacies = d["vimeo_privacy"]["options"]
+    assert [o["value"] for o in privacies] == ["unlisted", "private", "anybody"]
+    assert [o["label"] for o in privacies] == ["Unlisted", "Private", "Anybody"]
+    assert all("Plus" in o["note"] for o in privacies[:2]) and "free account" in privacies[2]["note"]
 
 
 def test_resolve_render_options_fills_nulls_from_the_studio():

@@ -18,6 +18,9 @@ const SAVED: StudioSettings = {
   watermark_opacity: 0.5,
   courses_folder: "",
   courses_export: false,
+  vimeo_token_set: false,
+  vimeo_token_env: false,
+  vimeo_privacy: "unlisted",
 };
 
 const VOICES: Voice[] = [

@@ -33,6 +33,17 @@ Each setting maps to ONE config key - the key the engine reads:
   Courses folder" (W2c): False (the default) = Export to course previews and offers the
   zip, and never writes into the folder; True = it may write the figures (and the player)
   into the course (:func:`courses_export_allowed`).
+- ``vimeo_token``      ``config._config["vimeo_token"]`` - the Vimeo access token Publish to
+  Vimeo uploads with (a personal access token from developer.vimeo.com with the scopes
+  public private upload edit video_files). WRITE-ONLY: the PUT takes it ("" clears it), the
+  GET answers ``vimeo_token_set`` (and ``vimeo_token_env``), never the token. The
+  environment's ``MEDIA_STUDIO_VIMEO_TOKEN`` (the config's ``.env`` is read into the
+  environment at start) wins over the stored one and is never written to the config
+  (:func:`vimeo_token`).
+- ``vimeo_privacy``    ``config._config["vimeo_privacy"]`` - the privacy a published video
+  starts with: ``unlisted`` (the default), ``private`` or ``anybody``
+  (``services.vimeo.PRIVACIES``; :func:`vimeo_privacy`). Unlisted and Private need Vimeo
+  Plus or higher; the publish says so when Vimeo refuses them.
 
 The transition, pause and watermark values are the *defaults* of a generate
 job: the Generate card prefills them and every generate request may override
@@ -47,6 +58,7 @@ import os
 import uuid
 from pathlib import Path
 
+from services.vimeo import DEFAULT_PRIVACY as VIMEO_DEFAULT_PRIVACY, PRIVACIES as VIMEO_PRIVACIES
 from utils.config import config
 
 PROVIDERS = {
@@ -85,6 +97,11 @@ MUSIC_VOLUME_RANGE = {"min": 0.0, "max": 1.0, "step": 0.05}
 TRANSITION_DURATION_RANGE = {"min": 0.1, "max": 2.0, "step": 0.1, "unit": "seconds"}
 WATERMARK_OPACITY_RANGE = {"min": 0.1, "max": 1.0, "step": 0.05}
 
+#: The environment variable that overrides the stored Vimeo token for the run (never written to the config).
+VIMEO_TOKEN_ENV = "MEDIA_STUDIO_VIMEO_TOKEN"
+#: A token is one word: no white space inside, and no longer than this (a personal access token is 32 characters).
+MAX_VIMEO_TOKEN_CHARS = 200
+
 # The visual transitions core/video_creator.py renders, with the labels the
 # desktop edition's settings tab used. "none" keeps the render at its static
 # frame rate; anything else raises it so the effect has frames to play on.
@@ -114,6 +131,7 @@ FIELDS = (
     "slide_transition", "transition_duration",
     "watermark_text", "watermark_position", "watermark_opacity",
     "courses_folder", "courses_export",
+    "vimeo_token", "vimeo_privacy",
 )
 
 # The settings a generate request may override per job (GenerateRequest sends
@@ -152,6 +170,27 @@ def courses_export_allowed() -> bool:
     return config._config.get("courses_export") is True
 
 
+def vimeo_token_from_env() -> bool:
+    """Whether the environment sets the token for this run (``MEDIA_STUDIO_VIMEO_TOKEN``)."""
+    return bool((os.environ.get(VIMEO_TOKEN_ENV) or "").strip())
+
+
+def vimeo_token() -> str:
+    """The Vimeo access token a publish uploads with: the environment's, else the stored one, else "". Read at
+    request time, never logged, never answered by the API."""
+    env = (os.environ.get(VIMEO_TOKEN_ENV) or "").strip()
+    if env:
+        return env
+    stored = config._config.get("vimeo_token")
+    return stored.strip() if isinstance(stored, str) else ""
+
+
+def vimeo_privacy() -> str:
+    """The privacy a published video starts with: the stored one when it is one we know, else ``unlisted``."""
+    stored = config._config.get("vimeo_privacy")
+    return stored if stored in VIMEO_PRIVACIES else VIMEO_DEFAULT_PRIVACY
+
+
 # -- read ------------------------------------------------------------------
 
 def get_settings() -> dict:
@@ -173,6 +212,10 @@ def get_settings() -> dict:
         "watermark_opacity": float(config.watermark_opacity),
         "courses_folder": str(config._config.get("courses_folder") or ""),
         "courses_export": courses_export_allowed(),
+        # Write-only: whether a token is set (and whether the environment sets it), never the token.
+        "vimeo_token_set": bool(vimeo_token()),
+        "vimeo_token_env": vimeo_token_from_env(),
+        "vimeo_privacy": vimeo_privacy(),
     }
 
 
@@ -207,6 +250,9 @@ def describe() -> dict:
             "options": [{"value": key, "label": label} for key, label in WATERMARK_POSITIONS.items()],
         },
         "watermark_opacity": dict(WATERMARK_OPACITY_RANGE),
+        "vimeo_privacy": {
+            "options": [{"value": key, **meta} for key, meta in VIMEO_PRIVACIES.items()],
+        },
     }
 
 
@@ -445,6 +491,24 @@ def _courses_export(value) -> bool:
     return value
 
 
+def _vimeo_token(value) -> str:
+    """The token stripped ("" clears it): one word, within the cap. The message never repeats the value."""
+    if not isinstance(value, str):
+        raise ValueError("The Vimeo access token must be text (leave it empty to clear it).")
+    text = value.strip()
+    if any(ch.isspace() for ch in text):
+        raise ValueError("The Vimeo access token is one word: it holds no space.")
+    if len(text) > MAX_VIMEO_TOKEN_CHARS:
+        raise ValueError(f"The Vimeo access token is longer than {MAX_VIMEO_TOKEN_CHARS} characters: paste the token alone.")
+    return text
+
+
+def _vimeo_privacy(value) -> str:
+    if value not in VIMEO_PRIVACIES:
+        raise ValueError(f"Unknown Vimeo privacy '{value}'. Choose one of: {', '.join(VIMEO_PRIVACIES)}.")
+    return value
+
+
 _VALIDATORS = {
     "tts_provider": _provider,
     "edge_tts_voice": _edge_voice,
@@ -462,6 +526,8 @@ _VALIDATORS = {
     "watermark_opacity": _watermark_opacity,
     "courses_folder": _courses_folder,
     "courses_export": _courses_export,
+    "vimeo_token": _vimeo_token,
+    "vimeo_privacy": _vimeo_privacy,
 }
 
 

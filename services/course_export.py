@@ -88,6 +88,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from services import walkthroughs, workshops
 from services.studio_settings import courses_export_allowed
@@ -1028,26 +1029,62 @@ def _probe(folder: Path) -> None:
     probe.unlink()
 
 
-def check_writable(plan: Plan, folders: list[Path], files: list[Path], course_id: str) -> None:
+def check_writable(course_dir: Path, folders: list[Path], files: list[Path], course_id: str, *, failed_message: str = WRITE_FAILED_MESSAGE) -> None:
     """Before the first byte (K3): every folder the export writes into takes a new file (its nearest existing
     folder, for one still to be made), and every existing file it replaces or removes is writable and not a link.
-    :class:`ExportWriteFailed` naming the first that is not."""
+    :class:`ExportWriteFailed` naming the first that is not (``failed_message`` is its template: the export's, or
+    the place's)."""
     def rel(path: Path) -> str:
-        return f"{course_id}/{path.relative_to(plan.course_dir).as_posix()}"
+        return f"{course_id}/{path.relative_to(course_dir).as_posix()}"
 
     for folder in folders:
         target = folder
-        while not target.exists() and target != plan.course_dir:
+        while not target.exists() and target != course_dir:
             target = target.parent
         try:
             _probe(target)
         except OSError as exc:
-            raise ExportWriteFailed(WRITE_FAILED_MESSAGE.format(path=rel(folder), reason=exc.strerror or str(exc))) from None
+            raise ExportWriteFailed(failed_message.format(path=rel(folder), reason=exc.strerror or str(exc))) from None
     for path in files:
         if workshops._is_link(path):
             raise ExportRefused(f"{rel(path)} is a link: nothing is written through it.")
         if path.exists() and not os.access(path, os.W_OK):
-            raise ExportWriteFailed(WRITE_FAILED_MESSAGE.format(path=rel(path), reason="it is read-only"))
+            raise ExportWriteFailed(failed_message.format(path=rel(path), reason="it is read-only"))
+
+
+def write_course_files(course_dir: Path, course_id: str, files: list[tuple[Path, bytes]], expected: dict[Path, str | None], *,
+                       failed_message: str = WRITE_FAILED_MESSAGE, changed_message_of: Callable[[str], str] = changed_message) -> list[str]:
+    """Write ``files`` - ``(a target inside the course, its new bytes)`` - the way :func:`write` writes an export
+    (V3's Place in the course reuses it for a video's link): under the write lock, every folder on each target's way
+    proven a real folder of the course (:func:`own_folder`), every target checked writable before the first byte
+    (:func:`check_writable`), each file's sha256 checked against ``expected`` (the sha256 the preview showed; None
+    for a file that was not there) just before it is replaced - :class:`GuideChanged` with ``changed_message_of``
+    naming it - and every write through ONE :class:`_Journal`: a failure part-way puts every file back and answers
+    :class:`ExportWriteFailed` (``failed_message``). Returns the paths written, relative to the course folder."""
+    with _write_lock:
+        for target, _data in files:
+            folder = course_dir
+            for part in target.relative_to(course_dir).parts[:-1]:
+                folder = own_folder(folder, part)
+        folders = sorted({target.parent for target, _data in files}, key=str)
+        check_writable(course_dir, folders, [target for target, _data in files], course_id, failed_message=failed_message)
+        journal = _Journal(course_dir, course_id)
+        written: list[str] = []
+        try:
+            for target, data in files:
+                rel = f"{course_id}/{target.relative_to(course_dir).as_posix()}"
+                if _file_sha(target) != expected.get(target):
+                    raise GuideChanged(changed_message_of(rel))
+                if journal.write(target.parent, target.name, data):
+                    written.append(target.relative_to(course_dir).as_posix())
+        except (GuideChanged, ExportRefused):
+            journal.rollback()
+            raise
+        except OSError as exc:
+            journal.rollback()
+            raise ExportWriteFailed(failed_message.format(path=journal.current, reason=exc.strerror or str(exc))) from None
+        journal.commit()
+    return written
 
 
 def _shas_for(plan: Plan, shas: dict[str | None, str]) -> dict[str, str]:
@@ -1105,7 +1142,7 @@ def write(rec: dict, shas: dict[str | None, str], player: bool = False) -> dict:
         targets += [folder / name for folder, name, _why in plan.debris]
         # Only the folders something goes into are probed: an export with nothing to write touches nothing.
         folders = [f for f in (*workshop_dirs.values(), images_dir, player_dir) if f is not None and any(t.parent == f for t in targets)]
-        check_writable(plan, folders, targets, course_id)
+        check_writable(plan.course_dir, folders, targets, course_id)
 
         journal = _Journal(plan.course_dir, course_id)
         written: list[str] = []

@@ -141,8 +141,8 @@ export function jobToAskAgain(state: FollowState): string | null {
   return unreached.id;
 }
 
-/** The card of the project page that shows a job's progress and its notices. */
-export type JobCard = "slides" | "generate" | "transcript" | "revoice";
+/** The card of the project page that shows a job's progress and its notices (`vimeo`: the Generate card's Vimeo panel). */
+export type JobCard = "slides" | "generate" | "transcript" | "revoice" | "vimeo";
 
 /**
  * Which card owns a job. A kind the page does not know yet (a job started from the Slides card, lost before
@@ -151,6 +151,7 @@ export type JobCard = "slides" | "generate" | "transcript" | "revoice";
  */
 export function cardForJob(kind: string | null | undefined, projectKind: string | null | undefined): JobCard {
   if (kind === "generate") return "generate";
+  if (kind === "vimeo_publish") return "vimeo";
   if (kind === "transcribe") return "transcript";
   if (kind === "revoice") return "revoice";
   if (kind) return "slides"; // render-slides and every ai-* kind

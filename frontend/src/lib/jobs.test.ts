@@ -201,6 +201,7 @@ describe("cardForJob", () => {
     expect(cardForJob("revoice", "video")).toBe("revoice");
     expect(cardForJob("render-slides", "deck")).toBe("slides");
     expect(cardForJob("ai-enhance", "pdf")).toBe("slides");
+    expect(cardForJob("vimeo_publish", "walkthrough")).toBe("vimeo");
   });
 
   it("sends a kind not known yet to the card that starts such jobs", () => {

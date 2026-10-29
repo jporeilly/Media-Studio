@@ -65,6 +65,13 @@ AUDIT_EXEMPT: dict[str, str] = {
         "write itself is audited (walkthrough.export_course), as the zips, both "
         "reads, are not."
     ),
+    "api.routers.vimeo.place_plan": (
+        "Place in the course's preview (V3): it reads the project's snapshot and "
+        "the workshop's guide, manifest and course.json and answers what the place "
+        "would write, writing nothing; a POST only because it takes options (the "
+        "caption, the Welcome tour, the insertion). The write itself is audited "
+        "(walkthrough.place_video)."
+    ),
     "api.routers.capture.forget_frozen": (
         "Deletes those throwaway overlay pictures once they have served: "
         "housekeeping of files no user made or named, with no record to change."
