@@ -78,6 +78,34 @@ class FileItem:
             print(f"Error loading PDF: {e}")
         return False
 
+    def load_walkthrough(self) -> bool:
+        """Load a walkthrough project's snapshot (``<name>.walkthrough.json``, W3),
+        composing the stills.
+
+        The ``load_pdf`` pattern (``services.walkthrough_video.materialise``):
+        an existing project is kept - its narration, overrides and undo history
+        are what the slide editor writes - and only a still that is missing is
+        composed again; the project is created fresh only when there is none,
+        or when its slide count no longer matches the snapshot's steps. One
+        that exists but cannot be read raises ``ProjectStateError``.
+        """
+        try:
+            from services.walkthrough_video import materialise
+
+            project_dir = get_project_dir(self.path, self._projects_base)
+            self.project_manager = ProjectManager(project_dir)
+            if self.project_manager.project_file.exists():
+                self.project_manager.load()
+            self.slide_count = materialise(self.path, self.project_manager)
+            self.has_project = True
+            self.reader = None
+            return True
+        except ProjectStateError:
+            raise
+        except Exception as e:
+            print(f"Error loading walkthrough: {e}")
+        return False
+
     def load_by_suffix(self) -> bool:
         """Load this item by file type: deck, PDF, or imported video project.
 
@@ -90,6 +118,8 @@ class FileItem:
             return self.load_existing_video_project()
         if suffix == ".pdf":
             return self.load_pdf()
+        if self.path.name.lower().endswith(".walkthrough.json"):
+            return self.load_walkthrough()
         return self.load()
 
     def load_existing_video_project(self) -> bool:

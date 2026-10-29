@@ -62,6 +62,11 @@ class SlideRenderState:
     original_start_time: Optional[float] = None  # Video import: section start in source
     original_end_time: Optional[float] = None  # Video import: section end in source
     original_segments: Optional[List[dict]] = None  # Whisper segments: [{"start": f, "end": f, "text": s}]
+    # A walkthrough project (W3): the hotspot in the still's frame pixels the render zooms to
+    # ({x, y, width, height}; None without one, or with Zoom off), and the chapter this slide STARTS
+    # (None when it continues the one before). A deck's slides carry neither.
+    focus: Optional[dict] = None
+    chapter: Optional[str] = None
 
 
 @dataclass

@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import mimetypes
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -271,9 +272,42 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     only the processor's own word (``cancelled``) makes the result a cancel.
     """
     record = require_project(pid, user)
-    if record.get("kind") not in ("deck", "pdf"):
-        raise HTTPException(status_code=400, detail="Only deck and PDF projects can generate a video.")
+    if record.get("kind") not in slides.SLIDE_KINDS:
+        raise HTTPException(status_code=400, detail=NOT_GENERATABLE)
+    started = start_generate(record, body, user)
+    audit(PROJECT_GENERATE, user=user, entity="project", entity_id=pid, detail=generate_detail(started))
+    return {"job_id": started.job_id}
 
+
+NOT_GENERATABLE = "Only deck, PDF and walkthrough projects can generate a video."
+
+
+class StartedGenerate(NamedTuple):
+    """What ``start_generate`` began: the job and what it was pinned to, for the audit row."""
+
+    job_id: str
+    provider: str
+    voice_id: str
+    preset: str
+    preview: bool
+
+
+def generate_detail(started: StartedGenerate) -> str:
+    """The ``project.generate`` row's detail: the job id, the preset ("preview" for a preview), the provider and voice."""
+    return f"job {started.job_id}, {'preview' if started.preview else started.preset}, {started.provider}/{started.voice_id}"
+
+
+def start_generate(record: dict, body: GenerateRequest, user: dict) -> StartedGenerate:
+    """Start the generate job of ``record`` (a deck, a PDF or a walkthrough
+    project the caller may act on; the route has checked) with ``body``'s
+    options and the studio's defaults as they are now - the ONE routine the
+    Generate card's route and the walkthrough's **Make a video**
+    (``api.routers.walkthroughs``, which passes an empty ``GenerateRequest``)
+    share, so the video a walkthrough makes is exactly the one its project
+    page would. Each route writes the ``project.generate`` row itself
+    (``generate_detail``): the audit guard reads an endpoint's own source.
+    The job's own course is the route's docstring above."""
+    pid = record["id"]
     preset = get_preset(body.preset)
     provider, voice_id = _narration(body.provider, body.voice_id)
     # The studio defaults are read now, like the narration, so the job is
@@ -281,6 +315,7 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     render = studio_settings.resolve_render_options(body.model_dump())
     whisper_model = studio_settings.resolve_whisper_model(None) if body.subtitles == "whisper" else ""
     preview = body.preview_seconds > 0
+    kind = record.get("kind")
 
     def work(progress):
         # Imported lazily so the media engine and its heavy deps load only when a
@@ -293,8 +328,11 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
         source_path = output_dir / record["source_filename"]
 
         fi = file_item_module.FileItem(source_path, projects_base=output_dir)
-        if record.get("kind") == "pdf":
+        if kind == "pdf":
             fi.load_pdf()
+        elif kind == "walkthrough":
+            # The snapshot: the inner project kept, a missing still composed again (W3).
+            fi.load_walkthrough()
         else:
             fi.load()
 
@@ -310,11 +348,21 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             progress(1.0, line)
             return {"cancelled": True, "stage": stage, **result}
 
+        # A walkthrough's pause between steps is the player's stage colour,
+        # not a deck's black (W3); a deck's processor is built exactly as before.
+        if kind == "walkthrough":
+            from services.walkthrough_video import STAGE_COLOUR_FFMPEG
+
+            kind_options = {"pause_colour": STAGE_COLOUR_FFMPEG}
+        else:
+            kind_options = {}
+
         processor = processing.VideoProcessor(
             voice_id=voice_id,
             provider=provider,
             cancel_check=cancel_check,
             resolution=tuple(preset["resolution"]),
+            **kind_options,
             speed=body.speed,
             video_bitrate=preset["video_bitrate"],
             # The rest of the preset's encode (Q1); a preview keeps the
@@ -350,9 +398,10 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
             [fi], output_dir=output_dir, progress=progress, preview_seconds=body.preview_seconds,
         )
         # Where this run's slide images came from (PowerPoint or the title-only
-        # Pillow fallback; a PDF's pages are its own renders), for the slide
-        # editor - recorded even when the encode failed, the images are there.
-        backend = "pdf" if record.get("kind") == "pdf" else getattr(processor, "images_backend", None)
+        # Pillow fallback; a PDF's pages are its own renders; a walkthrough's
+        # stills its own composition), for the slide editor - recorded even
+        # when the encode failed, the images are there.
+        backend = "pdf" if kind == "pdf" else "walkthrough" if kind == "walkthrough" else getattr(processor, "images_backend", None)
         if backend:
             slides.record_images_source(pid, backend)
         cancelled = bool(getattr(processor, "cancelled", False))
@@ -416,9 +465,7 @@ def generate(pid: str, body: GenerateRequest, user: dict = Depends(current_user)
     # One job per project: a render over a running AI job would save its own
     # stale copy of the notes over everything the AI loop wrote (409 meanwhile).
     job_id = jobs.start("generate", work, project_id=pid, user_id=user["id"])
-    audit(PROJECT_GENERATE, user=user, entity="project", entity_id=pid,
-          detail=f"job {job_id}, {'preview' if preview else body.preset}, {provider}/{voice_id}")
-    return {"job_id": job_id}
+    return StartedGenerate(job_id, provider, voice_id, body.preset, preview)
 
 
 @router.post("/{pid}/revoice")

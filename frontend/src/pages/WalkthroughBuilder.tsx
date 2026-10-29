@@ -35,11 +35,14 @@
  * W2c: **Export to course…** (saving first, asked as Play asks) opens `ExportCourseDialog`: the preview of the
  * figures the walkthrough's pictures become in its workshop's guide, the write (the studio setting's), the zip, and
  * the interactive player as a download.
+ *
+ * W3: **Make a video…** (saving first, asked the same way) opens `MakeVideoDialog`: the walkthrough becomes a project
+ * whose Generate card renders it as a deck is rendered - each step a slide - and the builder opens that project.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowLeft, ArrowUp, Camera, Copy, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Share, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Camera, Clapperboard, Copy, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Share, Trash2, Undo2, X } from "lucide-react";
 import { ApiError, api, errorMessage } from "../api/client";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Button, Card, EmptyState, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
@@ -47,6 +50,7 @@ import { useLeaveGuard } from "../components/annotate/useLeaveGuard";
 import { CaptureStepsDialog } from "../components/walkthrough/CaptureStepsDialog";
 import { ExportCourseDialog } from "../components/walkthrough/ExportCourseDialog";
 import { HotspotSurface } from "../components/walkthrough/HotspotSurface";
+import { MakeVideoDialog } from "../components/walkthrough/MakeVideoDialog";
 import { StillPicker } from "../components/walkthrough/StillPicker";
 import { useGuidedCapture } from "../components/walkthrough/useGuidedCapture";
 import { fitZoom } from "../lib/annotate";
@@ -59,7 +63,7 @@ import { useCaptureAvailable } from "../lib/useCaptureAvailable";
 import {
   type Placement, type Step, type StepKind, type Walkthrough, type WalkthroughDocument, EMPTY_HOW, GONE_MESSAGE, MAX_CHAPTER_CHARS,
   MAX_INSTRUCTION_CHARS, MAX_NAME_CHARS, MAX_STEP_TEXT, NO_PICTURE_HOW, NO_PICTURE_TITLE, PLACEMENTS, PLACEMENT_LABELS, RELOAD_ASK,
-  SAVE_BEFORE_PLAY, TOO_MANY_STEPS_MESSAGE, UNSAVED_ASK, canAddStep, clampHotspot, deleteStep, documentOf, hasPicture, imagesOf, insertStep,
+  SAVE_BEFORE_PLAY, SAVE_BEFORE_VIDEO, TOO_MANY_STEPS_MESSAGE, UNSAVED_ASK, canAddStep, clampHotspot, deleteStep, documentOf, hasPicture, imagesOf, insertStep,
   moveStep, namesOnly, playUrl, putBody, reorderStep, sameDocument, setHotspot, stepById, stepImageUrl, stepIndex, stepsToCapture, transcript,
   transcriptFileName, typingIn, updateStep, walkthroughQueryKey, walkthroughsQueryKey,
 } from "../lib/walkthrough";
@@ -97,6 +101,7 @@ export default function WalkthroughBuilderPage() {
   const [copied, setCopied] = useState<string | null>(null);
   const [captureOpen, setCaptureOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [videoOpen, setVideoOpen] = useState(false);
 
   // The document and its history from the record once (and again on Reload); the saved baseline beside it.
   const load = useCallback((r: Walkthrough) => {
@@ -308,6 +313,15 @@ export default function WalkthroughBuilderPage() {
     setExportOpen(true);
   }, [dirty, confirm, save]);
 
+  /** Make a video (W3): the video is made from the SAVED walkthrough, so unsaved changes are saved first, asked as Play asks. */
+  const openVideo = useCallback(async () => {
+    if (dirty) {
+      if (!(await confirm({ ...SAVE_BEFORE_VIDEO }))) return;
+      if (!(await save())) return;
+    }
+    setVideoOpen(true);
+  }, [dirty, confirm, save]);
+
   /** Capture steps: the builder saves first (as Play does), then the guided capture starts. */
   const startCapture = useCallback(async (options: GuidedOptions) => {
     setCaptureOpen(false);
@@ -366,6 +380,7 @@ export default function WalkthroughBuilderPage() {
           <Button size="sm" icon={<Play size={14} />} onClick={() => void play()} disabled={doc.steps.length === 0} title="Play from the selected step">Play</Button>
           <Button size="sm" icon={<FileText size={14} />} onClick={() => setTranscriptOpen((o) => !o)} aria-expanded={transcriptOpen} title="The walkthrough as a transcript: what is said at each step" data-transcript-toggle="">Transcript</Button>
           <Button size="sm" icon={<Share size={14} />} onClick={() => void openExport()} disabled={saving || capturing} title={rec.source ? `Write the figures into ${rec.source.course}/${rec.source.slug}, or download them; or download the interactive player` : "Download the interactive player (the walkthrough was not imported from a course workshop)"} data-export-course="">Export to course…</Button>
+          <Button size="sm" icon={<Clapperboard size={14} />} onClick={() => void openVideo()} disabled={doc.steps.length === 0 || saving || capturing} title={doc.steps.length === 0 ? "Add a step first" : "Compile the walkthrough into a narrated video: a project whose Generate card renders it, each step a slide"} data-make-video="">Make a video…</Button>
           {canCapture && (
             <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={doc.steps.length === 0 || capturing || saving} title={missingCount ? `${missingCount} step${missingCount === 1 ? " has" : "s have"} no picture yet: capture them in order` : "Capture every step again, in order"} data-capture-steps="">Capture steps…</Button>
           )}
@@ -516,6 +531,7 @@ export default function WalkthroughBuilderPage() {
         <CaptureStepsDialog open={captureOpen} missing={missingCount} total={doc.steps.length} onClose={() => setCaptureOpen(false)} onStart={(o) => void startCapture(o)} />
       )}
       <ExportCourseDialog open={exportOpen} wid={id} onClose={() => setExportOpen(false)} />
+      <MakeVideoDialog open={videoOpen} wid={id} doc={saved ?? doc} onClose={() => setVideoOpen(false)} />
       <StillPicker
         open={picker !== null}
         title={picker === "replace" ? "Replace picture" : "Add step"}

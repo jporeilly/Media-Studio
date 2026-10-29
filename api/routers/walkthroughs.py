@@ -31,17 +31,23 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
 
 from api.audit import (
-    WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE, WALKTHROUGH_EXPORT_COURSE,
-    WALKTHROUGH_GUIDED_CAPTURE, WALKTHROUGH_IMPORT, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_UPDATE, audit,
+    PROJECT_GENERATE, WALKTHROUGH_ADD_STEP, WALKTHROUGH_CREATE, WALKTHROUGH_DELETE, WALKTHROUGH_DUPLICATE,
+    WALKTHROUGH_EXPORT_COURSE, WALKTHROUGH_GUIDED_CAPTURE, WALKTHROUGH_IMPORT, WALKTHROUGH_MAKE_VIDEO, WALKTHROUGH_REPLACE_PICTURE,
+    WALKTHROUGH_UPDATE, audit,
 )
 from api.body import capped_body
 from api.deps import current_user, may_access_project
 from api.routers.captures import _owned as owned_capture
-from api.schemas import HotspotIn, WalkthroughIn, WalkthroughName, plain_validation_error
+from api.routers.projects import generate_detail, start_generate
+from api.schemas import GenerateRequest, HotspotIn, WalkthroughIn, WalkthroughName, plain_validation_error
 from api.store import display_name_of
 from services import course_export, studio_settings, walkthroughs, workshops
+from services import projects as store
 from services.recordings import safe_stem
 from utils.helpers import is_hex12
+from utils.logger import get_logger
+
+log = get_logger("WALKTHROUGHS")
 
 router = APIRouter(prefix="/walkthroughs", tags=["walkthroughs"])
 
@@ -437,6 +443,59 @@ def export_player_zip(wid: str, user: dict = Depends(current_user)):
     with _export_refusals():
         data = course_export.player_zip(rec)
     return _zip_response(data, f"{rec.get('name') or 'walkthrough'}-player")
+
+
+# -- Make a video (W3) -----------------------------------------------------------------------------------
+
+class MakeVideoIn(BaseModel):
+    """The video's options: the project's name (the walkthrough's name, editable), whether the steps'
+    notes - the guide's "Under the hood" hints - are narrated after their steps, and whether the picture
+    zooms to each step's hotspot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: WalkthroughName
+    notes: StrictBool = False
+    zoom: StrictBool = True
+
+
+@router.post("/{wid}/video", status_code=201)
+def make_video(wid: str, body: MakeVideoIn, user: dict = Depends(current_user)):
+    """Compile the walkthrough into a narrated video (W3): a project of kind ``walkthrough`` is made from a
+    snapshot of the walkthrough as it is saved now - each step a slide with its composed still, its spoken
+    narration (the note too with ``notes``), its focus (with ``zoom``) and its chapter
+    (``services.projects.create_walkthrough_project``) - AND its generate job is started with the studio's
+    defaults, the very request the project page's Generate makes with an empty body (``start_generate``).
+    Answers 201 ``{project_id, job_id}``: the builder opens the project, whose Generate card follows the job.
+    The owner or an administrator; 400 "This walkthrough has no steps yet." with nothing made; audit row
+    ``walkthrough.make_video`` ("name -> project id: N steps") beside the job's own ``project.generate``.
+    Nothing of the shell is needed: the browser edition makes the video too."""
+    _owned(wid, user)
+    try:
+        record = store.create_walkthrough_project(
+            wid, name=body.name, notes=body.notes, zoom=body.zoom, owner_id=user["id"], owner_name=display_name_of(user),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No such walkthrough.") from None
+    try:
+        started = start_generate(record, GenerateRequest(), user)
+    except BaseException:
+        # The project exists for this job alone: a start that is refused (or fails) takes the project with it
+        # and answers the refusal, so the client never gets a 400 with a project already made - and nothing
+        # is audited for a video that never started.
+        try:
+            store.delete_project(record["id"])
+        except store.ProjectDeleteError as exc:  # pragma: no cover - a handle held for an instant; the next delete sweeps it
+            log.warning("The project %s made for a video that could not start was not removed: %s", record["id"], exc)
+        raise
+    steps = record.get("slide_count") or 0
+    audit(WALKTHROUGH_MAKE_VIDEO, user=user, entity="walkthrough", entity_id=wid,
+          detail=f"{record['name']} -> {record['id']}: {steps} step{'' if steps == 1 else 's'}")
+    # The render's own row, as the project page's Generate writes it.
+    audit(PROJECT_GENERATE, user=user, entity="project", entity_id=record["id"], detail=generate_detail(started))
+    return {"project_id": record["id"], "job_id": started.job_id}
 
 
 @router.post("/{wid}/duplicate")

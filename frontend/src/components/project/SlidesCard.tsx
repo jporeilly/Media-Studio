@@ -790,7 +790,9 @@ export function SlidesCard({
           <p>
             {projectKind === "deck"
               ? "The notes go back to what the deck holds. The current text stays in the undo history."
-              : "A PDF has no notes of its own, so the notes are cleared. The current text stays in the undo history."}
+              : projectKind === "walkthrough"
+                ? "The narration goes back to what the walkthrough's step said when the video was made. The current text stays in the undo history."
+                : "A PDF has no notes of its own, so the notes are cleared. The current text stays in the undo history."}
           </p>
           {dirty && <p className="os-muted os-small">The unsaved draft on this slide is discarded.</p>}
         </Modal>

@@ -65,6 +65,7 @@ one idiom every record folder uses (``utils.helpers.file_under``).
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import shutil
@@ -723,3 +724,100 @@ def create_from_workshop(name: str, owner_id: str | None, owner_name: str | None
         shutil.rmtree(_dir(wid), ignore_errors=True)
         raise
     return record
+
+
+# -- the narrated video (W3) ---------------------------------------------------------------------------
+
+#: A fenced code block's fence - ``` or ~~~ at the start of a line. The W2 import keeps a guide's code
+#: between its fences for exactly this: the narration skips what the learner types.
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+_INLINE_CODE_RE = re.compile(r"`([^`\n]*)`")
+#: An image or a link: ``![alt](src)`` / ``[text](href)`` -> its text.
+_IMAGE_OR_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.S)
+#: Emphasis by a single ``*`` or ``_`` round a span that neither starts nor ends with a space, and whose marks
+#: do not sit inside a word - so ``win_preview.ktr`` and ``2*3`` are read as they are.
+_EMPHASIS_RE = re.compile(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])|(?<![\w_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])")
+#: What a line may start with that is not said: a heading's hashes, a quote's ``>``, a bullet or a number.
+_LINE_MARK_RE = re.compile(r"^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)+")
+#: HTML typed by hand: a line break tag is a space, any other tag (a letter after ``<`` or ``</``) goes; a
+#: ``<`` that is not a tag (``2 < 3``) stays. Entities (``&amp;``) are decoded AFTER the tags go, so a text
+#: that reads ``&lt;tag&gt;`` is spoken as "<tag>", not stripped.
+_BR_RE = re.compile(r"<br\s*/?>", re.I)
+_TAG_RE = re.compile(r"</?[A-Za-z][^<>]*>")
+_STRIKE_RE = re.compile(r"~~(.+?)~~", re.S)
+#: A Markdown escape, ``\*`` and the rest of the escapable set: spoken as the character itself, never as a mark.
+_ESCAPED_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~|<>])")
+_ESCAPABLE = "\\`*_{}[]()#+-.!~|<>"
+_PLACEHOLDERS = {char: chr(0xE000 + i) for i, char in enumerate(_ESCAPABLE)}
+_RESTORE_RE = re.compile("[" + "".join(re.escape(p) for p in _PLACEHOLDERS.values()) + "]")
+_RESTORE = {placeholder: char for char, placeholder in _PLACEHOLDERS.items()}
+
+
+def spoken_text(markdown: str | None) -> str:
+    """A step's Markdown as SPOKEN text, the ONE rule (the video's snapshot reads every narration through
+    it): fenced code blocks dropped whole - an unclosed fence drops to the end - a heading's hashes, a
+    quote's ``>`` and a list's bullets and numbers taken off the line, HTML tags gone (a ``<br>`` a space)
+    and entities decoded, an escaped mark (``\\*``) its character, inline code kept without its backticks,
+    images and links reduced to their text, bold, emphasis and strikethrough to their words, the lines
+    joined by one space with the whitespace collapsed. Pure."""
+    text = (markdown or "").replace("\r\n", "\n").replace("\r", "\n")
+    kept = []
+    fenced = False
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        kept.append(_LINE_MARK_RE.sub("", line))
+    joined = _TAG_RE.sub(" ", _BR_RE.sub(" ", " ".join(kept)))
+    joined = html.unescape(joined)
+    # An escaped mark is held apart while the marks are read, then put back as its character.
+    joined = _ESCAPED_RE.sub(lambda m: _PLACEHOLDERS[m.group(1)], joined)
+    joined = _INLINE_CODE_RE.sub(r"\1", joined)
+    joined = _IMAGE_OR_LINK_RE.sub(r"\1", joined)
+    for _ in range(2):  # ``***both***`` and ``**_nested_**`` take two passes
+        joined = _BOLD_RE.sub(lambda m: m.group(1) or m.group(2) or "", joined)
+        joined = _EMPHASIS_RE.sub(lambda m: m.group(1) or m.group(2) or "", joined)
+        joined = _STRIKE_RE.sub(r"\1", joined)
+    joined = _RESTORE_RE.sub(lambda m: _RESTORE[m.group(0)], joined)
+    return " ".join(joined.split())
+
+
+def step_narration(step: dict, *, notes: bool) -> str:
+    """What the video SAYS at a step: :func:`narration_of` (the instruction, else the text) through
+    :func:`spoken_text`, and with ``notes`` the step's note (the guide's "Under the hood" hint) as a second
+    paragraph after a blank line - the TTS pauses at the paragraph; no bracket tag is ever written (the engines
+    strip those to "..."). "" for a step with nothing to say: a silent slide."""
+    spoken = spoken_text(narration_of(step))
+    if notes:
+        note = spoken_text(step.get("note") or "")
+        if note:
+            spoken = f"{spoken}\n\n{note}" if spoken else note
+    return spoken
+
+
+def copy_for_video(wid: str, dest: Path) -> tuple[dict, int]:
+    """The record as it is now and its pictures copied into ``dest`` (made if need be) - what a video
+    project is made from - under the walkthrough's own lock, so a save in flight cannot sweep a picture
+    between the record read and its copy. Returns the record and the bytes copied. ``LookupError`` for no
+    such walkthrough; a picture a step names that is not on disk is logged and left out (that step
+    renders as a card)."""
+    with _lock(wid):
+        rec = get_walkthrough(wid)
+        if rec is None:
+            raise LookupError("No such walkthrough.")
+        dest.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for step in rec.get("steps") or []:
+            if not has_picture(step):
+                continue
+            src = file_under(_dir(wid), str(step.get("image") or ""))
+            if src is None:
+                log.warning("Walkthrough %s: step %s names a picture that is not on disk; the video shows a card for it", wid, step.get("id"))
+                continue
+            target = dest / src.name
+            shutil.copyfile(src, target)
+            copied += target.stat().st_size
+        return rec, copied

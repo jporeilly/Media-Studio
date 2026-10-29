@@ -29,7 +29,7 @@ interface Feature {
 const FEATURES: Feature[] = [
   { icon: FolderOpen, title: "Projects", description: "Import a slide deck, PDF, or video and manage it.", to: "/projects" },
   { icon: Upload, title: "Import Video", description: "Bring in an existing video to re-voice or translate.", to: "/projects" },
-  { icon: Clapperboard, title: "Generate Video", description: "Turn a slide deck or PDF into a narrated video. Open a deck project and use Generate video.", to: "/projects" },
+  { icon: Clapperboard, title: "Generate Video", description: "Turn a slide deck, a PDF or a walkthrough into a narrated video. Open the project and use Generate video; a walkthrough's builder has Make a video.", to: "/projects" },
   { icon: Languages, title: "Translate", description: "Re-voice a transcribed video in another language, or translate a deck's notes with the AI assistant.", to: "/projects" },
   { icon: Footprints, title: "Walkthroughs", description: "Turn stills into a click-through walkthrough: a hotspot, a tooltip or a card, and chapters on each step, with a player.", to: "/walkthroughs" },
   {

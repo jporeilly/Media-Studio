@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChevronDown, ChevronRight, Download, Eye, FileText, Film, Mic, Presentation, Wand2 } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Download, Eye, FileText, Film, Mic, MousePointerClick, Presentation, Wand2 } from "lucide-react";
 import { api, errorMessage } from "../api/client";
 import { CancelJobButton, JobNotice, JobProgress } from "../components/project/JobProgress";
 import { SlidesCard } from "../components/project/SlidesCard";
@@ -34,7 +34,11 @@ import { defaultVoiceFor, pickVoice, useStudioSettings, useVoices, type Option }
 interface Project {
   id: string;
   name: string;
-  kind: "deck" | "pdf" | "video";
+  /** A deck, a PDF, a video, or (W3) a walkthrough compiled into a video - each step a slide, rendered as a deck is. */
+  kind: "deck" | "pdf" | "video" | "walkthrough";
+  /** The walkthrough a walkthrough project was made from, and its name then; the walkthrough may since be deleted. */
+  walkthrough_id?: string | null;
+  walkthrough_name?: string | null;
   source_filename: string;
   size_bytes: number;
   slide_count: number | null;
@@ -66,7 +70,10 @@ interface Preset {
   description: string;
 }
 
-const KIND_ICON = { deck: Presentation, pdf: FileText, video: Film } as const;
+const KIND_ICON = { deck: Presentation, pdf: FileText, video: Film, walkthrough: MousePointerClick } as const;
+
+/** The job a page is sent to follow by the route that opened it (the walkthrough builder's Make a video). */
+interface FollowFromRoute { followJob?: { id: string; kind?: string } }
 
 function Meta({ label, value }: { label: string; value: string }) {
   return (
@@ -98,6 +105,8 @@ export default function ProjectDetailPage() {
   const { id = "" } = useParams();
   const qc = useQueryClient();
   const { user } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   // The editable copy of the transcript. It stays on the page rather than
   // inside TranscriptCard because the Re-voice card below only exists once
   // there is one.
@@ -116,8 +125,8 @@ export default function ProjectDetailPage() {
     queryFn: () => api.get<Project>(`/api/projects/${id}`),
   });
 
-  // Decks and PDFs generate a video; videos are transcribed and re-voiced.
-  const canGenerate = project.data?.kind === "deck" || project.data?.kind === "pdf";
+  // Decks, PDFs and walkthroughs generate a video; videos are transcribed and re-voiced.
+  const canGenerate = project.data?.kind === "deck" || project.data?.kind === "pdf" || project.data?.kind === "walkthrough";
   const isVideo = project.data?.kind === "video";
 
   // Keep the editable copy in sync with the saved transcript.
@@ -202,6 +211,16 @@ export default function ProjectDetailPage() {
   });
   const { job: jobData, jobActive, activeKind, follow } = followedJob;
   const jobStatus = jobData?.status;
+
+  // A job the route that opened this page started (the walkthrough builder's Make a video: the project was made
+  // and its generate job begun in one request) is followed at once, before the project's job poll would adopt
+  // it; read once and dropped from the history, so a reload or Back does not follow it again.
+  const followFromRoute = (location.state as FollowFromRoute | null)?.followJob;
+  useEffect(() => {
+    if (!followFromRoute) return;
+    follow(followFromRoute.id, followFromRoute.kind);
+    navigate(location.pathname, { replace: true, state: null });
+  }, [followFromRoute, follow, navigate, location.pathname]);
 
   const transcribe = useMutation({
     mutationFn: () => api.post<{ job_id: string }>(`/api/projects/${id}/transcribe`, {}),
@@ -327,14 +346,19 @@ export default function ProjectDetailPage() {
     <>
       <PageHeader
         title={<span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}><Icon size={22} /> {p.name}</span>}
-        subtitle={p.source_filename}
+        subtitle={p.kind === "walkthrough" ? (
+          // The builder's link: a walkthrough deleted since 404s there, and the builder goes back to the list.
+          <span data-from-walkthrough="">
+            From the walkthrough <Link to={`/walkthroughs/${p.walkthrough_id ?? ""}`}><em>{p.walkthrough_name || "(unnamed)"}</em></Link>
+          </span>
+        ) : p.source_filename}
         actions={<Link to="/projects" className="os-btn os-btn-secondary os-btn-sm"><ArrowLeft size={15} /> Back</Link>}
       />
 
       <Card title="Details">
         <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
           <Meta label="Type" value={p.kind} />
-          {p.slide_count != null && <Meta label="Slides" value={String(p.slide_count)} />}
+          {p.slide_count != null && <Meta label={p.kind === "walkthrough" ? "Steps" : "Slides"} value={String(p.slide_count)} />}
           <Meta label="Imported" value={relativeTime(p.created_at)} />
           {p.language && <Meta label="Language" value={p.language} />}
           {p.duration != null && <Meta label="Duration" value={duration(p.duration)} />}
@@ -342,7 +366,7 @@ export default function ProjectDetailPage() {
         </div>
       </Card>
 
-      {(p.kind === "deck" || p.kind === "pdf") && (
+      {(p.kind === "deck" || p.kind === "pdf" || p.kind === "walkthrough") && (
         <SlidesCard
           projectId={id}
           projectName={p.name}
