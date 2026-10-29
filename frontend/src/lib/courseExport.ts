@@ -7,7 +7,12 @@
  * the step (the content manager's annotated image: the picture with a numbered pin at the hotspot), its picture
  * into the course's `_assets/images`; the plan shows it all and writes nothing; the write is the studio setting's
  * ("Allow export into the Courses folder", off by default) - with it off, the same result comes as a zip.
+ *
+ * W2e: a walkthrough of several workshops is planned per guide (`guides`, a `GuidePlan` each); the combined line counts
+ * the guides (`planLine`), the write sends every guide's sha256 (`writeBody`), and the builder's button names them
+ * (`exportTitle`, `guidesOf`).
  */
+import type { WalkthroughSource } from "./walkthrough";
 
 export interface PlannedStep {
   number: number;
@@ -27,13 +32,36 @@ export interface UnplacedStep { number: number; step_id: string; text: string; r
 export interface RemovedBlock { step_id: string | null; line: number; reason: string }
 export interface FileAction { path: string; action: "write" | "unchanged" | "remove" }
 
-/** `POST /api/walkthroughs/{wid}/export/course/plan`: the dry run; nothing written. */
-export interface ExportPlan {
-  course: { id: string; title: string; version: string };
-  workshop: { slug: string; title: string };
+/** One guide of the plan (W2e): the workshop's own line, lists and diff - a walkthrough of several workshops has one per guide. */
+export interface GuidePlan {
+  slug: string;
+  title: string;
   /** `<course>/<slug>/guide.md`. */
   guide: string;
   guide_sha256: string;
+  placed: PlannedStep[];
+  not_placed: UnplacedStep[];
+  skipped: UnplacedStep[];
+  removed: RemovedBlock[];
+  new_in_guide: { text: string; line: number }[];
+  kept: { path: string; reason: string }[];
+  figures: number;
+  /** Whether this guide's bytes change. */
+  changed: boolean;
+  /** This guide as a unified diff ("" when it does not change). */
+  diff: string;
+}
+
+/** `POST /api/walkthroughs/{wid}/export/course/plan`: the dry run; nothing written. */
+export interface ExportPlan {
+  course: { id: string; title: string; version: string };
+  /** The FIRST workshop (a page before W2e read one); `guides` has them all. */
+  workshop: { slug: string; title: string };
+  /** `<course>/<first slug>/guide.md`. */
+  guide: string;
+  guide_sha256: string;
+  /** A block per guide, in the course's order (W2e); the flat lists below are theirs joined, the steps of no guide among `not_placed`. */
+  guides: GuidePlan[];
   placed: PlannedStep[];
   not_placed: UnplacedStep[];
   skipped: UnplacedStep[];
@@ -59,6 +87,8 @@ export interface ExportResult {
   course: string;
   slug: string;
   guide: string;
+  /** Per guide (W2e). */
+  guides: { slug: string; guide: string; figures: number; guide_written: boolean; guide_sha256: string }[];
   figures: number;
   images: number;
   player: boolean;
@@ -91,12 +121,47 @@ export function playerZipUrl(wid: string): string {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-/** "3 figures into demo/01-first/guide.md; 1 step not placed; 2 skipped" - the dialog's first line. */
-export function planLine(plan: Pick<ExportPlan, "figures" | "guide" | "not_placed" | "skipped">): string {
-  const parts = [`${plural(plan.figures, "figure")} into ${plan.guide}`];
+/**
+ * "3 figures into demo/01-first/guide.md; 1 step not placed; 2 skipped" - the dialog's first line, and a guide's own
+ * line; for a plan of several guides (W2e) the combined line counts them: "5 figures into 2 guides; 1 step not placed".
+ */
+export function planLine(plan: Pick<ExportPlan, "figures" | "guide" | "not_placed" | "skipped"> & { guides?: unknown[] }): string {
+  const guides = plan.guides?.length ?? 1;
+  const parts = [`${plural(plan.figures, "figure")} into ${guides > 1 ? plural(guides, "guide") : plan.guide}`];
   if (plan.not_placed.length) parts.push(`${plural(plan.not_placed.length, "step")} not placed`);
   if (plan.skipped.length) parts.push(`${plan.skipped.length} skipped`);
   return parts.join("; ");
+}
+
+/** The write's body (W2e): every guide's sha256 as the preview showed it, and whether the player goes too. */
+export function writeBody(plan: Pick<ExportPlan, "guides">, player: boolean): { guides: { slug: string; sha256: string }[]; player: boolean } {
+  return { guides: plan.guides.map((g) => ({ slug: g.slug, sha256: g.guide_sha256 })), player };
+}
+
+/**
+ * The steps of no guide (W2e): a step whose workshop is none of the record's, or none at all - not placed when it has a
+ * picture of ours, skipped (`skipped: true`, with the skip's reason) when it has none or the guide's own - each in no
+ * guide's own list, in step order. The dialog lists them above the guides, so the first line's counts are all shown.
+ */
+export function stepsOfNoGuide(plan: Pick<ExportPlan, "not_placed" | "skipped" | "guides">): (UnplacedStep & { skipped: boolean })[] {
+  const guides = plan.guides ?? [];
+  const notPlacedIn = new Set(guides.flatMap((g) => g.not_placed.map((n) => n.step_id)));
+  const skippedIn = new Set(guides.flatMap((g) => g.skipped.map((n) => n.step_id)));
+  return [
+    ...plan.not_placed.filter((n) => !notPlacedIn.has(n.step_id)).map((n) => ({ ...n, skipped: false })),
+    ...plan.skipped.filter((n) => !skippedIn.has(n.step_id)).map((n) => ({ ...n, skipped: true })),
+  ].sort((a, b) => a.number - b.number);
+}
+
+/** The workshops a walkthrough was imported from, in the course's order: `source.workshops` (W2e), else the one `slug` of a record before it. */
+export function guidesOf(source: Pick<WalkthroughSource, "slug" | "workshops">): string[] {
+  return source.workshops?.length ? source.workshops.map((w) => w.slug) : [source.slug];
+}
+
+/** The builder's Export button's title (E5): the guides the figures go into. */
+export function exportTitle(source: WalkthroughSource | null | undefined): string {
+  if (!source) return "Download the interactive player (the walkthrough was not imported from a course workshop)";
+  return `Write the figures into ${source.course}/${guidesOf(source).join(", ")}, or download them; or download the interactive player`;
 }
 
 /** Where a placed step's figure goes, said plainly. */

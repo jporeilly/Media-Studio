@@ -8,6 +8,10 @@
  * since is refused with the server's line, and **Preview again** reads it afresh; **Download zip** is the same
  * result to copy into the course by hand; **Download player** the interactive player on its own. A walkthrough
  * not imported from a workshop can only download its player. Pure web: the browser edition has all of it.
+ *
+ * W2e: a walkthrough of several workshops shows the combined line ("5 figures into 2 guides; 1 step not placed; 2
+ * skipped"), the steps of no guide, and a block per guide with its own line, lists and diff (folded); the write sends
+ * every guide's sha256 from the preview (`writeBody`). With one guide the dialog reads as before.
  */
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -15,8 +19,8 @@ import { Download, FileDown, RefreshCw, Upload } from "lucide-react";
 import { api, errorMessage } from "../../api/client";
 import { Button, ErrorBox, Modal, Spinner } from "../ui";
 import {
-  type ExportPlan, type ExportResult, courseZipUrl, exportPlanQueryKey, exportPlanUrl, exportWriteUrl, filesLine, placedWhere, planLine,
-  playerZipUrl, settingLine,
+  type ExportPlan, type ExportResult, type GuidePlan, courseZipUrl, exportPlanQueryKey, exportPlanUrl, exportWriteUrl, filesLine, placedWhere,
+  planLine, playerZipUrl, settingLine, stepsOfNoGuide, writeBody,
 } from "../../lib/courseExport";
 
 interface Props {
@@ -40,13 +44,16 @@ function ExportCourseBody({ wid, onClose }: Props) {
     gcTime: 0,
   });
   const write = useMutation({
-    mutationFn: (p: ExportPlan) => api.post<ExportResult>(exportWriteUrl(wid), { guide_sha256: p.guide_sha256, player }),
+    mutationFn: (p: ExportPlan) => api.post<ExportResult>(exportWriteUrl(wid), writeBody(p, player)),
     onSuccess: (r) => {
       setWritten(r);
       void plan.refetch();
     },
   });
   const p = plan.data ?? null;
+  const guides: GuidePlan[] = p?.guides ?? [];
+  const several = guides.length > 1;
+  const homeless = p ? stepsOfNoGuide(p) : [];
   const again = () => {
     write.reset();
     setWritten(null);
@@ -100,63 +107,89 @@ function ExportCourseBody({ wid, onClose }: Props) {
             <Button size="sm" icon={<RefreshCw size={14} />} onClick={again} disabled={plan.isFetching} data-export-again="">Preview again</Button>
           </div>
           <span className="os-muted os-small" data-export-setting="">{settingLine(p.allowed)}</span>
-          {p.placed.length > 0 && (
-            <ol className="ms-import-steps" data-export-placed="">
-              {p.placed.map((s) => (
-                <li key={s.step_id} title={s.image}>
-                  <strong>Step {s.number}</strong>
-                  <span className="os-truncate">{s.text}</span>
-                  <span className="os-muted">{s.hotspot ? `pin at ${s.hotspot.x} %, ${s.hotspot.y} %` : "no hotspot: a plain figure"} · {placedWhere(s)}</span>
-                </li>
-              ))}
-            </ol>
-          )}
-          {p.not_placed.length > 0 && (
-            <div data-export-not-placed="">
-              <strong>Not placed</strong>
-              <ul className="ms-import-steps">{p.not_placed.map((s) => <li key={s.step_id}>Step {s.number}: {s.text || "(no text)"} - {s.reason}</li>)}</ul>
+          {homeless.length > 0 && (
+            <div style={{ display: "grid", gap: 6 }} data-export-homeless="">
+              {homeless.some((s) => !s.skipped) && (
+                <div>
+                  <strong>Not placed</strong>
+                  <ul className="ms-import-steps">{homeless.filter((s) => !s.skipped).map((s) => <li key={s.step_id}>Step {s.number}: {s.text || "(no text)"} - {s.reason}</li>)}</ul>
+                </div>
+              )}
+              {homeless.some((s) => s.skipped) && (
+                <div data-export-homeless-skipped="">
+                  <strong>Skipped</strong>
+                  <ul className="ms-import-steps">{homeless.filter((s) => s.skipped).map((s) => <li key={s.step_id}>Step {s.number}: {s.text || "(no text)"} - {s.reason}</li>)}</ul>
+                </div>
+              )}
             </div>
           )}
-          {p.skipped.length > 0 && (
-            <div data-export-skipped="">
-              <strong>Skipped</strong>
-              <ul className="ms-import-steps">{p.skipped.map((s) => <li key={s.step_id}>Step {s.number}: {s.text || "(no text)"} - {s.reason}</li>)}</ul>
-            </div>
-          )}
-          {p.removed.length > 0 && (
-            <div data-export-removed="">
-              <strong>Taken out of the guide</strong>
-              <ul className="ms-import-steps">{p.removed.map((r) => <li key={`${r.step_id}-${r.line}`}>The figure at line {r.line} - {r.reason}</li>)}</ul>
-            </div>
-          )}
-          {(p.kept ?? []).length > 0 && (
-            <div data-export-kept="">
-              <strong>Kept</strong>
-              <ul className="ms-import-steps">{p.kept.map((k) => <li key={k.path}><code>{k.path}</code> - {k.reason}</li>)}</ul>
-            </div>
-          )}
+          {guides.map((g) => (
+            <section key={g.slug} style={{ display: "grid", gap: 6 }} data-export-guide={g.slug}>
+              {several && (
+                <div className="os-row" style={{ gap: 8, alignItems: "baseline" }}>
+                  <strong>{g.title}</strong>
+                  <span className="os-muted os-small" data-export-guide-line="">{planLine(g)}</span>
+                </div>
+              )}
+              {g.placed.length > 0 && (
+                <ol className="ms-import-steps" data-export-placed="">
+                  {g.placed.map((s) => (
+                    <li key={s.step_id} title={s.image}>
+                      <strong>Step {s.number}</strong>
+                      <span className="os-truncate">{s.text}</span>
+                      <span className="os-muted">{s.hotspot ? `pin at ${s.hotspot.x} %, ${s.hotspot.y} %` : "no hotspot: a plain figure"} · {placedWhere(s)}</span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+              {g.not_placed.length > 0 && (
+                <div data-export-not-placed="">
+                  <strong>Not placed</strong>
+                  <ul className="ms-import-steps">{g.not_placed.map((s) => <li key={s.step_id}>Step {s.number}: {s.text || "(no text)"} - {s.reason}</li>)}</ul>
+                </div>
+              )}
+              {g.skipped.length > 0 && (
+                <div data-export-skipped="">
+                  <strong>Skipped</strong>
+                  <ul className="ms-import-steps">{g.skipped.map((s) => <li key={s.step_id}>Step {s.number}: {s.text || "(no text)"} - {s.reason}</li>)}</ul>
+                </div>
+              )}
+              {g.removed.length > 0 && (
+                <div data-export-removed="">
+                  <strong>Taken out of the guide</strong>
+                  <ul className="ms-import-steps">{g.removed.map((r) => <li key={`${r.step_id}-${r.line}`}>The figure at line {r.line} - {r.reason}</li>)}</ul>
+                </div>
+              )}
+              {(g.kept ?? []).length > 0 && (
+                <div data-export-kept="">
+                  <strong>Kept</strong>
+                  <ul className="ms-import-steps">{g.kept.map((k) => <li key={k.path}><code>{k.path}</code> - {k.reason}</li>)}</ul>
+                </div>
+              )}
+              {g.new_in_guide.length > 0 && (
+                <div data-export-new-in-guide="">
+                  <strong>In the guide, not in the walkthrough</strong>
+                  <ul className="ms-import-steps">{g.new_in_guide.map((n) => <li key={n.line}>Line {n.line}: {n.text}</li>)}</ul>
+                </div>
+              )}
+              {g.diff && (
+                <details data-export-diff="">
+                  <summary>{several ? `The changes to ${g.guide}` : "The guide's changes"}</summary>
+                  <pre className="ms-transcript" style={{ maxHeight: 280 }}>{g.diff}</pre>
+                </details>
+              )}
+            </section>
+          ))}
           {(p.debris ?? []).length > 0 && (
             <div data-export-debris="">
               <strong>Left over, swept by the write</strong>
               <ul className="ms-import-steps">{p.debris.map((d) => <li key={d.path}><code>{d.path}</code> - {d.reason}</li>)}</ul>
             </div>
           )}
-          {p.new_in_guide.length > 0 && (
-            <div data-export-new-in-guide="">
-              <strong>In the guide, not in the walkthrough</strong>
-              <ul className="ms-import-steps">{p.new_in_guide.map((g) => <li key={g.line}>Line {g.line}: {g.text}</li>)}</ul>
-            </div>
-          )}
           <details data-export-files="">
             <summary>{filesLine(p.files)}</summary>
             <ul className="ms-import-steps">{p.files.map((f) => <li key={f.path}><code>{f.path}</code> <span className="os-muted">{f.action}</span></li>)}</ul>
           </details>
-          {p.diff && (
-            <details data-export-diff="">
-              <summary>The guide's changes</summary>
-              <pre className="ms-transcript" style={{ maxHeight: 280 }}>{p.diff}</pre>
-            </details>
-          )}
         </div>
       )}
       {written && <p style={{ color: "var(--good)", fontWeight: 500 }} role="status" data-export-written="">{written.message}</p>}

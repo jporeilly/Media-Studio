@@ -31,10 +31,14 @@ const record = (over: Partial<Walkthrough> = {}): Walkthrough => ({
   id: WID, name: "Tour", owner_id: "u1", owner_name: "Olive", created_at: "2026-10-12T10:00:00Z", updated_at: "2026-10-12T10:00:00Z",
   revision: 2, version: 1, steps: [step("aaaaaaaaaaaa")], source: { course: "demo", slug: "01-first", title: "Demo", version: "1" }, ...over,
 });
+const GUIDE = {
+  slug: "01-first", title: "First", guide: "demo/01-first/guide.md", guide_sha256: "a".repeat(64), placed: [], not_placed: [], skipped: [], removed: [],
+  new_in_guide: [], kept: [], figures: 0, changed: false, diff: "",
+};
 const PLAN = {
   course: { id: "demo", title: "Demo", version: "1" }, workshop: { slug: "01-first", title: "First" }, guide: "demo/01-first/guide.md",
-  guide_sha256: "a".repeat(64), placed: [], not_placed: [], skipped: [], removed: [], new_in_guide: [], files: [], changed: false, figures: 0,
-  player: false, diff: "", allowed: false,
+  guide_sha256: "a".repeat(64), guides: [GUIDE], placed: [], not_placed: [], skipped: [], removed: [], new_in_guide: [], kept: [], debris: [], files: [],
+  changed: false, figures: 0, player: false, diff: "", allowed: false,
 };
 
 let root: Root | null = null;
@@ -95,6 +99,18 @@ describe("Export to course…", () => {
     expect(plans()).toEqual([[`/api/walkthroughs/${WID}/export/course/plan`, { player: false }]]);
     expect(q("[data-export-plan]")).not.toBeNull();
     expect(vi.mocked(api.put)).not.toHaveBeenCalled();
+  });
+
+  it("W2e: the button's title names every workshop the walkthrough was imported from; a step's line stays per step", async () => {
+    vi.mocked(api.get).mockImplementation(async () => record({
+      source: { course: "demo", slug: "01-first", title: "Demo", version: "1", workshops: [{ slug: "01-first", title: "First" }, { slug: "02-second", title: "Second" }] },
+      steps: [step("aaaaaaaaaaaa"), { ...step("bbbbbbbbbbbb"), source: { course: "demo", slug: "02-second", image: null, alt: "", launcher: null } }],
+    }) as never);
+    await mount();
+    expect((q("[data-export-course]") as HTMLButtonElement).title).toBe("Write the figures into demo/01-first, 02-second, or download them; or download the interactive player");
+    expect(q("[data-step-size]")!.textContent).toContain("from demo/01-first");
+    await act(async () => { (q('[data-step="bbbbbbbbbbbb"]') as HTMLElement).click(); });
+    expect(q("[data-step-size]")!.textContent).toContain("from demo/02-second");
   });
 
   it("with unsaved changes asks first, saves, then previews; Cancel opens nothing", async () => {

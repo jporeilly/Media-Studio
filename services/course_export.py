@@ -61,6 +61,16 @@ line endings (CRLF stays CRLF: new lines take the file's own) and its bytes ever
 The plan (C2, :func:`compute` + :func:`plan_view`) writes nothing; the zips (C6 :func:`course_zip`, C7
 :func:`player_zip`) neither - each is spooled to a temporary file (PNGs stored, the rest deflated) that the route
 streams and then removes.
+
+**Several workshops** (W2e, E4). A walkthrough imported from several workshops of a course (``source.workshops``)
+is planned PER GUIDE: a :class:`GuidePlan` per workshop, in the course's order, under one :class:`Plan` - the steps
+grouped by their own ``source.slug`` (a step of no workshop of the record, or - with several - of none at all, is
+not placed and says why; nothing is guessed), one guide read, parsed and planned each, the pictures in the course's
+one ``_assets/images`` (a picture's name carries its slug), the player beside the FIRST guide with its line in that
+guide only. The write takes every guide's sha256 (``{slug: sha256}``; the one sha256 of the body before W2e for a
+record of one workshop), checks them all before the first byte (one changed is a 409 naming it), proves every
+folder, checks every target writable, and keeps ONE journal - a failure part-way rolls back every guide and picture
+written. The zip holds every guide.
 """
 
 from __future__ import annotations
@@ -105,7 +115,13 @@ _EOL = re.compile(r"\r\n|\r|\n")
 #: The deterministic time a zip's entries carry, so the same export is the same zip.
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
-CHANGED_MESSAGE = "The guide changed since the preview: preview again."
+CHANGED_MESSAGE = "The guide {guide} changed since the preview: preview again."
+#: W2e: a walkthrough of several workshops is written only with EVERY guide's sha256 from the preview.
+SHA_PER_GUIDE_MESSAGE = "Every guide's sha256 from the preview is needed for a walkthrough of several workshops ({slug}/guide.md is missing): preview again."
+UNKNOWN_GUIDE_MESSAGE = "This walkthrough was not imported from the workshop {slug}: preview again."
+#: W2e: a step whose workshop is none of the record's, and - with several workshops - one that names no workshop at all.
+FOREIGN_WORKSHOP_REASON = "Its workshop is not one this walkthrough was imported from."
+NO_WORKSHOP_REASON = "Added in the walkthrough, not imported: with several workshops it names no guide to go into, and none is guessed."
 NOT_IMPORTED_MESSAGE = "This walkthrough was not imported from a course workshop: only the player can be exported."
 EXPORT_OFF_MESSAGE = ("Export into the Courses folder is off: an administrator turns on \"Allow export into the Courses folder\" "
                       "in Settings › Studio. Download the zip instead and copy it into the course by hand.")
@@ -135,7 +151,12 @@ class ExportWriteFailed(ExportRefused):
 
 
 class GuideChanged(RuntimeError):
-    """The guide's sha256 is not the one the preview showed: the owner may be editing it right now."""
+    """A guide's sha256 is not the one the preview showed: the owner may be editing it right now."""
+
+
+def changed_message(guide: str) -> str:
+    """The 409's line, naming the guide ("course/slug/guide.md")."""
+    return CHANGED_MESSAGE.format(guide=guide)
 
 
 class PlayerNotBuilt(RuntimeError):
@@ -441,32 +462,29 @@ def write_file(folder: Path, name: str, data: bytes) -> bool:
 # -- the plan -------------------------------------------------------------------------------------------
 
 @dataclass
-class Plan:
-    """What an export makes of a walkthrough and the current guide - computed whole, written by :func:`write`
-    only, shown by :func:`plan_view`."""
+class GuidePlan:
+    """One guide of the export (W2e, E4): the workshop, its guide as it is, the steps of the walkthrough that are
+    ITS (by their own ``source.slug``) and what the write does there - computed by :func:`_plan_guide`, one per
+    workshop of the record, in the course's order, held together by a :class:`Plan`."""
 
-    rec: dict
-    course: dict
     workshop: dict
-    course_dir: Path
     guide: Path
     raw: bytes
-    new_text: str
-    diff: str
+    new_text: str = ""
+    diff: str = ""
     placed: list[dict] = field(default_factory=list)
     not_placed: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     removed: list[dict] = field(default_factory=list)
     new_in_guide: list[dict] = field(default_factory=list)
-    #: ``(the step's picture, its name in _assets/images)`` for every placed step.
+    #: ``(the step's picture, its name in _assets/images)`` for every placed step of this guide.
     images: list[tuple[Path, str]] = field(default_factory=list)
     stale_images: list[str] = field(default_factory=list)
     #: Stale pictures another workshop's guide still names (or might): kept, ``{path, reason}`` (K5, NIT-3).
     kept: list[dict] = field(default_factory=list)
-    #: What an interrupted export left, to sweep: ``(folder, name, why)`` (recheck NIT-1).
-    debris: list[tuple[Path, str, str]] = field(default_factory=list)
-    player: bool = False
-    #: The player's files by name: the page and ``walkthrough.json`` as bytes, each step's picture as its path.
+    #: Pictures of this walkthrough and this workshop no guide names (an interrupted export's): swept (recheck NIT-1).
+    orphans: list[str] = field(default_factory=list)
+    #: The player's files by name (the FIRST guide's only): the page and ``walkthrough.json`` as bytes, each step's picture as its path.
     player_files: dict[str, bytes | Path] = field(default_factory=dict)
     stale_player: list[str] = field(default_factory=list)
 
@@ -483,8 +501,9 @@ class Plan:
         return self.new_text.encode("utf-8")
 
     @property
-    def images_dir(self) -> Path:
-        return self.course_dir.joinpath(*IMAGES_FOLDER)
+    def changed(self) -> bool:
+        """Whether this guide's bytes change."""
+        return self.new_bytes != self.raw
 
     @property
     def player_dir(self) -> Path:
@@ -494,24 +513,193 @@ class Plan:
     def figures(self) -> int:
         return len(self.placed)
 
+    def where(self, course_id: str) -> str:
+        return f"{course_id}/{self.slug}/{workshops.GUIDE_FILE}"
+
+
+@dataclass
+class Plan:
+    """What an export makes of a walkthrough and the current guides - computed whole, written by :func:`write` only,
+    shown by :func:`plan_view`. Since W2e one :class:`GuidePlan` per workshop of the record (``source.workshops``,
+    else ``[source.slug]``), in the course's order; the pictures share the course's one ``_assets/images``; the
+    player (when asked) goes beside the FIRST guide. The flat lists (``placed`` and the rest) are the guides' joined,
+    and the one-guide fields (``workshop``, ``guide``, ``sha256``) are the first guide's, for any reader before W2e."""
+
+    rec: dict
+    course: dict
+    course_dir: Path
+    guides: list[GuidePlan] = field(default_factory=list)
+    #: Steps of no guide (E4): a slug none of the record's workshops, or - with several - no workshop at all.
+    homeless_not_placed: list[dict] = field(default_factory=list)
+    homeless_skipped: list[dict] = field(default_factory=list)
+    #: What an interrupted export left, to sweep: ``(folder, name, why)`` (recheck NIT-1) - every folder this export uses.
+    debris: list[tuple[Path, str, str]] = field(default_factory=list)
+    player: bool = False
+
+    @property
+    def first(self) -> GuidePlan:
+        return self.guides[0]
+
+    @property
+    def workshop(self) -> dict:
+        return self.first.workshop
+
+    @property
+    def slug(self) -> str:
+        return self.first.slug
+
+    @property
+    def slugs(self) -> list[str]:
+        return [g.slug for g in self.guides]
+
+    @property
+    def guide(self) -> Path:
+        return self.first.guide
+
+    @property
+    def sha256(self) -> str:
+        return self.first.sha256
+
+    @property
+    def images_dir(self) -> Path:
+        return self.course_dir.joinpath(*IMAGES_FOLDER)
+
+    @property
+    def player_dir(self) -> Path:
+        return self.first.player_dir
+
+    @property
+    def player_files(self) -> dict[str, bytes | Path]:
+        return self.first.player_files
+
+    @property
+    def stale_player(self) -> list[str]:
+        return self.first.stale_player
+
+    @property
+    def images(self) -> list[tuple[Path, str]]:
+        return [image for g in self.guides for image in g.images]
+
+    @property
+    def stale_images(self) -> list[str]:
+        return [name for g in self.guides for name in g.stale_images]
+
+    @property
+    def placed(self) -> list[dict]:
+        return [row for g in self.guides for row in g.placed]
+
+    @property
+    def not_placed(self) -> list[dict]:
+        return sorted(self.homeless_not_placed + [row for g in self.guides for row in g.not_placed], key=lambda row: row["number"])
+
+    @property
+    def skipped(self) -> list[dict]:
+        return sorted(self.homeless_skipped + [row for g in self.guides for row in g.skipped], key=lambda row: row["number"])
+
+    @property
+    def removed(self) -> list[dict]:
+        return [row for g in self.guides for row in g.removed]
+
+    @property
+    def new_in_guide(self) -> list[dict]:
+        return [row for g in self.guides for row in g.new_in_guide]
+
+    @property
+    def kept(self) -> list[dict]:
+        return [row for g in self.guides for row in g.kept]
+
+    @property
+    def figures(self) -> int:
+        return sum(g.figures for g in self.guides)
+
+    @property
+    def diff(self) -> str:
+        """The guides' diffs, one after the other (a unified diff of several files)."""
+        return "\n".join(g.diff for g in self.guides if g.diff)
+
+
+def source_slugs(source: dict) -> list[str]:
+    """The workshops a record was imported from, in the course's order: ``source.workshops`` (W2e), else the one
+    ``source.slug`` of a record before it."""
+    listed = [str(w["slug"]) for w in source.get("workshops") or [] if isinstance(w, dict) and w.get("slug")]
+    return listed or [str(source["slug"])]
+
+
+def step_slug(step: dict) -> str | None:
+    """The workshop a step came from, by its own ``source.slug``; None for a step that names none (added from a still)."""
+    source = step.get("source")
+    return str(source["slug"]) if walkthroughs.is_workshop_source(source) else None
+
 
 def compute(rec: dict, player: bool = False) -> Plan:
-    """The export of ``rec`` into its workshop's CURRENT guide, computed and nothing written (C2): where each
-    step goes, what is skipped and why, the new guide and its pictures. :class:`NotImported` for a walkthrough
-    that names no workshop; ``workshops.NoCoursesFolder``, ``LookupError`` and ``workshops.UnreadableCourse`` as
-    the import answers them; :class:`PlayerNotBuilt` when the player is asked for without its template."""
+    """The export of ``rec`` into its workshops' CURRENT guides, computed and nothing written (C2): a
+    :class:`GuidePlan` per workshop of the record (E4) - the steps grouped by their own ``source.slug``; with one
+    workshop every step is its, as before; with several, a step that names no workshop, or one of a workshop the
+    record was not imported from, is not placed and says why - where each step goes, what is skipped and why, the
+    new guides and their pictures. :class:`NotImported` for a walkthrough that names no workshop;
+    ``workshops.NoCoursesFolder``, ``LookupError`` and ``workshops.UnreadableCourse`` as the import answers them;
+    :class:`PlayerNotBuilt` when the player is asked for without its template."""
     source = rec.get("source") or {}
     if not walkthroughs.is_workshop_source(source):
         raise NotImported(NOT_IMPORTED_MESSAGE)
     root = workshops.courses_root()
-    course, workshop, _text, course_dir = workshops.load_workshop(root, str(source["course"]), str(source["slug"]))
+    slugs = source_slugs(source)
+    course, parts, course_dir = workshops.load_workshops(root, str(source["course"]), slugs)
+    steps = list(rec.get("steps") or [])
+    plan = Plan(rec=rec, course=course, course_dir=course_dir, player=player)
+
+    # The chapter each step is in (the latest chapter name at or before it): the figure's caption.
+    captions, chapter = [], ""
+    for step in steps:
+        chapter = (step.get("chapter") or "").strip() or chapter
+        captions.append(chapter or (rec.get("name") or ""))
+
+    # The steps grouped by their workshop (E4): with ONE workshop every step is its (a step added from a still is
+    # placed by its text, as before W2e); with several, by the step's own slug - none, or another workshop's, and
+    # the step has no guide to go into: nothing is guessed.
+    members: dict[str, list[tuple[int, dict]]] = {workshop["slug"]: [] for workshop, _text in parts}
+    for index, step in enumerate(steps):
+        slug = step_slug(step)
+        if slug is None and len(members) == 1:
+            slug = next(iter(members))
+        if slug in members:
+            members[slug].append((index, step))
+            continue
+        row = {"number": index + 1, "step_id": step["id"], "text": one_line(step.get("text") or "")}
+        if not walkthroughs.has_picture(step):
+            plan.homeless_skipped.append({**row, "reason": NO_PICTURE_REASON})
+        elif walkthroughs.has_guide_picture(step):
+            plan.homeless_skipped.append({**row, "reason": GUIDE_PICTURE_REASON})
+        else:
+            plan.homeless_not_placed.append({**row, "reason": FOREIGN_WORKSHOP_REASON if slug else NO_WORKSHOP_REASON})
+
+    for position, (workshop, _text) in enumerate(parts):
+        plan.guides.append(_plan_guide(plan, workshop, members[workshop["slug"]], captions, player and position == 0))
+
+    # The debris of an interrupted export in the folders this one writes (the player's only when it is asked for).
+    for g in plan.guides:
+        plan.debris += [(g.guide.parent, name, DEBRIS_REASON) for name in debris_in(g.guide.parent)]
+    plan.debris += [(plan.images_dir, name, DEBRIS_REASON) for name in debris_in(plan.images_dir)]
+    plan.debris += [(plan.images_dir, name, ORPHAN_REASON) for g in plan.guides for name in g.orphans]
+    if player:
+        plan.debris += [(plan.player_dir, name, DEBRIS_REASON) for name in debris_in(plan.player_dir)]
+    return plan
+
+
+def _plan_guide(plan: Plan, workshop: dict, members: list[tuple[int, dict]], captions: list[str], player: bool) -> GuidePlan:
+    """One guide's plan (E4): the workshop's CURRENT guide re-parsed, ``members`` - ``(index in the walkthrough,
+    step)`` for the steps that are this workshop's - placed by anchor, else by text (:func:`align`), each figure
+    numbered as the step is in the whole walkthrough; the blocks of ours in this guide rewritten, removed or left;
+    the player's block (when ``player``: the FIRST guide only) at the end."""
+    rec, course, course_dir = plan.rec, plan.course, plan.course_dir
+    wid = rec["id"]
     slug = workshop["slug"]
     guide = workshops._own_file(course_dir, f"{slug}/{workshops.GUIDE_FILE}")
     if guide is None:
-        raise LookupError("The workshop's guide cannot be read.")
+        raise LookupError(f"The workshop's guide cannot be read: {slug}.")
     raw = guide.read_bytes()
     if len(raw) > workshops.MAX_GUIDE_BYTES:
-        raise workshops.GuideTooLarge(f"{workshops.GUIDE_FILE} is larger than {workshops.MAX_GUIDE_BYTES // 1024 ** 2} MB.")
+        raise workshops.GuideTooLarge(f"{slug}/{workshops.GUIDE_FILE} is larger than {workshops.MAX_GUIDE_BYTES // 1024 ** 2} MB.")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -520,8 +708,6 @@ def compute(rec: dict, player: bool = False) -> Plan:
     lines = split_lines(text)
     plain = [line for line, _ending in lines]
     eol = file_eol(lines)
-    wid = rec["id"]
-    steps = list(rec.get("steps") or [])
     ours = [b for b in marker_blocks(plain) if b.wid == wid]
     block_of: dict[str, MarkerBlock] = {}
     surplus: list[MarkerBlock] = []  # a second block for a step that has one: removed
@@ -533,42 +719,37 @@ def compute(rec: dict, player: bool = False) -> Plan:
         else:
             block_of[block.sid] = block
     player_block = next((b for b in ours if b.sid is None), None)
-    plan = Plan(rec=rec, course=course, workshop=workshop, course_dir=course_dir, guide=guide, raw=raw, new_text=text, diff="",
-                player=player)
+    g = GuidePlan(workshop=workshop, guide=guide, raw=raw, new_text=text)
 
-    # The chapter each step is in (the latest chapter name at or before it): the figure's caption.
-    captions, chapter = [], ""
-    for step in steps:
-        chapter = (step.get("chapter") or "").strip() or chapter
-        captions.append(chapter or (rec.get("name") or ""))
-
-    placement, why = align(steps, parsed)
+    local_steps = [step for _index, step in members]
+    placement, why = align(local_steps, parsed)
     used_parsed = set(placement.values())
     edits: list[tuple[int, int, list[str]]] = []
 
     def remove(block: MarkerBlock, reason: str, sid: str | None) -> None:
         start = block.start - 1 if block.start > 0 and not plain[block.start - 1].strip() else block.start
         edits.append((start, block.end + 1, []))
-        plan.removed.append({"step_id": sid, "line": block.start + 1, "reason": reason})
+        g.removed.append({"step_id": sid, "line": block.start + 1, "reason": reason})
 
-    present = {s["id"] for s in steps}
-    for number, step in enumerate(steps, start=1):
-        sid, index = step["id"], number - 1
+    present = {step["id"] for step in local_steps}
+    for local, (index, step) in enumerate(members):
+        number = index + 1
+        sid = step["id"]
         row = {"number": number, "step_id": sid, "text": one_line(step.get("text") or "")}
         block = block_of.get(sid)
         if not walkthroughs.has_picture(step):
-            plan.skipped.append({**row, "reason": NO_PICTURE_REASON})
+            g.skipped.append({**row, "reason": NO_PICTURE_REASON})
             if block:
                 remove(block, "The step has no picture any more.", sid)
             continue
         if walkthroughs.has_guide_picture(step):
-            plan.skipped.append({**row, "reason": GUIDE_PICTURE_REASON})
+            g.skipped.append({**row, "reason": GUIDE_PICTURE_REASON})
             if block:
                 remove(block, "The step's picture is the guide's own now.", sid)
             continue
         picture = walkthroughs.step_image_path(wid, sid)
         if picture is None:
-            plan.not_placed.append({**row, "reason": MISSING_FILE_REASON})
+            g.not_placed.append({**row, "reason": MISSING_FILE_REASON})
             continue
         name = image_name(slug, wid, sid)
         figure = figure_lines(wid, step, number, name, captions[index])
@@ -581,16 +762,16 @@ def compute(rec: dict, player: bool = False) -> Plan:
             old = plain[block.start:block.end + 1]
             edits.append((block.start, block.end + 1, new_lines))
             how, line, sentence = ("unchanged" if old == new_lines else "replaced"), block.start + 1, row["text"]
-        elif index in placement:
-            guide_step = parsed[placement[index]]
+        elif local in placement:
+            guide_step = parsed[placement[local]]
             new_lines = indented(figure, item_indent(plain[guide_step.start_line - 1]))
             edits.append((guide_step.end_line, guide_step.end_line, [""] + new_lines))
             how, line, sentence = "new", guide_step.end_line, guide_step.text
         else:
-            plan.not_placed.append({**row, "reason": why.get(index, NOT_FOUND_REASON)})
+            g.not_placed.append({**row, "reason": why.get(local, NOT_FOUND_REASON)})
             continue
-        plan.placed.append({**row, "text": sentence, "image": name, "hotspot": spot, "line": line, "how": how})
-        plan.images.append((picture, name))
+        g.placed.append({**row, "text": sentence, "image": name, "hotspot": spot, "line": line, "how": how})
+        g.images.append((picture, name))
 
     for sid, block in block_of.items():
         if sid not in present:
@@ -599,7 +780,7 @@ def compute(rec: dict, player: bool = False) -> Plan:
         remove(block, "A second block for the same step.", block.sid)
 
     if player:
-        plan.player_files = player_files(rec)
+        g.player_files = player_files(rec)
         if player_block:
             edits.append((player_block.start, player_block.end + 1, player_block_lines(wid)))
         else:
@@ -607,36 +788,33 @@ def compute(rec: dict, player: bool = False) -> Plan:
             edits.append((last + 1, last + 1, ([""] if last >= 0 else []) + player_block_lines(wid)))
 
     new_lines = apply_edits(lines, edits, eol)
-    plan.new_text = "".join(line + ending for line, ending in new_lines)
-    plan.diff = "\n".join(difflib.unified_diff(plain, [line for line, _e in new_lines], f"a/{slug}/guide.md", f"b/{slug}/guide.md", lineterm=""))
-    plan.new_in_guide = [{"text": p.text, "line": p.start_line} for j, p in enumerate(parsed) if j not in used_parsed]
+    g.new_text = "".join(line + ending for line, ending in new_lines)
+    g.diff = "\n".join(difflib.unified_diff(plain, [line for line, _e in new_lines], f"a/{slug}/guide.md", f"b/{slug}/guide.md", lineterm=""))
+    g.new_in_guide = [{"text": p.text, "line": p.start_line} for j, p in enumerate(parsed) if j not in used_parsed]
 
     # The pictures our old blocks named that the new guide no longer does: ours by their name, removed with them -
-    # unless another workshop's guide of the course names one too (an author reused it): then it stays, and says so.
+    # unless another workshop's guide of the course names one too (an author reused it - one of this walkthrough's
+    # OWN other guides among them): then it stays, and says so.
+    images_dir = plan.images_dir
     old_names = {m.group(1) for b in ours for line in plain[b.start:b.end + 1] for m in _IMAGE_REF.finditer(line)}
-    candidates = sorted(n for n in old_names if n.startswith(f"wt-{slug}-") and f"_assets/images/{n}" not in plan.new_text
-                        and (plan.images_dir / n).is_file())
-    # Recheck NIT-1: a picture of THIS walkthrough (its name says so) that no block names any more and no guide shows -
-    # an interrupted export's, killed before its removal - is swept with the stale ones.
+    candidates = sorted(n for n in old_names if n.startswith(f"wt-{slug}-") and f"_assets/images/{n}" not in g.new_text
+                        and (images_dir / n).is_file())
+    # Recheck NIT-1: a picture of THIS walkthrough and workshop (its name says so) that no block names any more and no
+    # guide shows - an interrupted export's, killed before its removal - is swept with the stale ones.
     ours_named = re.compile(rf"^wt-{re.escape(slug)}-{wid}-[0-9a-f]{{12}}\.png$")
-    current = {name for _picture, name in plan.images}
+    current = {name for _picture, name in g.images}
     orphans = []
-    if plan.images_dir.is_dir() and not workshops._is_link(plan.images_dir):
-        orphans = sorted(p.name for p in plan.images_dir.iterdir() if ours_named.fullmatch(p.name) and p.is_file()
-                         and p.name not in current and p.name not in candidates and f"_assets/images/{p.name}" not in plan.new_text)
+    if images_dir.is_dir() and not workshops._is_link(images_dir):
+        orphans = sorted(p.name for p in images_dir.iterdir() if ours_named.fullmatch(p.name) and p.is_file()
+                         and p.name not in current and p.name not in candidates and f"_assets/images/{p.name}" not in g.new_text)
     used = used_elsewhere(course_dir, slug, candidates + orphans)
-    plan.stale_images = [n for n in candidates if n not in used]
-    plan.kept = [{"path": f"_assets/images/{n}", "reason": used[n]} for n in candidates + orphans if n in used]
-    if player and plan.player_dir.is_dir() and not workshops._is_link(plan.player_dir):
-        plan.stale_player = sorted(p.name for p in plan.player_dir.iterdir()
-                                   if _PLAYER_STEP.fullmatch(p.name) and p.name not in plan.player_files and p.is_file())
-    # The debris of an interrupted export in the folders this one writes (the player's only when it is asked for).
-    plan.debris = [(plan.guide.parent, name, DEBRIS_REASON) for name in debris_in(plan.guide.parent)]
-    plan.debris += [(plan.images_dir, name, DEBRIS_REASON) for name in debris_in(plan.images_dir)]
-    plan.debris += [(plan.images_dir, name, ORPHAN_REASON) for name in orphans if name not in used]
-    if player:
-        plan.debris += [(plan.player_dir, name, DEBRIS_REASON) for name in debris_in(plan.player_dir)]
-    return plan
+    g.stale_images = [n for n in candidates if n not in used]
+    g.kept = [{"path": f"_assets/images/{n}", "reason": used[n]} for n in candidates + orphans if n in used]
+    g.orphans = [n for n in orphans if n not in used]
+    if player and g.player_dir.is_dir() and not workshops._is_link(g.player_dir):
+        g.stale_player = sorted(p.name for p in g.player_dir.iterdir()
+                                if _PLAYER_STEP.fullmatch(p.name) and p.name not in g.player_files and p.is_file())
+    return g
 
 
 def used_elsewhere(course_dir: Path, slug: str, names: list[str]) -> dict[str, str]:
@@ -710,8 +888,9 @@ def indented(lines: list[str], indent: str) -> list[str]:
 
 def file_actions(plan: Plan) -> list[dict]:
     """Every file the export touches, relative to the course folder, with what it does: ``write`` (new or
-    different bytes), ``unchanged`` or ``remove``."""
-    rows = [{"path": f"{plan.slug}/{workshops.GUIDE_FILE}", "action": "write" if plan.new_bytes != plan.raw else "unchanged"}]
+    different bytes), ``unchanged`` or ``remove`` - every guide's ``guide.md`` first, then the pictures (one folder
+    for the course), the player's files (beside the first guide), and what is swept."""
+    rows = [{"path": f"{g.slug}/{workshops.GUIDE_FILE}", "action": "write" if g.changed else "unchanged"} for g in plan.guides]
     for picture, name in plan.images:
         rows.append({"path": f"_assets/images/{name}", "action": "write" if _file_sha(plan.images_dir / name) != _file_sha(picture) else "unchanged"})
     rows += [{"path": f"_assets/images/{name}", "action": "remove"} for name in plan.stale_images]
@@ -736,14 +915,26 @@ def _content_sha(data: bytes | Path) -> str | None:
     return _file_sha(data) if isinstance(data, Path) else _sha(data)
 
 
+def guide_view(plan: Plan, g: GuidePlan) -> dict:
+    """One guide's block of the plan (E4): its own line's counts, lists and diff."""
+    return {
+        "slug": g.slug, "title": g.workshop.get("title") or g.slug, "guide": g.where(plan.course["id"]), "guide_sha256": g.sha256,
+        "placed": g.placed, "not_placed": g.not_placed, "skipped": g.skipped, "removed": g.removed,
+        "new_in_guide": g.new_in_guide, "kept": g.kept, "figures": g.figures, "changed": g.changed, "diff": g.diff,
+    }
+
+
 def plan_view(plan: Plan) -> dict:
-    """The plan as the API answers it (C2): nothing written."""
+    """The plan as the API answers it (C2): nothing written. Since W2e ``guides`` holds a block per guide
+    (:func:`guide_view`); the flat lists are the guides' joined (the steps of no guide among ``not_placed`` and
+    ``skipped``) and ``workshop``, ``guide`` and ``guide_sha256`` are the first guide's, for a page before W2e."""
     files = file_actions(plan)
     return {
         "course": {"id": plan.course["id"], "title": plan.course["title"], "version": plan.course["version"]},
         "workshop": {"slug": plan.slug, "title": plan.workshop.get("title") or plan.slug},
-        "guide": f"{plan.course['id']}/{plan.slug}/{workshops.GUIDE_FILE}",
+        "guide": plan.first.where(plan.course["id"]),
         "guide_sha256": plan.sha256,
+        "guides": [guide_view(plan, g) for g in plan.guides],
         "placed": plan.placed, "not_placed": plan.not_placed, "skipped": plan.skipped, "removed": plan.removed,
         "new_in_guide": plan.new_in_guide, "kept": plan.kept,
         "debris": [{"path": debris_path(plan, folder, name), "reason": why} for folder, name, why in plan.debris],
@@ -858,43 +1049,67 @@ def check_writable(plan: Plan, folders: list[Path], files: list[Path], course_id
             raise ExportWriteFailed(WRITE_FAILED_MESSAGE.format(path=rel(path), reason="it is read-only"))
 
 
-def write(rec: dict, guide_sha256: str, player: bool = False) -> dict:
-    """Write the export into the course: refused with :class:`GuideChanged` (nothing written) when the guide's
-    sha256 is not ``guide_sha256``; every folder proven (no link, no junction) and every target checked writable
-    before the first byte (:func:`check_writable`); then the pictures, the player (when asked), ``guide.md`` -
-    its sha256 checked once more just before it is replaced - and last the pictures of our old blocks no guide
-    names any more. Every write through :func:`write_file`, inside the course's folder, kept in a :class:`_Journal`:
-    a failure on the way (an ``OSError``, a link met, the guide changed under it) rolls back everything this export
-    did and answers :class:`ExportWriteFailed` (or the refusal it met). Returns what was written."""
+def _shas_for(plan: Plan, shas: dict[str | None, str]) -> dict[str, str]:
+    """The sha256 the body gave for each guide of the plan (E4): ``{slug: sha256}``, or ``{None: sha256}`` - the body
+    before W2e, accepted for a record of ONE workshop only. :class:`ExportRefused` for a guide without one, or a
+    slug the record has no workshop of; :class:`GuideChanged` naming the first guide whose sha256 is not the plan's."""
+    given = dict(shas)
+    if None in given:
+        if len(plan.guides) != 1:
+            raise ExportRefused(SHA_PER_GUIDE_MESSAGE.format(slug=plan.guides[1].slug))
+        given = {plan.slug: given[None]}
+    for slug in given:
+        if slug not in plan.slugs:
+            raise ExportRefused(UNKNOWN_GUIDE_MESSAGE.format(slug=slug))
+    for g in plan.guides:
+        if g.slug not in given:
+            raise ExportRefused(SHA_PER_GUIDE_MESSAGE.format(slug=g.slug))
+    for g in plan.guides:
+        if g.sha256 != given[g.slug]:
+            raise GuideChanged(changed_message(g.where(plan.course["id"])))
+    return given
+
+
+def write(rec: dict, shas: dict[str | None, str], player: bool = False) -> dict:
+    """Write the export into the course: refused with :class:`GuideChanged` (nothing written, the guide named) when
+    ANY guide's sha256 is not the one in ``shas`` (``{slug: sha256}`` per guide; ``{None: sha256}`` is the body
+    before W2e, for a record of one workshop); every folder proven (no link, no junction) and every target of every
+    guide checked writable before the first byte (:func:`check_writable`); then the pictures, the player (when
+    asked, beside the FIRST guide), each ``guide.md`` in the course's order - its sha256 checked once more just
+    before it is replaced - and last the pictures of our old blocks no guide names any more. Every write through
+    :func:`write_file`, inside the course's folder, kept in ONE :class:`_Journal`: a failure on the way (an
+    ``OSError``, a link met, a guide changed under it) rolls back everything this export did, every guide and
+    picture written, and answers :class:`ExportWriteFailed` (or the refusal it met). Returns what was written."""
     with _write_lock:
         plan = compute(rec, player=player)
-        if plan.sha256 != guide_sha256:
-            raise GuideChanged(CHANGED_MESSAGE)
+        given = _shas_for(plan, shas)
         course_id = plan.course["id"]
         # Every folder proven first - a link or a junction anywhere refuses the export before a byte is written.
-        workshop_dir = own_folder(plan.course_dir, plan.slug)
-        if workshop_dir.resolve() != plan.guide.parent.resolve():
-            raise ExportRefused("The workshop's folder is not where its guide is.")
+        workshop_dirs: dict[str, Path] = {}
+        for g in plan.guides:
+            folder = own_folder(plan.course_dir, g.slug)
+            if folder.resolve() != g.guide.parent.resolve():
+                raise ExportRefused(f"The workshop's folder is not where its guide is: {g.slug}.")
+            workshop_dirs[g.slug] = folder
         assets_dir = own_folder(plan.course_dir, IMAGES_FOLDER[0])
         images_dir = own_folder(assets_dir, IMAGES_FOLDER[1]) if assets_dir.is_dir() else assets_dir / IMAGES_FOLDER[1]
-        player_dir = own_folder(workshop_dir, PLAYER_FOLDER) if plan.player_files else None
+        player_dir = own_folder(workshop_dirs[plan.slug], PLAYER_FOLDER) if plan.player_files else None
         actions = {row["path"]: row["action"] for row in file_actions(plan)}
         targets = [images_dir / name for _picture, name in plan.images if actions.get(f"_assets/images/{name}") == "write"]
         targets += [images_dir / name for name in plan.stale_images]
         if player_dir is not None:
             targets += [player_dir / name for name in plan.player_files if actions.get(f"{plan.slug}/{PLAYER_FOLDER}/{name}") == "write"]
             targets += [player_dir / name for name in plan.stale_player]
-        if plan.new_bytes != plan.raw:
-            targets.append(plan.guide)
+        targets += [g.guide for g in plan.guides if g.changed]
         targets += [folder / name for folder, name, _why in plan.debris]
         # Only the folders something goes into are probed: an export with nothing to write touches nothing.
-        folders = [f for f in (workshop_dir, images_dir, player_dir) if f is not None and any(t.parent == f for t in targets)]
+        folders = [f for f in (*workshop_dirs.values(), images_dir, player_dir) if f is not None and any(t.parent == f for t in targets)]
         check_writable(plan, folders, targets, course_id)
 
         journal = _Journal(plan.course_dir, course_id)
         written: list[str] = []
         removed: list[str] = []
-        guide_written = False
+        guides_written: dict[str, bool] = {g.slug: False for g in plan.guides}
         try:
             for folder in (assets_dir, images_dir, player_dir):
                 if folder is not None:
@@ -906,13 +1121,15 @@ def write(rec: dict, guide_sha256: str, player: bool = False) -> dict:
                 for name, data in sorted(plan.player_files.items()):
                     if journal.write(player_dir, name, data):
                         written.append(f"{plan.slug}/{PLAYER_FOLDER}/{name}")
-            if plan.new_bytes != plan.raw:
+            for g in plan.guides:
+                if not g.changed:
+                    continue
                 # Once more, just before it is replaced: somebody may have saved it while the pictures were written.
-                if _file_sha(plan.guide) != guide_sha256:
-                    raise GuideChanged(CHANGED_MESSAGE)
-                guide_written = journal.write(workshop_dir, workshops.GUIDE_FILE, plan.new_bytes)
-                if guide_written:
-                    written.append(f"{plan.slug}/{workshops.GUIDE_FILE}")
+                if _file_sha(g.guide) != given[g.slug]:
+                    raise GuideChanged(changed_message(g.where(course_id)))
+                guides_written[g.slug] = journal.write(workshop_dirs[g.slug], workshops.GUIDE_FILE, g.new_bytes)
+                if guides_written[g.slug]:
+                    written.append(f"{g.slug}/{workshops.GUIDE_FILE}")
             for name in plan.stale_images:
                 target = images_dir / name
                 if target.is_file() and not workshops._is_link(target):
@@ -938,23 +1155,36 @@ def write(rec: dict, guide_sha256: str, player: bool = False) -> dict:
             raise ExportWriteFailed(WRITE_FAILED_MESSAGE.format(path=journal.current, reason=exc.strerror or str(exc))) from None
         journal.commit()
     images = sum(1 for path in written if path.startswith("_assets/images/"))
-    where = f"{plan.course['id']}/{plan.slug}/{workshops.GUIDE_FILE}"
     n = plan.figures
-    if written or removed:
-        message = f"Wrote {n} figure{'' if n == 1 else 's'} into {where}. Review and publish it in the Content Editor."
+    figures = f"{n} figure{'' if n == 1 else 's'}"
+    where = plan.first.where(course_id)
+    if len(plan.guides) == 1:
+        into = where
+        message = (f"Wrote {figures} into {where}. Review and publish it in the Content Editor." if written or removed
+                   else f"Nothing to write: {where} already holds {figures} of this walkthrough.")
     else:
-        message = f"Nothing to write: {where} already holds {n} figure{'' if n == 1 else 's'} of this walkthrough."
+        into = f"{len(plan.guides)} guides of {course_id} ({', '.join(plan.slugs)})"
+        message = (f"Wrote {figures} into {into}. Review and publish them in the Content Editor." if written or removed
+                   else f"Nothing to write: the {into} already hold {figures} of this walkthrough.")
+    guides = [{"slug": g.slug, "guide": g.where(course_id), "figures": g.figures, "guide_written": guides_written[g.slug],
+               "guide_sha256": _sha(g.new_bytes)} for g in plan.guides]
     return {
-        "course": plan.course["id"], "slug": plan.slug, "guide": where, "figures": n, "images": images,
-        "player": bool(plan.player_files), "guide_written": guide_written, "written": written, "removed": removed,
-        "guide_sha256": _sha(plan.new_bytes), "message": message,
+        "course": course_id, "slug": plan.slug, "guide": where, "guides": guides, "figures": n, "images": images,
+        "player": bool(plan.player_files), "guide_written": any(guides_written.values()), "written": written, "removed": removed,
+        "guide_sha256": guides[0]["guide_sha256"], "message": message,
     }
 
 
 def audit_detail(result: dict) -> str:
-    """The audit row's detail: "<course>/<slug>: N figures, M images" (", player" when it was written)."""
+    """The audit row's detail: "<course>/<slug>: N figures, M images" for one guide, "<course>: N figures, M images
+    into K guides (a, b)" for several (E4) - ", player" when the player was written."""
     n, m = result["figures"], result["images"]
-    detail = f"{result['course']}/{result['slug']}: {n} figure{'' if n == 1 else 's'}, {m} image{'' if m == 1 else 's'}"
+    counts = f"{n} figure{'' if n == 1 else 's'}, {m} image{'' if m == 1 else 's'}"
+    guides = result.get("guides") or []
+    if len(guides) > 1:
+        detail = f"{result['course']}: {counts} into {len(guides)} guides ({', '.join(g['slug'] for g in guides)})"
+    else:
+        detail = f"{result['course']}/{result['slug']}: {counts}"
     return detail + (", player" if result["player"] else "")
 
 
@@ -990,10 +1220,10 @@ def _zip(entries: dict[str, bytes | Path]) -> Path:
 
 
 def course_zip(plan: Plan) -> Path:
-    """The export as a zip laid out like the course folder (C6): ``<slug>/guide.md``, ``_assets/images/…``
-    (every placed step's picture) and, with the player, ``<slug>/walkthrough/…`` - to copy into the course by
-    hand where the server may not write it. The zip's temporary file; the caller removes it."""
-    entries: dict[str, bytes | Path] = {f"{plan.slug}/{workshops.GUIDE_FILE}": plan.new_bytes}
+    """The export as a zip laid out like the course folder (C6): every guide's ``<slug>/guide.md``,
+    ``_assets/images/…`` (every placed step's picture) and, with the player, ``<first slug>/walkthrough/…`` - to
+    copy into the course by hand where the server may not write it. The zip's temporary file; the caller removes it."""
+    entries: dict[str, bytes | Path] = {f"{g.slug}/{workshops.GUIDE_FILE}": g.new_bytes for g in plan.guides}
     for picture, name in plan.images:
         entries[f"_assets/images/{name}"] = picture
     for name, data in plan.player_files.items():

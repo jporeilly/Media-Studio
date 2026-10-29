@@ -801,6 +801,10 @@ p { margin: 0 0 8px; }
 .ms-placeholder p { margin: 0; max-width: 420px; }
 .ms-import-steps { margin: 0; padding: 0 0 0 22px; max-height: 40vh; overflow: auto; display: grid; gap: 4px; font-size: 13px; }
 .ms-import-steps li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ms-workshop-ticks { display: grid; gap: 6px; max-height: 32vh; overflow: auto; padding: 2px 0; }
+.ms-workshop-section { display: grid; gap: 4px; }
+.ms-import-chapter { display: grid; gap: 2px; }
+.ms-import-skipped .ms-import-steps { opacity: 0.45; }
 .ms-capture-line { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: 12.5px; }
 .ms-step-num { display: flex; align-items: center; gap: 2px; font-weight: 600; font-size: 12px; color: var(--muted); padding-top: 2px; }
 .ms-builder-stage { position: relative; overflow: auto; min-height: 360px; height: calc(100vh - 300px); background: var(--surface-2); border-radius: var(--radius-sm); }

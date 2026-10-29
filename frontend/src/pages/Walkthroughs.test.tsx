@@ -10,7 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import { type WalkthroughSummary, EMPTY_HOW } from "../lib/walkthrough";
 import WalkthroughsPage from "./Walkthroughs";
 
@@ -141,37 +141,53 @@ describe("the list", () => {
     expect(q("[data-builder]")!.getAttribute("data-builder")).toBe("new000000001");
   });
 
-  it("W2: Import workshop… lists the courses and workshops, previews the parse, imports on the server and opens the builder with a notice", async () => {
-    const payload = {
-      configured: true, message: null,
-      courses: [{
-        id: "pdi-2hr-lab", title: "PDI in 2 Hours", version: "0.1.21", description: "",
-        sections: [
-          { title: "Get Ready", workshops: [{ slug: "00-before", title: "Before You Start", description: "", estimatedMinutes: 5, stepCount: 5 }] },
-          { title: "See It Work", workshops: [{ slug: "01-first-win", title: "Your First Win", description: "", estimatedMinutes: 10, stepCount: 6 }] },
-        ],
-      }],
-    };
-    const preview = (slug: string) => ({
-      course: { id: "pdi-2hr-lab", title: "PDI in 2 Hours", version: "0.1.21" },
-      workshop: { slug, title: slug === "01-first-win" ? "Your First Win" : "Before You Start", section: "", estimatedMinutes: 10, stepCount: 6 },
-      name: slug === "01-first-win" ? "Your First Win" : "Before You Start",
-      chapters: ["Open the pipeline"],
-      steps: [
-        { number: 1, chapter: "Open the pipeline", instruction: "Open win_preview.ktr in Pentaho Data Integration.", text: "Open win_preview.ktr in Pentaho Data Integration.", picture: false, image: null, alt: "", launcher: { id: "spoon", path: "files/win_preview.ktr", label: "Open" }, note: false },
-        { number: 2, chapter: "", instruction: "Right-click the step named Valid rows.", text: "Right-click the step named Valid rows.", picture: true, image: "a.png", alt: "a", launcher: null, note: true },
+  /** W2e: a course of three workshops in two sections; the first workshop's one step comes before any heading (a launcher). */
+  const LAB_PAYLOAD = {
+    configured: true, message: null,
+    courses: [{
+      id: "pdi-2hr-lab", title: "PDI in 2 Hours", version: "0.1.21", description: "",
+      sections: [
+        { title: "Get Ready", workshops: [{ slug: "00-before", title: "Before You Start", description: "", estimatedMinutes: 5, stepCount: 5 }] },
+        { title: "See It Work", workshops: [
+          { slug: "01-first-win", title: "Your First Win", description: "", estimatedMinutes: 10, stepCount: 6 },
+          { slug: "02-build", title: "Build the Pipeline Yourself", description: "", estimatedMinutes: 25, stepCount: 23 },
+        ] },
       ],
-      counts: slug === "01-first-win" ? { steps: 10, chapters: 4, pictures: 2, to_capture: 8 } : { steps: 1, chapters: 1, pictures: 1, to_capture: 0 },
-      message: null,
-    });
+    }],
+  };
+  const row = (number: number, chapter: string, in_chapter: string, text: string, picture: boolean) => (
+    { number, chapter, in_chapter, instruction: text, text, picture, image: picture ? "a.png" : null, alt: "", launcher: null, note: false });
+  const LAB_PREVIEWS: Record<string, { title: string; steps: ReturnType<typeof row>[]; counts: { steps: number; chapters: number; pictures: number; to_capture: number } }> = {
+    "00-before": { title: "Before You Start", steps: [row(1, "", "", "Open Pentaho Data Integration.", true)], counts: { steps: 1, chapters: 0, pictures: 1, to_capture: 0 } },
+    "01-first-win": { title: "Your First Win", steps: [
+      row(1, "Open the pipeline", "Open the pipeline", "Open win_preview.ktr in Pentaho Data Integration.", false),
+      row(2, "", "Open the pipeline", "Right-click the step named Valid rows.", true),
+      row(3, "Troubleshooting a bad file", "Troubleshooting a bad file", "Fix the file.", false),
+    ], counts: { steps: 3, chapters: 2, pictures: 1, to_capture: 2 } },
+    "02-build": { title: "Build the Pipeline Yourself", steps: [
+      row(1, "Read the file", "Read the file", "Drag the Text file input.", true), row(2, "", "Read the file", "Press Run.", true),
+    ], counts: { steps: 2, chapters: 1, pictures: 2, to_capture: 0 } },
+  };
+  const labPreview = (slug: string) => ({
+    course: { id: "pdi-2hr-lab", title: "PDI in 2 Hours", version: "0.1.21" },
+    workshop: { slug, title: LAB_PREVIEWS[slug].title, section: "", estimatedMinutes: 10, stepCount: 6 },
+    name: LAB_PREVIEWS[slug].title, chapters: [], steps: LAB_PREVIEWS[slug].steps, counts: LAB_PREVIEWS[slug].counts, message: null,
+  });
+  /** The server faked for the lab: the list, the courses and every preview - `failing` answers a 400 for that slug. */
+  const serveLab = (failing: string | null = null) => {
     vi.mocked(api.get).mockImplementation(async (path: string) => {
       if (path === "/api/walkthroughs") return { walkthroughs: [tour] } as never;
-      if (path === "/api/courses") return payload as never;
-      if (path === "/api/courses/pdi-2hr-lab/workshops/00-before/preview") return preview("00-before") as never;
-      if (path === "/api/courses/pdi-2hr-lab/workshops/01-first-win/preview") return preview("01-first-win") as never;
+      if (path === "/api/courses") return LAB_PAYLOAD as never;
+      const m = /^\/api\/courses\/pdi-2hr-lab\/workshops\/([^/]+)\/preview$/.exec(path);
+      if (m && m[1] === failing) throw new ApiError(400, `pdi-2hr-lab/${m[1]}/guide.md cannot be read as UTF-8 text.`);
+      if (m && LAB_PREVIEWS[m[1]]) return labPreview(m[1]) as never;
       throw new Error(`unexpected GET ${path}`);
     });
-    vi.mocked(api.post).mockImplementation(async () => ({ ...tour, id: "imp000000001", name: "Your First Win", steps: [] }) as never);
+  };
+
+  it("W2e: Import workshop… ticks workshops by section, previews every ticked one in the course's order, lets chapters out, names and imports them", async () => {
+    serveLab();
+    vi.mocked(api.post).mockImplementation(async () => ({ ...tour, id: "imp000000001", name: "See It Work", steps: [] }) as never);
     await mount();
     await act(async () => { q("[data-import-workshop]")!.click(); });
     await settle();
@@ -180,31 +196,98 @@ describe("the list", () => {
     expect(vi.mocked(api.get)).toHaveBeenCalledWith("/api/courses");
     const courseSelect = dialog.querySelector("[data-import-course]") as HTMLSelectElement;
     expect([...courseSelect.options].map((o) => o.textContent)).toEqual(["PDI in 2 Hours (0.1.21)"]);
-    const workshopSelect = dialog.querySelector("[data-import-slug]") as HTMLSelectElement;
-    expect([...workshopSelect.querySelectorAll("optgroup")].map((g) => g.getAttribute("label"))).toEqual(["Get Ready", "See It Work"]);
-    expect([...workshopSelect.options].map((o) => o.textContent)).toEqual(["Before You Start (5 min · 5 steps)", "Your First Win (10 min · 6 steps)"]);
-    expect(workshopSelect.value).toBe("00-before");
+    // The tick list, grouped by section as SUMMARY.md orders them; the first workshop ticked by default.
+    const sections = [...dialog.querySelectorAll("[data-import-section]")] as HTMLInputElement[];
+    expect(sections.map((s) => s.getAttribute("data-import-section"))).toEqual(["Get Ready", "See It Work"]);
+    const tick = (slug: string) => dialog.querySelector(`[data-import-tick="${slug}"]`) as HTMLInputElement;
+    const ticks = [...dialog.querySelectorAll("[data-import-tick]")] as HTMLInputElement[];
+    expect(ticks.map((t) => t.getAttribute("data-import-tick"))).toEqual(["00-before", "01-first-win", "02-build"]);
+    expect(ticks.map((t) => t.checked)).toEqual([true, false, false]);
+    expect(dialog.textContent).toContain("Build the Pipeline Yourself (25 min · 23 steps)");
     await settle();
-    expect(q("[data-import-line]")!.textContent).toBe("1 step in 1 chapter; 1 picture from the guide, 0 to capture");
-    // Another workshop: its preview, with the steps and whether each has a picture.
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(workshopSelect, "01-first-win");
-      workshopSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith("/api/courses/pdi-2hr-lab/workshops/00-before/preview");
+    // One workshop: the server's own count - its one step before any heading starts no chapter (X1).
+    expect(q("[data-import-line]")!.textContent).toBe("1 step in no chapters; 1 picture from the guide, 0 to capture");
+    expect([...dialog.querySelectorAll('[data-import-workshop-preview="00-before"] [data-import-chapter]')].map((c) => c.getAttribute("data-import-chapter"))).toEqual([""]);
+    expect(dialog.querySelector('[data-import-workshop-preview="00-before"]')!.textContent).toContain("(before the first section)");
+    expect((q("[data-import-name]") as HTMLInputElement).placeholder).toBe("Before You Start");
+    // None ticked: no preview, Import greyed out.
+    await act(async () => { tick("00-before").click(); });
     await settle();
+    expect((q("[data-import-confirm]") as HTMLButtonElement).disabled).toBe(true);
+    expect(q("[data-import-line]")).toBeNull();
+    // The section's tick takes every workshop of it; the previews are read in parallel and shown in the course's order.
+    await act(async () => { sections[1].click(); });
+    await settle();
+    expect([...dialog.querySelectorAll("[data-import-tick]")].map((t) => (t as HTMLInputElement).checked)).toEqual([false, true, true]);
     expect(vi.mocked(api.get)).toHaveBeenCalledWith("/api/courses/pdi-2hr-lab/workshops/01-first-win/preview");
-    expect(q("[data-import-line]")!.textContent).toBe("10 steps in 4 chapters; 2 pictures from the guide, 8 to capture");
-    const rows = [...document.querySelectorAll("[data-import-steps] li")];
-    expect(rows.length).toBe(2);
-    expect(rows[0].textContent).toContain("Open the pipeline");
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith("/api/courses/pdi-2hr-lab/workshops/02-build/preview");
+    expect([...dialog.querySelectorAll("[data-import-workshop-preview]")].map((b) => b.getAttribute("data-import-workshop-preview"))).toEqual(["01-first-win", "02-build"]);
+    expect(q("[data-import-line]")!.textContent).toBe("5 steps in 3 chapters; 3 pictures from the guide, 2 to capture");
+    expect((q("[data-import-name]") as HTMLInputElement).placeholder).toBe("See It Work");
+    expect(sections[1].checked).toBe(true);
+    // Every workshop of the course: the course's title; back to the first section's state afterwards.
+    await act(async () => { tick("00-before").click(); });
+    await settle();
+    expect((q("[data-import-name]") as HTMLInputElement).placeholder).toBe("PDI in 2 Hours");
+    expect([...dialog.querySelectorAll("[data-import-workshop-preview]")].map((b) => b.getAttribute("data-import-workshop-preview"))).toEqual(["00-before", "01-first-win", "02-build"]);
+    // X1: with several workshops the first workshop's step before its heading starts a chapter named by the workshop - the
+    // server's count (6 steps, 4 chapters), on the combined line and on the workshop's own line, which add up.
+    expect(q("[data-import-line]")!.textContent).toBe("6 steps in 4 chapters; 4 pictures from the guide, 2 to capture");
+    expect(dialog.querySelector('[data-import-workshop-preview="00-before"] [data-import-workshop-line]')!.textContent).toBe("1 step in 1 chapter; 1 picture from the guide, 0 to capture");
+    await act(async () => { tick("00-before").click(); });
+    await settle();
+    expect(sections[0].checked).toBe(false);
+    // Each workshop's block: its title, its line, its chapters as ticks with the steps under them (a camera for a
+    // picture from the guide, a crossed-out picture to capture).
+    const first = dialog.querySelector('[data-import-workshop-preview="01-first-win"]')!;
+    expect(first.querySelector("[data-import-workshop-title]")!.textContent).toBe("Your First Win");
+    expect(first.querySelector("[data-import-workshop-line]")!.textContent).toBe("3 steps in 2 chapters; 1 picture from the guide, 2 to capture");
+    expect([...first.querySelectorAll("[data-import-chapter]")].map((c) => c.getAttribute("data-import-chapter"))).toEqual(["Open the pipeline", "Troubleshooting a bad file"]);
+    const rows = [...first.querySelectorAll("[data-import-steps] li")];
+    expect(rows.length).toBe(3);
     expect(rows[0].querySelector("[aria-label='to capture']")).not.toBeNull();
     expect(rows[1].querySelector("[aria-label='picture from the guide']")).not.toBeNull();
-    expect((q("[data-import-name]") as HTMLInputElement).placeholder).toBe("Your First Win");
+    // A chapter unticked: its steps leave the counts, the workshop's line and the combined line.
+    const trouble = first.querySelector('[data-import-chapter="Troubleshooting a bad file"] [data-import-chapter-tick]') as HTMLInputElement;
+    expect(trouble.checked).toBe(true);
+    await act(async () => { trouble.click(); });
+    await settle();
+    expect(first.querySelector("[data-import-workshop-line]")!.textContent).toBe("2 steps in 1 chapter; 1 picture from the guide, 1 to capture");
+    expect(q("[data-import-line]")!.textContent).toBe("4 steps in 2 chapters; 3 pictures from the guide, 1 to capture");
+    expect(first.querySelector('[data-import-chapter="Troubleshooting a bad file"]')!.className).toContain("ms-import-skipped");
     expect(vi.mocked(api.post)).not.toHaveBeenCalled();
     await act(async () => { (q("[data-import-confirm]") as HTMLButtonElement).click(); });
     await settle();
-    expect(vi.mocked(api.post)).toHaveBeenCalledWith("/api/walkthroughs/import", { course: "pdi-2hr-lab", slug: "01-first-win" });
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith("/api/walkthroughs/import", {
+      course: "pdi-2hr-lab", workshops: [{ slug: "01-first-win", skip_chapters: ["Troubleshooting a bad file"] }, { slug: "02-build" }],
+    });
     expect(q("[data-builder]")!.getAttribute("data-builder")).toBe("imp000000001");
+  });
+
+  it("X2: a workshop whose preview fails is named; the other workshops' blocks stay with their own lines, there is no combined line and Import is greyed", async () => {
+    serveLab("02-build");
+    await mount();
+    await act(async () => { q("[data-import-workshop]")!.click(); });
+    await settle();
+    const dialog = q("[role=dialog]")!;
+    const sections = [...dialog.querySelectorAll("[data-import-section]")] as HTMLInputElement[];
+    await act(async () => { sections[1].click(); });
+    await settle();
+    expect([...dialog.querySelectorAll("[data-import-tick]")].map((t) => (t as HTMLInputElement).checked)).toEqual([true, true, true]);
+    expect(dialog.textContent).toContain("02-build: pdi-2hr-lab/02-build/guide.md cannot be read as UTF-8 text.");
+    expect([...dialog.querySelectorAll("[data-import-workshop-preview]")].map((b) => b.getAttribute("data-import-workshop-preview"))).toEqual(["00-before", "01-first-win"]);
+    expect([...dialog.querySelectorAll("[data-import-workshop-line]")].map((l) => l.textContent)).toEqual([
+      "1 step in 1 chapter; 1 picture from the guide, 0 to capture", "3 steps in 2 chapters; 1 picture from the guide, 2 to capture",
+    ]);
+    expect(q("[data-import-line]")).toBeNull();
+    expect((q("[data-import-confirm]") as HTMLButtonElement).disabled).toBe(true);
+    // The named workshop unticked: the combined line is back and Import is on.
+    await act(async () => { (dialog.querySelector('[data-import-tick="02-build"]') as HTMLInputElement).click(); });
+    await settle();
+    expect(dialog.textContent).not.toContain("cannot be read");
+    expect(q("[data-import-line]")!.textContent).toBe("4 steps in 3 chapters; 2 pictures from the guide, 2 to capture");
+    expect((q("[data-import-confirm]") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("W2: with no courses folder set, the dialog says where to set it and offers no Import", async () => {

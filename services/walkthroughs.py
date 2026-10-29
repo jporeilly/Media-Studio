@@ -649,34 +649,45 @@ def duplicate(wid: str, owner_id: str | None, owner_name: str | None) -> dict | 
             "created_at": now, "updated_at": now, "revision": 1, "version": DOCUMENT_VERSION, "steps": steps,
         }
         if rec.get("source"):
-            record["source"] = dict(rec["source"])
+            # A copy of its own (W2e: ``source.workshops`` is a list), as the file will hold it.
+            record["source"] = json.loads(json.dumps(rec["source"]))
         _write_record(new, record)
         return record
 
 
 # -- the import of a course workshop (W2) ------------------------------------------------------------
 
+def too_many_steps_message(total: int, count: int = 1) -> str:
+    """The import's refusal past ``MAX_STEPS`` (W2e: the bound is over the chosen workshops TOGETHER): "The workshop
+    has more steps than a walkthrough holds (250 of 200)." for one workshop, "The 3 workshops together have …" for
+    several. Pure."""
+    what = "The workshop has" if count <= 1 else f"The {count} workshops together have"
+    return f"{what} more steps than a walkthrough holds ({total} of {MAX_STEPS})."
+
+
 def create_from_workshop(name: str, owner_id: str | None, owner_name: str | None, source: dict, steps: list[dict]) -> dict:
-    """A new walkthrough built from a parsed workshop (``services.workshops``):
-    ``source`` is ``{course, slug, title, version}`` and each of ``steps`` carries
-    ``chapter``, ``instruction``, ``text``, ``note``, ``source`` (``{course, slug,
-    image, alt, launcher}``) and ``picture`` - the guide image as a ``Path`` already
-    proven under the courses folder, or None. Every picture goes through the ONE
-    copy routine (:func:`_copy_file`); a step whose picture is missing or not a PNG
-    imports WITHOUT a picture (logged, never an error - the desktop app captures
-    it later). ``ValueError`` past ``MAX_STEPS`` before anything is written; the
-    planned record is validated with the save's own model (``api.schemas
-    .WalkthroughIn``, the belt under the parser's rules) before it is written, and
-    an invalid plan is a ``ValueError`` naming the field with nothing left behind;
-    a failure while copying removes the folder again, so no half-made walkthrough
-    is left behind. Revision 1; returns the record."""
+    """A new walkthrough built from a parsed workshop (``services.workshops``) -
+    or, since W2e, from several of one course, their steps already joined:
+    ``source`` is ``{course, slug, title, version, workshops}`` and each of
+    ``steps`` carries ``chapter``, ``instruction``, ``text``, ``note``, ``source``
+    (``{course, slug, image, alt, launcher}`` - its OWN workshop's) and ``picture`` -
+    the guide image as a ``Path`` already proven under the courses folder, or None.
+    Every picture goes through the ONE copy routine (:func:`_copy_file`); a step
+    whose picture is missing or not a PNG imports WITHOUT a picture (logged, never
+    an error - the desktop app captures it later). ``ValueError`` past ``MAX_STEPS``
+    (over every workshop's steps together, :func:`too_many_steps_message`) before
+    anything is written; the planned record is validated with the save's own model
+    (``api.schemas.WalkthroughIn``, the belt under the parser's rules) before it is
+    written, and an invalid plan is a ``ValueError`` naming the field with nothing
+    left behind; a failure while copying removes the folder again, so no half-made
+    walkthrough is left behind. Revision 1; returns the record."""
     # Lazy: ``api.schemas`` imports this module for its constants, so the import cannot sit at the top.
     from pydantic import ValidationError
 
     from api.schemas import WalkthroughIn, plain_validation_error
 
     if len(steps) > MAX_STEPS:
-        raise ValueError(f"The workshop has {len(steps)} steps; a walkthrough can hold at most {MAX_STEPS}.")
+        raise ValueError(too_many_steps_message(len(steps), len(source.get("workshops") or ()) or 1))
     wid = new_id()
     now = _now()
     out: list[dict] = []
