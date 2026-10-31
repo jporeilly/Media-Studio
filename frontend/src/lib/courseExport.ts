@@ -76,11 +76,24 @@ export interface ExportPlan {
   changed: boolean;
   figures: number;
   player: boolean;
+  /** B3, with the player: the first sentence of the figure's caption in force - the one typed, else the guide's own, else "Walkthrough: <name>"; "" without the player. */
+  player_caption: string;
+  /** B3, with the player: the walkthrough figure the guide gets, line by line (the contract with the content manager); [] without the player. */
+  player_lines: string[];
+  /** B3, with the player: where the figure goes; null without the player. */
+  player_block: PlayerBlock | null;
   /** The guide as a unified diff ("" when it does not change). */
   diff: string;
   /** Whether the studio allows the write ("Allow export into the Courses folder"). */
   allowed: boolean;
 }
+
+/**
+ * Where the embedded player's figure goes (B3): in place of the Interactive walkthrough placeholder, below the video
+ * figure, after the first section heading (`heading` its text; "" and line 0 for a guide without one), or where an
+ * earlier export's block stands - rewritten or unchanged. `line` is 1-based.
+ */
+export interface PlayerBlock { how: "placeholder" | "video" | "heading" | "replaced" | "unchanged"; line: number; heading: string }
 
 /** `POST /api/walkthroughs/{wid}/export/course`: what was written. */
 export interface ExportResult {
@@ -99,7 +112,12 @@ export interface ExportResult {
   message: string;
 }
 
-export const exportPlanQueryKey = (wid: string, player: boolean) => ["walkthroughs", wid, "export-plan", player] as const;
+export const exportPlanQueryKey = (wid: string, player: boolean, caption: string | null = null) => ["walkthroughs", wid, "export-plan", player, caption] as const;
+
+/** The plan's body: the player, and the figure's caption when the player goes and one was typed (null: the server's own - the guide's, else the name). */
+export function planBody(player: boolean, caption: string | null): { player: boolean; caption?: string } {
+  return player && caption !== null ? { player, caption } : { player };
+}
 
 export function exportPlanUrl(wid: string): string {
   return `/api/walkthroughs/${wid}/export/course/plan`;
@@ -109,9 +127,12 @@ export function exportWriteUrl(wid: string): string {
   return `/api/walkthroughs/${wid}/export/course`;
 }
 
-/** The course zip (C6): the guide and the pictures laid out like the course folder, the player too when asked. */
-export function courseZipUrl(wid: string, player: boolean): string {
-  return `/api/walkthroughs/${wid}/export/course.zip${player ? "?player=1" : ""}`;
+/** The course zip (C6): the guide and the pictures laid out like the course folder, the player too when asked - with its caption when one was typed. */
+export function courseZipUrl(wid: string, player: boolean, caption: string | null = null): string {
+  if (!player) return `/api/walkthroughs/${wid}/export/course.zip`;
+  const query = new URLSearchParams({ player: "1" });
+  if (caption !== null) query.set("caption", caption);
+  return `/api/walkthroughs/${wid}/export/course.zip?${query.toString()}`;
 }
 
 /** The interactive player as a zip (C7): any walkthrough. */
@@ -133,9 +154,21 @@ export function planLine(plan: Pick<ExportPlan, "figures" | "guide" | "not_place
   return parts.join("; ");
 }
 
-/** The write's body (W2e): every guide's sha256 as the preview showed it, and whether the player goes too. */
-export function writeBody(plan: Pick<ExportPlan, "guides">, player: boolean): { guides: { slug: string; sha256: string }[]; player: boolean } {
-  return { guides: plan.guides.map((g) => ({ slug: g.slug, sha256: g.guide_sha256 })), player };
+/** The write's body (W2e): every guide's sha256 as the preview showed it, whether the player goes too, and - with it - the caption typed (B3). */
+export function writeBody(plan: Pick<ExportPlan, "guides">, player: boolean, caption: string | null = null): { guides: { slug: string; sha256: string }[]; player: boolean; caption?: string } {
+  return { guides: plan.guides.map((g) => ({ slug: g.slug, sha256: g.guide_sha256 })), ...planBody(player, caption) };
+}
+
+/** Where the embedded player's figure goes, said plainly (B3); "" without the player. */
+export function playerWhere(block: PlayerBlock | null | undefined): string {
+  if (!block) return "";
+  switch (block.how) {
+    case "placeholder": return `The figure replaces the Interactive walkthrough placeholder at line ${block.line}.`;
+    case "video": return `The figure goes below the video figure at line ${block.line}.`;
+    case "heading": return block.heading ? `The figure goes after "${block.heading}" (line ${block.line}).` : "The figure goes at the top of the guide (it has no heading).";
+    case "replaced": return `The figure is rewritten at line ${block.line}.`;
+    default: return `The figure is unchanged at line ${block.line}.`;
+  }
 }
 
 /**

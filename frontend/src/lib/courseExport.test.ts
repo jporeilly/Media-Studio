@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  type GuidePlan, courseZipUrl, exportPlanUrl, exportTitle, exportWriteUrl, filesLine, guidesOf, placedWhere, planLine, playerZipUrl, settingLine,
+  type GuidePlan, courseZipUrl, exportPlanUrl, exportTitle, exportWriteUrl, filesLine, guidesOf, placedWhere, planLine, playerWhere, playerZipUrl, settingLine,
   stepsOfNoGuide, writeBody,
 } from "./courseExport";
 
@@ -20,10 +20,24 @@ describe("W2e: several guides", () => {
     expect(planLine({ figures: 3, guide: "demo/01-first/guide.md", not_placed: [], skipped: [], guides: [guide("01-first", "a", 3)] })).toBe("3 figures into demo/01-first/guide.md");
     expect(planLine(guide("02-second", "b", 2))).toBe("2 figures into demo/02-second/guide.md");
   });
-  it("the write sends every guide's sha256 from the plan", () => {
+  it("the write sends every guide's sha256 from the plan - and the player's caption when the player goes and one was typed", () => {
     expect(writeBody({ guides: [guide("01-first", "a".repeat(64)), guide("02-second", "b".repeat(64))] }, true)).toEqual({
       guides: [{ slug: "01-first", sha256: "a".repeat(64) }, { slug: "02-second", sha256: "b".repeat(64) }], player: true,
     });
+    expect(writeBody({ guides: [guide("01-first", "a".repeat(64))] }, true, "Walkthrough: the first win")).toEqual({
+      guides: [{ slug: "01-first", sha256: "a".repeat(64) }], player: true, caption: "Walkthrough: the first win",
+    });
+    // Without the player the caption is not sent, typed or not.
+    expect(writeBody({ guides: [guide("01-first", "a".repeat(64))] }, false, "Walkthrough: x")).toEqual({ guides: [{ slug: "01-first", sha256: "a".repeat(64) }], player: false });
+  });
+  it("B3: says where the embedded player's figure goes, per the plan's player block", () => {
+    expect(playerWhere({ how: "placeholder", line: 11, heading: "" })).toBe("The figure replaces the Interactive walkthrough placeholder at line 11.");
+    expect(playerWhere({ how: "video", line: 5, heading: "" })).toBe("The figure goes below the video figure at line 5.");
+    expect(playerWhere({ how: "heading", line: 5, heading: "## 1. Open it" })).toBe('The figure goes after "## 1. Open it" (line 5).');
+    expect(playerWhere({ how: "heading", line: 0, heading: "" })).toBe("The figure goes at the top of the guide (it has no heading).");
+    expect(playerWhere({ how: "replaced", line: 40, heading: "" })).toBe("The figure is rewritten at line 40.");
+    expect(playerWhere({ how: "unchanged", line: 40, heading: "" })).toBe("The figure is unchanged at line 40.");
+    expect(playerWhere(null)).toBe("");
   });
   it("X5: the steps of no guide are the not placed AND the skipped ones no guide lists, each flagged, in step order", () => {
     const ours5 = { number: 5, step_id: "s5s5s5s5s5s5", text: "Select Close.", reason: "Its text is not in the guide any more." };
@@ -53,6 +67,9 @@ describe("the routes", () => {
     expect(exportWriteUrl("abc123abc123")).toBe("/api/walkthroughs/abc123abc123/export/course");
     expect(courseZipUrl("abc123abc123", false)).toBe("/api/walkthroughs/abc123abc123/export/course.zip");
     expect(courseZipUrl("abc123abc123", true)).toBe("/api/walkthroughs/abc123abc123/export/course.zip?player=1");
+    // The player's caption travels with the zip when one was typed; never without the player.
+    expect(courseZipUrl("abc123abc123", true, "Walkthrough: the first win")).toBe("/api/walkthroughs/abc123abc123/export/course.zip?player=1&caption=Walkthrough%3A+the+first+win");
+    expect(courseZipUrl("abc123abc123", false, "Walkthrough: x")).toBe("/api/walkthroughs/abc123abc123/export/course.zip");
     expect(playerZipUrl("abc123abc123")).toBe("/api/walkthroughs/abc123abc123/export/player.zip");
   });
 });

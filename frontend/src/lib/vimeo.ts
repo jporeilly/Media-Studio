@@ -62,6 +62,8 @@ export interface PlacePlan {
   guide: string;
   /** Where the link goes: the placeholder, a figure of ours, an insertion after the first section heading, or nowhere. */
   how: "placeholder" | "figure" | "insert" | "none";
+  /** The embedded player's round: `insert` (or `none`) goes ABOVE the guide's interactive walkthrough figure, `line` its first line, no heading. */
+  above_walkthrough?: boolean;
   /** The 1-based line of the placeholder's `<figure>`, the figure line, or the heading the block goes after. */
   line: number;
   heading: string;
@@ -145,13 +147,14 @@ export const WELCOME_LABEL = "This is the course's Welcome Tour";
 export const PLACED_NEXT = "Review and publish it in the Content Editor.";
 
 /** Where the link goes, said plainly - the dialog's first line. */
-export function placeLine(plan: Pick<PlacePlan, "how" | "line" | "heading" | "guide">): string {
+export function placeLine(plan: Pick<PlacePlan, "how" | "line" | "heading" | "guide" | "above_walkthrough">): string {
   switch (plan.how) {
     case "placeholder":
       return `The Walkthrough placeholder at line ${plan.line} of ${plan.guide} becomes the video figure.`;
     case "figure":
       return `The video figure at line ${plan.line} of ${plan.guide} gets this link.`;
     case "insert":
+      if (plan.above_walkthrough) return `The figure goes above the interactive walkthrough (line ${plan.line}) of ${plan.guide}.`;
       return plan.heading
         ? `The figure goes after "${plan.heading}" (line ${plan.line}) of ${plan.guide}.`
         : `The figure goes at the top of ${plan.guide} (it has no heading).`;

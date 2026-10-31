@@ -66,6 +66,8 @@ describe("the place dialog's lines", () => {
     expect(placeLine(plan({ how: "figure", line: 8 }))).toBe("The video figure at line 8 of demo/01-first/guide.md gets this link.");
     expect(placeLine(plan({ how: "insert", line: 5, heading: "## 1. Open it" }))).toBe('The figure goes after "## 1. Open it" (line 5) of demo/01-first/guide.md.');
     expect(placeLine(plan({ how: "insert", line: 0, heading: "" }))).toBe("The figure goes at the top of demo/01-first/guide.md (it has no heading).");
+    // The embedded player's round: a guide with the interactive walkthrough's figure takes the video ABOVE it.
+    expect(placeLine(plan({ how: "insert", line: 7, heading: "", above_walkthrough: true }))).toBe("The figure goes above the interactive walkthrough (line 7) of demo/01-first/guide.md.");
     expect(placeLine(plan({ how: "none" }))).toBe("demo/01-first/guide.md has no Walkthrough placeholder and no video figure of ours.");
   });
 

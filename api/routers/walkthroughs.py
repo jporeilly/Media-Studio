@@ -478,11 +478,13 @@ def transcript(wid: str, download: bool = Query(default=False), user: dict = Dep
 # -- Export to course (W2c) -------------------------------------------------------------------------------
 
 class ExportPlanIn(BaseModel):
-    """The plan's options: whether the interactive player is written beside the guide too (C7)."""
+    """The plan's options: whether the interactive player is written beside the guide too (C7) and, with it, the first
+    sentence of its figure's caption (B3; "" for the guide's own, else "Walkthrough: <name>")."""
 
     model_config = ConfigDict(extra="forbid")
 
     player: StrictBool = False
+    caption: str = Field("", max_length=course_export.MAX_CAPTION_CHARS)
 
 
 class GuideShaIn(BaseModel):
@@ -558,7 +560,7 @@ def export_course_plan(wid: str, body: ExportPlanIn | None = None, user: dict = 
     ``guide.md`` as a unified diff, and whether the studio allows the write. Nothing is written; no audit row."""
     rec = _owned(wid, user)
     with _export_refusals():
-        return course_export.plan_view(course_export.compute(rec, player=bool(body and body.player)))
+        return course_export.plan_view(course_export.compute(rec, player=bool(body and body.player), caption=body.caption if body else ""))
 
 
 @router.post("/{wid}/export/course")
@@ -574,19 +576,21 @@ def export_course(wid: str, body: ExportCourseIn, user: dict = Depends(current_u
     if not studio_settings.courses_export_allowed():
         raise HTTPException(status_code=403, detail=course_export.EXPORT_OFF_MESSAGE)
     with _export_refusals():
-        result = course_export.write(rec, body.shas, player=body.player)
+        result = course_export.write(rec, body.shas, player=body.player, caption=body.caption)
     audit(WALKTHROUGH_EXPORT_COURSE, user=user, entity="walkthrough", entity_id=wid, detail=course_export.audit_detail(result))
     return result
 
 
 @router.get("/{wid}/export/course.zip")
-def export_course_zip(wid: str, player: bool = Query(default=False), user: dict = Depends(current_user)):
+def export_course_zip(wid: str, player: bool = Query(default=False), caption: str = Query(default="", max_length=course_export.MAX_CAPTION_CHARS),
+                      user: dict = Depends(current_user)):
     """The export as a zip laid out like the course folder (C6): ``<slug>/guide.md`` with the figures and
-    ``_assets/images/…`` (and ``<slug>/walkthrough/…`` with ``?player=1``) - for a server that may not write the
-    Courses folder: copied into the course by hand. Whatever the setting; nothing written, no audit row."""
+    ``_assets/images/…`` (and ``<slug>/walkthrough/…`` with ``?player=1``, the figure's caption ``&caption=`` as the
+    dialog typed it) - for a server that may not write the Courses folder: copied into the course by hand. Whatever
+    the setting; nothing written, no audit row."""
     rec = _owned(wid, user)
     with _export_refusals():
-        plan = course_export.compute(rec, player=player)
+        plan = course_export.compute(rec, player=player, caption=caption)
         data = course_export.course_zip(plan)
     stem = f"{plan.course['id']}-{plan.slug}-export" if len(plan.guides) == 1 else f"{plan.course['id']}-export"
     return _zip_response(data, stem)

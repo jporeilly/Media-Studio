@@ -57,6 +57,9 @@ const PLAN: ExportPlan = {
   changed: true,
   figures: 2,
   player: false,
+  player_caption: "",
+  player_lines: [],
+  player_block: null,
   diff: FIRST.diff,
   allowed: false,
 };
@@ -75,6 +78,13 @@ const PLAN2: ExportPlan = {
   skipped: [...FIRST.skipped, HOMELESS_SKIPPED], figures: 3,
   files: [...PLAN.files, { path: "02-second/guide.md", action: "write" }], diff: `${FIRST.diff}\n${SECOND.diff}`,
 };
+/** B3: the figure the guide gets with the player, as the server's `player_lines` answers it. */
+const PLAYER_LINES = (caption: string) => [
+  '<figure class="pcm-walkthrough">', "",
+  '<iframe src="walkthrough/index.html" title="Interactive walkthrough: Tour" loading="lazy"></iframe>', "",
+  `<figcaption>${caption}. Click where the beacon pulses; right-click or double-click when the tooltip says so.</figcaption>`, "",
+  "</figure>",
+];
 const WRITTEN: ExportResult = {
   course: "demo", slug: "01-first", guide: "demo/01-first/guide.md", figures: 2, images: 1, player: false, guide_written: true,
   guides: [{ slug: "01-first", guide: "demo/01-first/guide.md", figures: 2, guide_written: true, guide_sha256: "b".repeat(64) }],
@@ -137,8 +147,11 @@ describe("the preview", () => {
     expect(text("[data-export-debris]")).toContain("01-first/.guide.md.1234abcd.keep - left by an interrupted export");
     // The intro states which content manager draws the pin (recheck NIT-5; W2d fix F2: from 0.7.42).
     expect(text("[data-export-caveat]")).toBe(
-      "The pins show in a Content Manager from 0.7.42 (a Content Editor from 1.30.0); an older one shows the picture, the pin's text as a numbered line and the caption. Export into a published course once its readers have that version.",
+      "The pins show in a Content Manager from 0.7.42 (a Content Editor from 1.30.0); an older one shows the picture, the pin's text as a numbered line and the caption. The interactive player needs a Content Manager from 0.7.44 to show the embedded player; an older one shows an empty frame and the caption. Export into a published course once its readers have that version.",
     );
+    // Without the player ticked there is no caption to edit and no figure to show.
+    expect(q("[data-export-player-caption]")).toBeNull();
+    expect(q("[data-export-player-figure]")).toBeNull();
     // The files and the diff are there, collapsed.
     expect((q("[data-export-files]") as HTMLDetailsElement).open).toBe(false);
     expect(text("[data-export-files] summary")).toBe("2 files to write");
@@ -163,6 +176,50 @@ describe("the preview", () => {
     await settle();
     expect(posts().at(-1)).toEqual([`/api/walkthroughs/${WID}/export/course/plan`, { player: true }]);
     expect(q("[data-export-zip]")!.getAttribute("href")).toBe(`/api/walkthroughs/${WID}/export/course.zip?player=1`);
+  });
+
+  it("B3: with the player ticked the dialog shows the figure the guide gets, where it goes and its caption - edited, the caption previews again and travels with the write and the zip", async () => {
+    let wrote = false;
+    vi.mocked(api.post).mockImplementation(async (path: string, body: unknown) => {
+      const b = body as { player: boolean; caption?: string };
+      if (path.endsWith("/export/course/plan")) {
+        const caption = b.caption ?? "Walkthrough: Tour";
+        return {
+          ...PLAN, allowed: true, changed: !wrote, player: b.player,
+          player_caption: b.player ? caption : "",
+          player_lines: b.player ? PLAYER_LINES(caption) : [],
+          player_block: b.player ? { how: "placeholder", line: 11, heading: "" } : null,
+        } as never;
+      }
+      if (path.endsWith("/export/course")) { wrote = true; return { ...WRITTEN, player: true } as never; }
+      throw new Error(`unexpected ${path}`);
+    });
+    await mount();
+    await act(async () => { (q("[data-export-with-player]") as HTMLInputElement).click(); });
+    await settle();
+    expect(posts().at(-1)).toEqual([`/api/walkthroughs/${WID}/export/course/plan`, { player: true }]);
+    const caption = q("[data-export-player-caption]") as HTMLInputElement;
+    expect(caption.value).toBe("Walkthrough: Tour");
+    expect(caption.maxLength).toBe(200);
+    expect(text("[data-export-player-where]")).toBe("The figure replaces the Interactive walkthrough placeholder at line 11.");
+    expect(q("[data-export-player-figure] pre")!.textContent).toBe(PLAYER_LINES("Walkthrough: Tour").join("\n"));
+    // Typing changes nothing until the field is left; then the plan is read again with the caption.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(caption, "Walkthrough: the first win");
+      caption.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(posts().filter(([path]) => String(path).endsWith("/plan")).length).toBe(2);
+    await act(async () => { caption.dispatchEvent(new FocusEvent("focusout", { bubbles: true })); });
+    await settle();
+    expect(posts().at(-1)).toEqual([`/api/walkthroughs/${WID}/export/course/plan`, { player: true, caption: "Walkthrough: the first win" }]);
+    expect(q("[data-export-player-figure] pre")!.textContent).toContain("Walkthrough: the first win. Click where the beacon pulses");
+    expect(q("[data-export-zip]")!.getAttribute("href")).toBe(`/api/walkthroughs/${WID}/export/course.zip?player=1&caption=Walkthrough%3A+the+first+win`);
+    await act(async () => { (q("[data-export-write]") as HTMLButtonElement).click(); });
+    await settle();
+    expect(posts().filter(([path]) => String(path).endsWith("/export/course"))).toEqual([
+      [`/api/walkthroughs/${WID}/export/course`, { guides: [{ slug: "01-first", sha256: SHA }], player: true, caption: "Walkthrough: the first win" }],
+    ]);
   });
 
   it("W2e: a walkthrough of two workshops - the combined line, a block per guide with its own line, lists and diff folded, the step of no guide", async () => {

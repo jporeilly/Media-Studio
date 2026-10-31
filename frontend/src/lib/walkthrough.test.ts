@@ -7,8 +7,8 @@
 import { describe, expect, it } from "vitest";
 import {
   type Step, type WalkthroughDocument, type WalkthroughSource, CLICKS, CLICK_LABELS, HOTSPOT_DEFAULT, MARKERS, MARKER_LABELS, MAX_STEPS, MIN_HOTSPOT_SIDE,
-  backIndex, canAddStep, centredHotspot, chapterAt, chapterCount, chapterStart, chapters, clampHotspot, clampIndex, clickLead, countsLine, deleteStep,
-  displayedRect, documentOf, endIndex, fitRect, hasPicture, homeIndex, imagesOf, insertStep, moveStep, namesOnly, narrationOf, nextIndex, normaliseStep,
+  NUDGE_MS, backIndex, canAddStep, centredHotspot, chapterAt, chapterCount, chapterStart, chapters, clampHotspot, clampIndex, clickLead, clickNudge, countsLine,
+  deleteStep, displayedRect, documentOf, endIndex, fitRect, hasPicture, homeIndex, hotspotAdvances, imagesOf, insertStep, moveStep, namesOnly, narrationOf, nextIndex, normaliseStep,
   playUrl, putBody, reorderStep, safeFileStem, sameDocument, serialiseDocument, setHotspot, shownAsModal, stepById, stepImageUrl, stepIndex, stepLabel,
   stepsToCapture, tooltipPlacement, transcript, transcriptFileName, typingIn, updateStep,
 } from "./walkthrough";
@@ -338,6 +338,30 @@ describe("the click kind and the marker (F3, F4) and the added hotspot (F2)", ()
     expect(clickLead("right")).toBe("Right-click");
     expect(clickLead("double")).toBe("Double-click");
     expect(clickLead(undefined)).toBe("");
+  });
+
+  it("B1: the hotspot advances on the step's own click - a left click, the context menu, a double-click, any click for none - and a wrong click gets the nudge", () => {
+    expect(hotspotAdvances("left", "click")).toBe(true);
+    expect(hotspotAdvances("left", "contextmenu")).toBe(false);
+    expect(hotspotAdvances("left", "dblclick")).toBe(false);
+    expect(hotspotAdvances("right", "contextmenu")).toBe(true);
+    expect(hotspotAdvances("right", "click")).toBe(false);
+    expect(hotspotAdvances("right", "dblclick")).toBe(false);
+    expect(hotspotAdvances("double", "dblclick")).toBe(true);
+    expect(hotspotAdvances("double", "click")).toBe(false);
+    expect(hotspotAdvances("double", "contextmenu")).toBe(false);
+    // "none" (a Shift+F8 step) goes on at any click; the dblclick after two clicks is not a third.
+    expect(hotspotAdvances("none", "click")).toBe(true);
+    expect(hotspotAdvances("none", "contextmenu")).toBe(true);
+    expect(hotspotAdvances("none", "dblclick")).toBe(false);
+    expect(hotspotAdvances(undefined, "click")).toBe(true);
+    expect(hotspotAdvances(undefined, "contextmenu")).toBe(false);
+    expect(clickNudge("right")).toBe("Right-click here");
+    expect(clickNudge("double")).toBe("Double-click here");
+    expect(clickNudge("left")).toBe("");
+    expect(clickNudge("none")).toBe("");
+    expect(clickNudge(undefined)).toBe("");
+    expect(NUDGE_MS).toBe(1500);
   });
 
   it("Add hotspot places the capture's 160 x 60 centred on the picture, clamped into a small one, none for a picture too small", () => {

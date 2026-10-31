@@ -19,9 +19,13 @@ name by default). An Unlisted video's link carries its hash (the content manager
 any other video's is the bare id - a numeric id either way, so the content manager's S509 passes. When the guide
 has no placeholder but already holds a Vimeo figure of OURS - a ``![Walkthrough](https://vimeo.com/…)`` line - the
 link is replaced (Publish again, then place again) and its caption rewritten; when it has neither, the plan says so
-(``how: "none"``) and offers the insertion after the guide's first section heading (``insert``), or the lines to
-paste by hand. The guide keeps its line endings and every other byte (``course_export.split_lines`` /
-``apply_edits``).
+(``how: "none"``) and offers the insertion (``insert``) - ABOVE the guide's interactive walkthrough figure when it
+has one (the embedded player's ``figure.pcm-walkthrough``, filled or its placeholder; above the export's opening
+marker when its markers wrap it, never inside or below: ``course_export.walkthrough_figure_anchor``, the plan's
+``above_walkthrough``), else after the guide's first section heading - or the lines to paste by hand. The walkthrough
+figure is never taken for the video figure: the placeholder is a plain ``<figure>`` with the ``pcm-video-caption``
+caption, the figure of ours a ``![Walkthrough](https://vimeo.com/…)`` line. The guide keeps its line endings and every
+other byte (``course_export.split_lines`` / ``apply_edits``).
 
 **The JSON files** are edited byte for byte (:func:`set_json_key`): one top-level key's value replaced in place -
 or the key added after the last - the file's own line endings, indentation and every other byte kept. The
@@ -46,7 +50,7 @@ from pathlib import Path
 
 from services import course_export, walkthroughs, workshops
 from services import projects as store
-from services.course_export import apply_edits, file_eol, one_line, split_lines
+from services.course_export import apply_edits, fenced_lines, file_eol, first_section_heading, one_line, split_lines
 from services.studio_settings import courses_export_allowed
 from services.walkthrough_video import load_snapshot
 
@@ -69,9 +73,6 @@ CHANGED_MESSAGE = "The file {path} changed since the preview: preview again."
 
 _CAPTION_RE = re.compile(r'^(\s*)<figcaption class="pcm-video-caption">(.*?)</figcaption>\s*$')
 _FIGURE_RE = re.compile(r"^(\s*)!\[Walkthrough\]\((https?://(?:www\.)?vimeo\.com/[^)\s]*)\)\s*$")
-_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
-_SECTION_RE = re.compile(r"^## ")
-_TITLE_RE = re.compile(r"^# ")
 _WATCH_RE = re.compile(r"^watch\s*:\s*", re.IGNORECASE)
 
 
@@ -132,21 +133,9 @@ class Placeholder:
     end: int  # the ``</figure>`` line
 
 
-def _fenced(plain: list[str]) -> list[bool]:
-    """Whether each line is inside a code fence (a fence line itself counts as inside)."""
-    out, inside = [], False
-    for line in plain:
-        if _FENCE_RE.match(line):
-            inside = not inside
-            out.append(True)
-            continue
-        out.append(inside)
-    return out
-
-
 def find_placeholder(plain: list[str]) -> Placeholder | None:
     """The Walkthrough placeholder in the standard's exact form: a figure holding only the caption."""
-    fenced = _fenced(plain)
+    fenced = fenced_lines(plain)
     for i, line in enumerate(plain):
         if fenced[i]:
             continue
@@ -166,7 +155,7 @@ def find_placeholder(plain: list[str]) -> Placeholder | None:
 
 def find_figure(plain: list[str]) -> int | None:
     """The first ``![Walkthrough](https://vimeo.com/…)`` line of ours, outside a code fence."""
-    fenced = _fenced(plain)
+    fenced = fenced_lines(plain)
     for i, line in enumerate(plain):
         if not fenced[i] and _FIGURE_RE.match(line):
             return i
@@ -185,21 +174,12 @@ def figure_caption_index(plain: list[str], figure: int) -> int | None:
     return None
 
 
-def first_section_heading(plain: list[str]) -> int | None:
-    """The guide's first ``## `` heading, else its ``# `` title, outside a fence; None for a guide with neither."""
-    fenced = _fenced(plain)
-    for pattern in (_SECTION_RE, _TITLE_RE):
-        for i, line in enumerate(plain):
-            if not fenced[i] and pattern.match(line):
-                return i
-    return None
-
-
 @dataclass
 class GuideEdit:
     """What the guide becomes: ``how`` is ``placeholder``, ``figure``, ``insert`` or ``none``; ``line`` the 1-based
-    line of the placeholder's ``<figure>``, of the figure line or of the heading the block goes after (0 for a guide
-    with no heading); ``lines`` the figure to paste by hand."""
+    line of the placeholder's ``<figure>``, of the figure line, of the heading the block goes after (0 for a guide
+    with no heading) or - with ``above_walkthrough`` - of the interactive walkthrough's first line the block goes
+    before; ``lines`` the figure to paste by hand."""
 
     how: str
     line: int
@@ -209,6 +189,7 @@ class GuideEdit:
     existing_caption: str | None
     changed: bool
     lines: list[str]
+    above_walkthrough: bool = False
 
 
 def plan_guide(text: str, link: str, caption: str, *, insert: bool, slug: str = "guide") -> GuideEdit:
@@ -220,6 +201,7 @@ def plan_guide(text: str, link: str, caption: str, *, insert: bool, slug: str = 
     edits: list[tuple[int, int, list[str]]] = []
     existing: str | None = None
     heading = ""
+    above_walkthrough = False
     placeholder = find_placeholder(plain)
     if placeholder is not None:
         indent = re.match(r"[ \t]*", plain[placeholder.start]).group()
@@ -237,16 +219,29 @@ def plan_guide(text: str, link: str, caption: str, *, insert: bool, slug: str = 
                 edits.append((caption_at, caption_at + 1, [match.group(1) + caption_line(caption)]))
             how, line = "figure", figure + 1
         else:
-            at_heading = first_section_heading(plain)
-            heading = plain[at_heading] if at_heading is not None else ""
-            at = at_heading + 1 if at_heading is not None else 0
-            line = at
-            if insert:
-                after = [""] if at < len(plain) and plain[at].strip() else []
-                edits.append((at, at, [""] + block + after if at_heading is not None else block + [""]))
-                how = "insert"
+            # The embedded player's figure (or its placeholder) in the guide: the video sits ABOVE it, by the standard -
+            # above the export's opening marker when its markers wrap the figure, so the next export never rewrites it away.
+            above = course_export.walkthrough_figure_anchor(plain)
+            if above is not None:
+                above_walkthrough = True
+                at, line = above, above + 1
+                if insert:
+                    before = [""] if at > 0 and plain[at - 1].strip() else []
+                    edits.append((at, at, before + block + [""]))
+                    how = "insert"
+                else:
+                    how = "none"
             else:
-                how = "none"
+                at_heading = first_section_heading(plain)
+                heading = plain[at_heading] if at_heading is not None else ""
+                at = at_heading + 1 if at_heading is not None else 0
+                line = at
+                if insert:
+                    after = [""] if at < len(plain) and plain[at].strip() else []
+                    edits.append((at, at, [""] + block + after if at_heading is not None else block + [""]))
+                    how = "insert"
+                else:
+                    how = "none"
     if edits:
         new_lines = apply_edits(lines, edits, eol)
         new_text = "".join(line_text + ending for line_text, ending in new_lines)
@@ -254,7 +249,7 @@ def plan_guide(text: str, link: str, caption: str, *, insert: bool, slug: str = 
         new_lines, new_text = lines, text
     changed = new_text != text
     diff = "\n".join(difflib.unified_diff(plain, [l for l, _e in new_lines], f"a/{slug}/guide.md", f"b/{slug}/guide.md", lineterm="")) if changed else ""
-    return GuideEdit(how, line, heading, new_text, diff, existing, changed, block)
+    return GuideEdit(how, line, heading, new_text, diff, existing, changed, block, above_walkthrough)
 
 
 # -- the JSON edits --------------------------------------------------------------------------------------------------
@@ -480,7 +475,7 @@ def plan_view(plan: PlacePlan) -> dict:
     e = plan.edit
     return {
         "course": plan.course_id, "course_title": plan.course_title, "slug": plan.slug, "workshop": plan.workshop_title,
-        "guide": plan.where(plan.guide), "how": e.how, "line": e.line, "heading": e.heading,
+        "guide": plan.where(plan.guide), "how": e.how, "line": e.line, "heading": e.heading, "above_walkthrough": e.above_walkthrough,
         "caption": plan.caption, "existing_caption": e.existing_caption, "link": plan.link, "lines": e.lines, "diff": e.diff,
         "welcome": plan.welcome, "insert": plan.insert,
         "files": file_actions(plan), "changed": plan.changed,

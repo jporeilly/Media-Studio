@@ -119,13 +119,16 @@ describe("the player", () => {
     expect(exits).toBe(1);
   });
 
-  it("Enter on the focused hotspot is the button's own click, not a second step on", async () => {
-    await mount();
-    const spot = hotspot()!;
-    await key("Enter", spot);
-    expect(progress()).toBe("Step 1 of 3");
-    await act(async () => { spot.click(); });
+  it("Enter on the focused hotspot goes exactly one step on - the player's own, the button's click prevented - whatever the step's click kind", async () => {
+    await mount({ walkthrough: { name: "T", steps: [S("one", { click: "right" }), S("two", { click: "double" }), S("three")] } });
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    await act(async () => { hotspot()!.dispatchEvent(enter); });
+    expect(enter.defaultPrevented).toBe(true);
     expect(progress()).toBe("Step 2 of 3");
+    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    await act(async () => { hotspot()!.dispatchEvent(space); });
+    expect(space.defaultPrevented).toBe(true);
+    expect(progress()).toBe("Step 3 of 3");
   });
 
   it("a click on the hotspot advances; a click on the picture outside it makes the hotspot pulse again and does not advance", async () => {
@@ -383,11 +386,11 @@ describe("the player", () => {
     expect(q("[data-tooltip-click]")!.textContent).toBe("Right-click");
     expect(q("[data-player-tooltip]")!.textContent).toBe("Right-clickText one");
     expect(hotspot()!.getAttribute("aria-label")).toBe("Right-click: Text one");
-    // Any click on the hotspot still advances: the label tells the learner which real click to make.
-    await act(async () => { hotspot()!.click(); });
+    // B1: the hotspot advances on the click the step names - the context menu, a double-click, any click for none, a click.
+    await act(async () => { hotspot()!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
     expect(q("[data-tooltip-click]")!.textContent).toBe("Double-click");
     expect(hotspot()!.getAttribute("aria-label")).toBe("Double-click: Open it");
-    await act(async () => { hotspot()!.click(); });
+    await act(async () => { hotspot()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true })); });
     expect(q("[data-tooltip-click]")).toBeNull();
     expect(hotspot()!.getAttribute("aria-label")).toBe("Text three");
     await act(async () => { hotspot()!.click(); });
@@ -395,5 +398,127 @@ describe("the player", () => {
     expect(q("[data-player-tooltip]")!.textContent).toBe("Text four");
     // The transcript is unchanged by the click kind.
     expect(transcript({ name: "T", steps: [S("one", { click: "right" })] })).toBe("# T\n\n1. Text one\n");
+  });
+
+  it("B1: a right-click step advances on the context menu only (its default prevented); a left click pulses the hotspot once and says Right-click here for 1.5 s", async () => {
+    vi.useFakeTimers();
+    try {
+      await mount({ walkthrough: { name: "T", steps: [S("one", { click: "right", marker: "beacon" }), S("two")] } });
+      const before = hotspot()!;
+      expect(q("[data-player-nudge]")).toBeNull();
+      await act(async () => { before.click(); });
+      expect(progress()).toBe("Step 1 of 2");
+      expect(q("[data-player-nudge]")!.textContent).toBe("Right-click here");
+      expect(q("[data-player-nudge]")!.getAttribute("role")).toBe("status");
+      // The pulse starts again (the hotspot is drawn afresh, as after a click outside it), the focus kept on it.
+      const after = hotspot()!;
+      expect(after).not.toBe(before);
+      expect(after.className).toContain("ms-hotspot-pulse");
+      expect(after.className).toContain("ms-hotspot-beacon");
+      expect(document.activeElement).toBe(after);
+      await act(async () => { vi.advanceTimersByTime(1499); });
+      expect(q("[data-player-nudge]")).not.toBeNull();
+      await act(async () => { vi.advanceTimersByTime(1); });
+      expect(q("[data-player-nudge]")).toBeNull();
+      // A double-click does not count either: two clicks, two nudges, the step stands.
+      await act(async () => { hotspot()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true })); });
+      expect(progress()).toBe("Step 1 of 2");
+      // The right-click goes on, the browser's menu suppressed, and the nudge is gone with the step.
+      await act(async () => { hotspot()!.click(); });
+      expect(q("[data-player-nudge]")).not.toBeNull();
+      const menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+      await act(async () => { hotspot()!.dispatchEvent(menu); });
+      expect(menu.defaultPrevented).toBe(true);
+      expect(progress()).toBe("Step 2 of 2");
+      expect(q("[data-player-nudge]")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("B1: a double-click step advances on dblclick only; a single click pulses and says Double-click here; the context menu is left alone", async () => {
+    await mount({ walkthrough: { name: "T", steps: [S("one", { click: "double" }), S("two")] } });
+    await act(async () => { hotspot()!.click(); });
+    expect(progress()).toBe("Step 1 of 2");
+    expect(q("[data-player-nudge]")!.textContent).toBe("Double-click here");
+    const menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    await act(async () => { hotspot()!.dispatchEvent(menu); });
+    expect(menu.defaultPrevented).toBe(false);
+    expect(progress()).toBe("Step 1 of 2");
+    await act(async () => { hotspot()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true })); });
+    expect(progress()).toBe("Step 2 of 2");
+    expect(q("[data-player-nudge]")).toBeNull();
+  });
+
+  it("B1: a step of no click kind (Shift+F8) advances on any click - a click or the context menu; a left step as today, its context menu the browser's", async () => {
+    await mount({ walkthrough: { name: "T", steps: [S("one", { click: "none" }), S("two", { click: "none" }), S("three"), S("four")] } });
+    await act(async () => { hotspot()!.click(); });
+    expect(progress()).toBe("Step 2 of 4");
+    const menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    await act(async () => { hotspot()!.dispatchEvent(menu); });
+    expect(menu.defaultPrevented).toBe(true);
+    expect(progress()).toBe("Step 3 of 4");
+    expect(q("[data-player-nudge]")).toBeNull();
+    // The left step: a right-click neither advances nor is suppressed; a click goes on, no nudge ever.
+    const left = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    await act(async () => { hotspot()!.dispatchEvent(left); });
+    expect(left.defaultPrevented).toBe(false);
+    expect(progress()).toBe("Step 3 of 4");
+    await act(async () => { hotspot()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true })); });
+    expect(progress()).toBe("Step 3 of 4");
+    expect(q("[data-player-nudge]")).toBeNull();
+    await act(async () => { hotspot()!.click(); });
+    expect(progress()).toBe("Step 4 of 4");
+  });
+
+  it("B1: Next, ArrowRight and Enter always advance, whatever the step's click kind - the keyboard user's way", async () => {
+    await mount({ walkthrough: { name: "T", steps: [S("one", { click: "right" }), S("two", { click: "double" }), S("three", { click: "right" }), S("four", { click: "double" })] } });
+    await act(async () => { button("Next")!.click(); });
+    expect(progress()).toBe("Step 2 of 4");
+    await key("ArrowRight");
+    expect(progress()).toBe("Step 3 of 4");
+    await key("Enter", document.body);
+    expect(progress()).toBe("Step 4 of 4");
+    expect(q("[data-player-nudge]")).toBeNull();
+  });
+
+  it("B2: embedded - no Close button, a compact header, Escape does nothing with nothing open (and still closes what is), the end card offers Start again", async () => {
+    await mount({ embedded: true });
+    expect(q("[data-walkthrough-player]")!.className).toContain("ms-player-embedded");
+    expect(q('[aria-label="Close"]')).toBeNull();
+    await key("Escape");
+    expect(exits).toBe(0);
+    await key("t");
+    expect(q("[data-player-transcript]")).not.toBeNull();
+    await key("Escape");
+    expect(q("[data-player-transcript]")).toBeNull();
+    expect(exits).toBe(0);
+    await key("Escape");
+    expect(exits).toBe(0);
+    // The hotspot, Next and the keys work as they do standalone.
+    await act(async () => { hotspot()!.click(); });
+    expect(progress()).toBe("Step 2 of 3");
+    await key("End");
+    await act(async () => { button("Finish")!.click(); });
+    expect(q("[data-player-end]")).not.toBeNull();
+    expect(button("Start again")).not.toBeNull();
+    expect(button("Restart")).toBeNull();
+    expect(button("Close")).toBeNull();
+    await act(async () => { button("Start again")!.click(); });
+    expect(q("[data-player-end]")).toBeNull();
+    expect(progress()).toBe("Step 1 of 3");
+    expect(exits).toBe(0);
+    // An empty walkthrough's card has nowhere to close to either.
+    await act(async () => root?.unmount());
+    await mount({ embedded: true, walkthrough: { name: "Empty", steps: [] } });
+    expect(q("[data-player-empty]")).not.toBeNull();
+    expect(button("Close")).toBeNull();
+    // Standalone, the Close button and Escape are as before.
+    await act(async () => root?.unmount());
+    await mount();
+    expect(q('[aria-label="Close"]')).not.toBeNull();
+    expect(q("[data-walkthrough-player]")!.className).not.toContain("ms-player-embedded");
+    await key("Escape");
+    expect(exits).toBe(1);
   });
 });

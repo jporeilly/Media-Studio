@@ -71,6 +71,37 @@ guide only. The write takes every guide's sha256 (``{slug: sha256}``; the one sh
 record of one workshop), checks them all before the first byte (one changed is a 409 naming it), proves every
 folder, checks every target writable, and keeps ONE journal - a failure part-way rolls back every guide and picture
 written. The zip holds every guide.
+
+**The embedded player** (B3). With the player, the FIRST guide gets the content manager's walkthrough FIGURE between
+the ``player`` marker pair - a Content Manager from 0.7.44 renders the page in a 16:9 frame with a Full screen button
+and the caption under it; an older one shows an empty frame and the caption (:func:`player_figure_lines`)::
+
+    <!-- media-studio: walkthrough <wid> player -->
+
+    <figure class="pcm-walkthrough">
+
+    <iframe src="walkthrough/index.html" title="Interactive walkthrough: <name>" loading="lazy"></iframe>
+
+    <figcaption>Walkthrough: <name>. Click where the beacon pulses; right-click or double-click when the tooltip says so.</figcaption>
+
+    </figure>
+
+    <!-- /media-studio -->
+
+- blank lines around each element, as the course standard's video figure has, so Markdown leaves them alone; the
+  caption's first sentence is typed in the dialog (``Walkthrough: <name>`` by default; the one already in the guide
+  wins a re-export that types none: :func:`existing_player_caption`), its full stop added, the second fixed;
+- where it goes (:func:`_plan_guide`): a block of ours already there is rewritten in place (an export before this
+  release left the one-line pointer: the figure takes its place); else the course standard's **Interactive
+  walkthrough placeholder** - ``<figure class="pcm-walkthrough">`` holding only ``<figcaption>Interactive
+  walkthrough: coming soon</figcaption>`` - is replaced (:func:`find_walkthrough_placeholder`); else the block goes
+  right BELOW the guide's video figure - the Walkthrough placeholder, the Vimeo round's figure or an authored one,
+  a ``<figure>`` holding a ``pcm-video-caption`` (:func:`find_video_figure`; the standard puts the video above);
+  else after the guide's first section heading (:func:`first_section_heading`, the Vimeo round's one rule too);
+- idempotent as the step figures are: the block is rewritten only when the name or the caption changed;
+- the Vimeo round (``services.course_video``) learns the figure: its video figure is inserted ABOVE an existing
+  walkthrough figure - above our opening marker when the markers wrap it (:func:`walkthrough_figure_anchor`) - and
+  never mistakes it for the video figure.
 """
 
 from __future__ import annotations
@@ -105,6 +136,17 @@ PLAYER_DATA_SLOT = '<script type="application/json" id="walkthrough-data">null</
 PLAYER_TITLE_SLOT = "<title>Walkthrough</title>"
 #: The player's folder: ``<course>/<slug>/walkthrough/`` when written into a workshop, the zip's top folder.
 PLAYER_FOLDER = "walkthrough"
+#: The figure the player is embedded by (B3): the content manager's ``figure.pcm-walkthrough`` - rendered as the player
+#: inline by a Content Manager from 0.7.44 - written inside the ``player`` marker pair.
+PLAYER_FIGURE_CLASS = "pcm-walkthrough"
+#: The course standard's Interactive walkthrough placeholder: the walkthrough figure holding only this caption.
+PLAYER_PLACEHOLDER_CAPTION = "Interactive walkthrough: coming soon"
+#: The figure caption's second sentence, fixed: how the learner drives the player.
+PLAYER_CAPTION_TAIL = "Click where the beacon pulses; right-click or double-click when the tooltip says so."
+#: The caption's first sentence, typed in the export dialog: at most this long (the Vimeo round's cap for its caption).
+MAX_CAPTION_CHARS = 200
+#: The course standard's video figure caption class: the Vimeo round writes it; the export's figure goes below it.
+VIDEO_CAPTION_CLASS = "pcm-video-caption"
 #: The widest a figure is shown in the guide: the house figure's own cap (the content manager's COURSE-STANDARD 6).
 MAX_FIGURE_WIDTH = 800
 IMAGES_FOLDER = ("_assets", "images")
@@ -113,6 +155,18 @@ _MARKER_OPEN = re.compile(r"^<!-- media-studio: walkthrough ([0-9a-f]{12}) (?:st
 _IMAGE_REF = re.compile(r'src="\.\./_assets/images/(wt-[A-Za-z0-9._-]+\.png)"')
 _PLAYER_STEP = re.compile(r"^step-[0-9a-f]{12}\.png$")
 _EOL = re.compile(r"\r\n|\r|\n")
+#: The guide's figures and fences, by their lines (B3; the Vimeo round reads the same rules).
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+_FIGURE_OPEN_RE = re.compile(r"^\s*<figure(?:\s[^>]*)?>\s*$")
+_FIGURE_CLOSE_RE = re.compile(r"^\s*</figure>\s*$")
+_WALKTHROUGH_OPEN_RE = re.compile(rf'^\s*<figure class="{PLAYER_FIGURE_CLASS}">\s*$')
+_VIDEO_CAPTION_RE = re.compile(rf'^\s*<figcaption class="{VIDEO_CAPTION_CLASS}">')
+_PLACEHOLDER_CAPTION_RE = re.compile(rf"^\s*<figcaption>\s*{re.escape(PLAYER_PLACEHOLDER_CAPTION)}\s*</figcaption>\s*$")
+_PLAIN_CAPTION_RE = re.compile(r"^\s*<figcaption>(.*?)</figcaption>\s*$")
+_HEADING_RE = re.compile(r"^#{1,6} ")
+_SECTION_RE = re.compile(r"^## ")
+_TITLE_RE = re.compile(r"^# ")
+_SENTENCE_END = (".", "!", "?")
 #: The deterministic time a zip's entries carry, so the same export is the same zip.
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
@@ -229,12 +283,152 @@ def figure_lines(wid: str, step: dict, number: int, name: str, caption: str) -> 
     return lines
 
 
-def player_block_lines(wid: str) -> list[str]:
-    """The guide's pointer to the interactive player written beside it (C7) - a link until the content manager
-    has a launcher that opens it in the guide."""
-    line = (f"**Interactive walkthrough:** open [{PLAYER_FOLDER}/index.html]({PLAYER_FOLDER}/index.html), in this "
-            "workshop's folder, in a web browser. It runs offline.")
-    return [marker_open(wid, "player"), "", line, "", MARKER_CLOSE]
+def fenced_lines(plain: list[str]) -> list[bool]:
+    """Whether each line is inside a code fence (a fence line itself counts as inside). One rule for the export's
+    figures and the Vimeo round's. Pure."""
+    out, inside = [], False
+    for line in plain:
+        if _FENCE_RE.match(line):
+            inside = not inside
+            out.append(True)
+            continue
+        out.append(inside)
+    return out
+
+
+def first_section_heading(plain: list[str]) -> int | None:
+    """The guide's first ``## `` heading, else its ``# `` title, outside a fence; None for a guide with neither. Where a
+    block goes when the guide has no place of its own for it - the export's figure, the Vimeo round's video figure."""
+    fenced = fenced_lines(plain)
+    for pattern in (_SECTION_RE, _TITLE_RE):
+        for i, line in enumerate(plain):
+            if not fenced[i] and pattern.match(line):
+                return i
+    return None
+
+
+@dataclass(frozen=True)
+class FigureSpan:
+    """A ``<figure>`` block of the guide by its lines (0-based): the opening tag's and the closing tag's."""
+
+    start: int
+    end: int
+
+
+def _figure_close(plain: list[str], fenced: list[bool], start: int) -> int | None:
+    """The ``</figure>`` line closing the figure opened at ``start``: the first after it, with no other figure, heading
+    or fence on the way; None for a figure that never closes."""
+    for k in range(start + 1, len(plain)):
+        if fenced[k] or _FIGURE_OPEN_RE.match(plain[k]) or _HEADING_RE.match(plain[k]):
+            return None
+        if _FIGURE_CLOSE_RE.match(plain[k]):
+            return k
+    return None
+
+
+def _walkthrough_figures(plain: list[str]) -> list[FigureSpan]:
+    """Every ``<figure class="pcm-walkthrough">`` … ``</figure>`` outside a fence, in order."""
+    fenced = fenced_lines(plain)
+    out = []
+    for i, line in enumerate(plain):
+        if not fenced[i] and _WALKTHROUGH_OPEN_RE.match(line):
+            end = _figure_close(plain, fenced, i)
+            if end is not None:
+                out.append(FigureSpan(i, end))
+    return out
+
+
+def find_walkthrough_figure(plain: list[str]) -> FigureSpan | None:
+    """The guide's first walkthrough figure outside a fence - the filled figure or its placeholder - or None."""
+    figures = _walkthrough_figures(plain)
+    return figures[0] if figures else None
+
+
+def find_walkthrough_placeholder(plain: list[str]) -> FigureSpan | None:
+    """The course standard's Interactive walkthrough placeholder in its exact form: a walkthrough figure holding only
+    ``<figcaption>Interactive walkthrough: coming soon</figcaption>`` (blank lines around); the first one, or None."""
+    for figure in _walkthrough_figures(plain):
+        inner = [line for line in plain[figure.start + 1:figure.end] if line.strip()]
+        if len(inner) == 1 and _PLACEHOLDER_CAPTION_RE.match(inner[0]):
+            return figure
+    return None
+
+
+def find_video_figure(plain: list[str]) -> FigureSpan | None:
+    """The guide's first video figure of the course standard's form outside a fence - a ``<figure>`` (never the
+    walkthrough figure) holding a ``pcm-video-caption`` figcaption: the Walkthrough placeholder, the Vimeo round's
+    figure or an authored one - with its closing tag; None without one. The export's figure goes right below it."""
+    fenced = fenced_lines(plain)
+    for i, line in enumerate(plain):
+        if fenced[i] or not _VIDEO_CAPTION_RE.match(line):
+            continue
+        j = i - 1
+        while j >= 0 and not fenced[j] and not _FIGURE_OPEN_RE.match(plain[j]) and not _FIGURE_CLOSE_RE.match(plain[j]) and not _HEADING_RE.match(plain[j]):
+            j -= 1
+        if j < 0 or fenced[j] or not _FIGURE_OPEN_RE.match(plain[j]) or _WALKTHROUGH_OPEN_RE.match(plain[j]):
+            continue
+        end = _figure_close(plain, fenced, j)
+        if end is not None and end > i:
+            return FigureSpan(j, end)
+    return None
+
+
+def walkthrough_figure_anchor(plain: list[str]) -> int | None:
+    """The line a video figure goes BEFORE so that it sits above the interactive walkthrough (the course standard's
+    order; the Vimeo round asks): the walkthrough figure's first line - or, when one of our player blocks wraps it,
+    that block's opening marker, so the video figure never lands inside the block the next export rewrites. None for
+    a guide without a walkthrough figure."""
+    figure = find_walkthrough_figure(plain)
+    if figure is None:
+        return None
+    for block in marker_blocks(plain):
+        if block.sid is None and block.start < figure.start <= block.end:
+            return block.start
+    return figure.start
+
+
+def player_caption_first(name: str, caption: str) -> str:
+    """The figure caption's first sentence as the dialog edits it: the one typed, on one line, else ``Walkthrough: <name>``."""
+    return one_line(caption or "") or f"Walkthrough: {one_line(name) or 'Walkthrough'}"
+
+
+def player_caption_text(name: str, caption: str) -> str:
+    """The figure's whole caption: the first sentence (its full stop added when it ends no sentence) and the fixed second."""
+    first = player_caption_first(name, caption)
+    if not first.endswith(_SENTENCE_END):
+        first += "."
+    return f"{first} {PLAYER_CAPTION_TAIL}"
+
+
+def existing_player_caption(lines: list[str]) -> str | None:
+    """The first sentence of the caption a player block of ours already holds - what a re-export keeps when the dialog
+    types none, and what the dialog then shows - its added full stop taken off, its HTML unescaped; None for a block
+    without the figure (an export before this release: the one-line pointer)."""
+    for line in lines:
+        match = _PLAIN_CAPTION_RE.match(line)
+        if not match:
+            continue
+        text = html.unescape(match.group(1)).strip()
+        if text.endswith(PLAYER_CAPTION_TAIL):
+            text = text[:-len(PLAYER_CAPTION_TAIL)].rstrip()
+        return text[:-1] if text.endswith(".") else text
+    return None
+
+
+def player_figure_lines(name: str, caption: str) -> list[str]:
+    """The walkthrough figure, line by line (the contract with the content manager, B3): the frame on
+    ``walkthrough/index.html`` titled after the walkthrough, the caption under it, blank lines around each element so
+    Markdown leaves them alone; every text HTML-escaped. Pure."""
+    title = _escape(f"Interactive walkthrough: {one_line(name) or 'Walkthrough'}")
+    return [f'<figure class="{PLAYER_FIGURE_CLASS}">', "",
+            f'<iframe src="{PLAYER_FOLDER}/index.html" title="{title}" loading="lazy"></iframe>', "",
+            f"<figcaption>{html.escape(player_caption_text(name, caption), quote=False)}</figcaption>", "", "</figure>"]
+
+
+def player_block_lines(wid: str, name: str, caption: str) -> list[str]:
+    """The guide's block for the interactive player written beside it (C7, B3): the walkthrough figure between the
+    ``player`` marker pair - in place of the one-line pointer an export before this release wrote."""
+    return [marker_open(wid, "player"), ""] + player_figure_lines(name, caption) + ["", MARKER_CLOSE]
 
 
 def lead_of(text: str) -> str:
@@ -489,6 +683,13 @@ class GuidePlan:
     #: The player's files by name (the FIRST guide's only): the page and ``walkthrough.json`` as bytes, each step's picture as its path.
     player_files: dict[str, bytes | Path] = field(default_factory=dict)
     stale_player: list[str] = field(default_factory=list)
+    #: B3, with the player: the figure caption's first sentence in force (typed, else the guide's own, else the default),
+    #: the figure's lines, and where the block goes - ``{how, line, heading}``: ``placeholder`` (the Interactive walkthrough
+    #: placeholder it replaces), ``video`` (below the video figure), ``heading`` (after the first section heading; "" and 0
+    #: for a guide without one), ``replaced`` or ``unchanged`` (a block of ours already there); ``line`` 1-based.
+    player_caption: str = ""
+    player_lines: list[str] = field(default_factory=list)
+    player_block: dict | None = None
 
     @property
     def slug(self) -> str:
@@ -579,6 +780,18 @@ class Plan:
         return self.first.stale_player
 
     @property
+    def player_caption(self) -> str:
+        return self.first.player_caption
+
+    @property
+    def player_lines(self) -> list[str]:
+        return self.first.player_lines
+
+    @property
+    def player_block(self) -> dict | None:
+        return self.first.player_block
+
+    @property
     def images(self) -> list[tuple[Path, str]]:
         return [image for g in self.guides for image in g.images]
 
@@ -633,14 +846,16 @@ def step_slug(step: dict) -> str | None:
     return str(source["slug"]) if walkthroughs.is_workshop_source(source) else None
 
 
-def compute(rec: dict, player: bool = False) -> Plan:
+def compute(rec: dict, player: bool = False, caption: str = "") -> Plan:
     """The export of ``rec`` into its workshops' CURRENT guides, computed and nothing written (C2): a
     :class:`GuidePlan` per workshop of the record (E4) - the steps grouped by their own ``source.slug``; with one
     workshop every step is its, as before; with several, a step that names no workshop, or one of a workshop the
     record was not imported from, is not placed and says why - where each step goes, what is skipped and why, the
-    new guides and their pictures. :class:`NotImported` for a walkthrough that names no workshop;
-    ``workshops.NoCoursesFolder``, ``LookupError`` and ``workshops.UnreadableCourse`` as the import answers them;
-    :class:`PlayerNotBuilt` when the player is asked for without its template."""
+    new guides and their pictures; with ``player``, the player's files and its figure in the first guide, ``caption``
+    the figure caption's first sentence typed ("" for the guide's own, else the default). :class:`NotImported` for a
+    walkthrough that names no workshop; ``workshops.NoCoursesFolder``, ``LookupError`` and
+    ``workshops.UnreadableCourse`` as the import answers them; :class:`PlayerNotBuilt` when the player is asked for
+    without its template."""
     source = rec.get("source") or {}
     if not walkthroughs.is_workshop_source(source):
         raise NotImported(NOT_IMPORTED_MESSAGE)
@@ -676,7 +891,7 @@ def compute(rec: dict, player: bool = False) -> Plan:
             plan.homeless_not_placed.append({**row, "reason": FOREIGN_WORKSHOP_REASON if slug else NO_WORKSHOP_REASON})
 
     for position, (workshop, _text) in enumerate(parts):
-        plan.guides.append(_plan_guide(plan, workshop, members[workshop["slug"]], captions, player and position == 0))
+        plan.guides.append(_plan_guide(plan, workshop, members[workshop["slug"]], captions, player and position == 0, caption))
 
     # The debris of an interrupted export in the folders this one writes (the player's only when it is asked for).
     for g in plan.guides:
@@ -688,11 +903,13 @@ def compute(rec: dict, player: bool = False) -> Plan:
     return plan
 
 
-def _plan_guide(plan: Plan, workshop: dict, members: list[tuple[int, dict]], captions: list[str], player: bool) -> GuidePlan:
+def _plan_guide(plan: Plan, workshop: dict, members: list[tuple[int, dict]], captions: list[str], player: bool, caption: str = "") -> GuidePlan:
     """One guide's plan (E4): the workshop's CURRENT guide re-parsed, ``members`` - ``(index in the walkthrough,
     step)`` for the steps that are this workshop's - placed by anchor, else by text (:func:`align`), each figure
     numbered as the step is in the whole walkthrough; the blocks of ours in this guide rewritten, removed or left;
-    the player's block (when ``player``: the FIRST guide only) at the end."""
+    the player's block (when ``player``: the FIRST guide only) - the walkthrough figure (B3) rewritten where a block
+    of ours stands, else in the Interactive walkthrough placeholder's place, else below the video figure, else after
+    the first section heading; ``caption`` its caption's first sentence typed ("" for the guide's own, else the default)."""
     rec, course, course_dir = plan.rec, plan.course, plan.course_dir
     wid = rec["id"]
     slug = workshop["slug"]
@@ -783,11 +1000,36 @@ def _plan_guide(plan: Plan, workshop: dict, members: list[tuple[int, dict]], cap
 
     if player:
         g.player_files = player_files(rec)
+        name = rec.get("name") or "Walkthrough"
+        # The caption's first sentence: the one typed, else the one the guide's block already holds, else the default.
+        existing = existing_player_caption(plain[player_block.start:player_block.end + 1]) if player_block else None
+        first = one_line(caption or "") or existing or ""
+        g.player_caption = player_caption_first(name, first)
+        g.player_lines = player_figure_lines(name, first)
+        block_lines = player_block_lines(wid, name, first)
         if player_block:
-            edits.append((player_block.start, player_block.end + 1, player_block_lines(wid)))
+            # In place, at the indentation the block already has - the figure where the pointer or the old figure stood.
+            new_lines = indented(block_lines, re.match(r"[ \t]*", plain[player_block.start]).group())
+            edits.append((player_block.start, player_block.end + 1, new_lines))
+            g.player_block = {"how": "unchanged" if plain[player_block.start:player_block.end + 1] == new_lines else "replaced",
+                              "line": player_block.start + 1, "heading": ""}
         else:
-            last = max((i for i, line in enumerate(plain) if line.strip()), default=-1)
-            edits.append((last + 1, last + 1, ([""] if last >= 0 else []) + player_block_lines(wid)))
+            placeholder = find_walkthrough_placeholder(plain)
+            video = find_video_figure(plain) if placeholder is None else None
+            if placeholder is not None:
+                edits.append((placeholder.start, placeholder.end + 1, indented(block_lines, re.match(r"[ \t]*", plain[placeholder.start]).group())))
+                g.player_block = {"how": "placeholder", "line": placeholder.start + 1, "heading": ""}
+            elif video is not None:
+                at = video.end + 1
+                after = [""] if at < len(plain) and plain[at].strip() else []
+                edits.append((at, at, [""] + block_lines + after))
+                g.player_block = {"how": "video", "line": video.start + 1, "heading": ""}
+            else:
+                at_heading = first_section_heading(plain)
+                at = at_heading + 1 if at_heading is not None else 0
+                after = [""] if at < len(plain) and plain[at].strip() else []
+                edits.append((at, at, ([""] + block_lines + after) if at_heading is not None else block_lines + [""]))
+                g.player_block = {"how": "heading", "line": at, "heading": plain[at_heading] if at_heading is not None else ""}
 
     new_lines = apply_edits(lines, edits, eol)
     g.new_text = "".join(line + ending for line, ending in new_lines)
@@ -942,6 +1184,7 @@ def plan_view(plan: Plan) -> dict:
         "debris": [{"path": debris_path(plan, folder, name), "reason": why} for folder, name, why in plan.debris],
         "files": files, "changed": any(f["action"] != "unchanged" for f in files),
         "figures": plan.figures, "player": plan.player,
+        "player_caption": plan.player_caption, "player_lines": plan.player_lines, "player_block": plan.player_block,
         "diff": plan.diff,
         "allowed": courses_export_allowed(),
     }
@@ -1108,18 +1351,19 @@ def _shas_for(plan: Plan, shas: dict[str | None, str]) -> dict[str, str]:
     return given
 
 
-def write(rec: dict, shas: dict[str | None, str], player: bool = False) -> dict:
+def write(rec: dict, shas: dict[str | None, str], player: bool = False, caption: str = "") -> dict:
     """Write the export into the course: refused with :class:`GuideChanged` (nothing written, the guide named) when
     ANY guide's sha256 is not the one in ``shas`` (``{slug: sha256}`` per guide; ``{None: sha256}`` is the body
     before W2e, for a record of one workshop); every folder proven (no link, no junction) and every target of every
     guide checked writable before the first byte (:func:`check_writable`); then the pictures, the player (when
-    asked, beside the FIRST guide), each ``guide.md`` in the course's order - its sha256 checked once more just
-    before it is replaced - and last the pictures of our old blocks no guide names any more. Every write through
-    :func:`write_file`, inside the course's folder, kept in ONE :class:`_Journal`: a failure on the way (an
-    ``OSError``, a link met, a guide changed under it) rolls back everything this export did, every guide and
-    picture written, and answers :class:`ExportWriteFailed` (or the refusal it met). Returns what was written."""
+    asked, beside the FIRST guide, its figure's caption ``caption`` as the plan took it), each ``guide.md`` in the
+    course's order - its sha256 checked once more just before it is replaced - and last the pictures of our old
+    blocks no guide names any more. Every write through :func:`write_file`, inside the course's folder, kept in ONE
+    :class:`_Journal`: a failure on the way (an ``OSError``, a link met, a guide changed under it) rolls back
+    everything this export did, every guide and picture written, and answers :class:`ExportWriteFailed` (or the
+    refusal it met). Returns what was written."""
     with _write_lock:
-        plan = compute(rec, player=player)
+        plan = compute(rec, player=player, caption=caption)
         given = _shas_for(plan, shas)
         course_id = plan.course["id"]
         # Every folder proven first - a link or a junction anywhere refuses the export before a byte is written.

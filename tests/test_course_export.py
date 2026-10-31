@@ -97,14 +97,18 @@ def _setup(rig, monkeypatch, guide: str = GUIDE, *, crlf: bool = True, picture=(
     return {"rec": rec, "folder": folder, "guide": folder / "01-first" / "guide.md", "images": folder / "_assets" / "images", "c": c}
 
 
-def _plan(c, wid, player=False):
-    r = c.post(f"/api/walkthroughs/{wid}/export/course/plan", json={"player": player})
+def _plan(c, wid, player=False, caption=None):
+    body = {"player": player} if caption is None else {"player": player, "caption": caption}
+    r = c.post(f"/api/walkthroughs/{wid}/export/course/plan", json=body)
     assert r.status_code == 200, r.text
     return r.json()
 
 
-def _write(c, wid, sha, player=False):
-    return c.post(f"/api/walkthroughs/{wid}/export/course", json={"guide_sha256": sha, "player": player})
+def _write(c, wid, sha, player=False, caption=None):
+    body = {"guide_sha256": sha, "player": player}
+    if caption is not None:
+        body["caption"] = caption
+    return c.post(f"/api/walkthroughs/{wid}/export/course", json=body)
 
 
 def _snapshot(folder: Path) -> dict:
@@ -121,6 +125,11 @@ def _without_blocks(text: str) -> str:
     marker through the closing marker."""
     return re.sub(r"(\r?\n)\r?\n<!-- media-studio: walkthrough [0-9a-f]{12} (?:step [0-9a-f]{12}|player) -->\r?\n.*?<!-- /media-studio -->", "",
                   text, flags=re.S)
+
+
+def _without_step_blocks(text: str) -> str:
+    """The guide with the STEP blocks taken out and the player's block left (B3 reads where that one went)."""
+    return re.sub(r"(\r?\n)\r?\n<!-- media-studio: walkthrough [0-9a-f]{12} step [0-9a-f]{12} -->\r?\n.*?<!-- /media-studio -->", "", text, flags=re.S)
 
 
 # -- C1: the spans and the anchors ----------------------------------------------------------------------------
@@ -551,7 +560,10 @@ def test_the_limits_rows_name_the_export_constants():
         assert what in rows, f"no '{what}' row in docs/reference/limits.md"
         for number, name in pairs:
             assert number in rows[what] and f"`{name}`" in rows[what], (what, number, name)
-    assert "behind Export to course's, `MAX_ANCHOR_KEY_CHARS`, `MAX_ANCHOR_ORDINAL` and `MAX_FIGURE_WIDTH`" in text
+    assert "behind Export to course's, `MAX_ANCHOR_KEY_CHARS`, `MAX_ANCHOR_ORDINAL`, `MAX_FIGURE_WIDTH` and `MAX_CAPTION_CHARS`" in text
+    # B3: the embedded player's row names the caption's cap and the fixed second sentence.
+    assert "Export to course player" in rows and f"{course_export.MAX_CAPTION_CHARS} characters" in rows["Export to course player"]
+    assert "`MAX_CAPTION_CHARS`" in rows["Export to course player"] and "`PLAYER_CAPTION_TAIL`" in rows["Export to course player"]
 
 
 def test_nothing_is_written_through_a_junction_or_outside_the_course(rig, monkeypatch, tmp_path):
@@ -987,7 +999,9 @@ def test_the_player_written_beside_the_guide_with_its_link(rig, monkeypatch):
     pictured = [st["id"] for st in rec["steps"] if st["image"]]
     assert sorted(p.name for p in folder.iterdir()) == sorted(["index.html", "walkthrough.json"] + [f"step-{sid}.png" for sid in pictured])
     text = s["guide"].read_bytes().decode("utf-8")
-    assert text.rstrip().endswith("<!-- /media-studio -->") and "[walkthrough/index.html](walkthrough/index.html)" in text
+    # B3: the guide has no placeholder and no video figure, so the figure follows the first section heading.
+    assert plan["player_block"] == {"how": "heading", "line": 5, "heading": "## 1. Open it"}
+    assert '<figure class="pcm-walkthrough">' in text and '<iframe src="walkthrough/index.html"' in text
     assert text.count(f"<!-- media-studio: walkthrough {rec['id']} player -->") == 1
     assert auth_store.list_audit(action="walkthrough.export_course")[0]["detail"] == "demo/01-first: 3 figures, 3 images, player"
     # Again: nothing changes; the files list says so.
@@ -1006,6 +1020,229 @@ def test_the_player_written_beside_the_guide_with_its_link(rig, monkeypatch):
     # Without the player, an export leaves the player's link and folder as they are.
     fourth = _plan(c, rec["id"])
     assert fourth["changed"] is False and (folder / "index.html").is_file()
+
+
+# -- B3 (the embedded player): the figure the player is embedded by -------------------------------------------
+
+#: The course standard's two placeholders, in the template's form (blank lines around each element), and a video
+#: figure of the Vimeo round's.
+VIDEO_PLACEHOLDER = '<figure>\n\n<figcaption class="pcm-video-caption">Walkthrough: coming soon</figcaption>\n\n</figure>\n'
+INTERACTIVE_PLACEHOLDER = '<figure class="pcm-walkthrough">\n\n<figcaption>Interactive walkthrough: coming soon</figcaption>\n\n</figure>\n'
+VIDEO_FIGURE = ('<figure>\n\n![Walkthrough](https://vimeo.com/123456789/abcdef12)\n\n'
+                '<figcaption class="pcm-video-caption">Watch: the tour</figcaption>\n\n</figure>\n')
+TAIL = "Click where the beacon pulses; right-click or double-click when the tooltip says so."
+
+
+def _with_media(*blocks: str) -> str:
+    """GUIDE with ``blocks`` after its banner, a blank line between and after, as the template places them."""
+    return GUIDE.replace("> **Warning:** Intro.\n\n", "> **Warning:** Intro.\n\n" + "\n".join(blocks) + "\n", 1)
+
+
+def _figure(name: str, first: str | None = None) -> list[str]:
+    """The walkthrough figure, line by line (the contract with the content manager)."""
+    first = first or f"Walkthrough: {name}."
+    return ['<figure class="pcm-walkthrough">', "",
+            f'<iframe src="walkthrough/index.html" title="Interactive walkthrough: {name}" loading="lazy"></iframe>', "",
+            f"<figcaption>{first} {TAIL}</figcaption>", "", "</figure>"]
+
+
+def _block(wid: str, name: str, first: str | None = None) -> str:
+    """The figure between its marker pair, as the guide holds it (no final newline)."""
+    return "\n".join([f"<!-- media-studio: walkthrough {wid} player -->", ""] + _figure(name, first) + ["", "<!-- /media-studio -->"])
+
+
+def _eol(text: str, crlf: bool) -> bytes:
+    return (_crlf(text) if crlf else text).encode("utf-8")
+
+
+@pytest.mark.parametrize("crlf", [True, False])
+def test_the_player_figure_replaces_the_interactive_placeholder_and_leaves_the_video_placeholder(rig, monkeypatch, crlf):
+    _needs_player()
+    s = _setup(rig, monkeypatch, _with_media(VIDEO_PLACEHOLDER, INTERACTIVE_PLACEHOLDER), crlf=crlf)
+    c, rec = s["c"], s["rec"]
+    wid, name = rec["id"], rec["name"]
+    config._config["courses_export"] = True
+    plan = _plan(c, wid, player=True)
+    assert plan["player_block"] == {"how": "placeholder", "line": 11, "heading": ""}
+    assert plan["player_caption"] == f"Walkthrough: {name}"
+    assert plan["player_lines"] == _figure(name)
+    # The diff: the placeholder's caption goes, the frame comes (the figure's opening line stands in both, so it is context).
+    assert '+<iframe src="walkthrough/index.html"' in plan["diff"] and "-<figcaption>Interactive walkthrough: coming soon</figcaption>" in plan["diff"]
+    assert _write(c, wid, plan["guide_sha256"], player=True).status_code == 200
+    raw = s["guide"].read_bytes()
+    assert _without_step_blocks(raw.decode("utf-8")).encode("utf-8") == _eol(_with_media(VIDEO_PLACEHOLDER, _block(wid, name) + "\n"), crlf)
+    assert (raw.count(b"\r\n") == raw.count(b"\n")) is crlf
+    # Idempotent: the same export again changes nothing, and the plan says the figure is unchanged where it is.
+    again = _plan(c, wid, player=True)
+    assert again["changed"] is False and again["player_block"] == {"how": "unchanged", "line": 11, "heading": ""}
+    # The plan without a caption reads the one in the guide; a caption sent is the one written.
+    assert again["player_caption"] == f"Walkthrough: {name}"
+
+
+@pytest.mark.parametrize("crlf", [True, False])
+@pytest.mark.parametrize("video", [VIDEO_PLACEHOLDER, VIDEO_FIGURE])
+def test_the_player_figure_goes_below_the_video_figure_when_the_guide_has_no_interactive_placeholder(rig, monkeypatch, crlf, video):
+    _needs_player()
+    s = _setup(rig, monkeypatch, _with_media(video), crlf=crlf)
+    c, rec = s["c"], s["rec"]
+    wid, name = rec["id"], rec["name"]
+    config._config["courses_export"] = True
+    plan = _plan(c, wid, player=True)
+    assert plan["player_block"] == {"how": "video", "line": 5, "heading": ""}
+    assert _write(c, wid, plan["guide_sha256"], player=True).status_code == 200
+    text = _without_step_blocks(s["guide"].read_bytes().decode("utf-8"))
+    assert text.encode("utf-8") == _eol(_with_media(video + "\n" + _block(wid, name) + "\n"), crlf)
+    assert _plan(c, wid, player=True)["changed"] is False
+
+
+@pytest.mark.parametrize("crlf", [True, False])
+def test_the_player_figure_follows_the_first_section_heading_when_the_guide_has_neither(rig, monkeypatch, crlf):
+    _needs_player()
+    s = _setup(rig, monkeypatch, crlf=crlf)
+    c, rec = s["c"], s["rec"]
+    wid, name = rec["id"], rec["name"]
+    config._config["courses_export"] = True
+    plan = _plan(c, wid, player=True)
+    assert plan["player_block"] == {"how": "heading", "line": 5, "heading": "## 1. Open it"}
+    assert _write(c, wid, plan["guide_sha256"], player=True).status_code == 200
+    text = _without_step_blocks(s["guide"].read_bytes().decode("utf-8"))
+    assert text.encode("utf-8") == _eol(GUIDE.replace("## 1. Open it\n\n", "## 1. Open it\n\n" + _block(wid, name) + "\n\n", 1), crlf)
+    assert _plan(c, wid, player=True)["changed"] is False
+
+
+def test_an_older_exports_pointer_line_is_replaced_by_the_figure_where_it_stands(rig, monkeypatch):
+    """A guide exported before this release holds the one-line pointer between the player markers at the very end: a
+    re-export rewrites that block in place - the figure where the pointer was - and the next one changes nothing."""
+    _needs_player()
+    s = _setup(rig, monkeypatch, guide=GUIDE)
+    c, rec = s["c"], s["rec"]
+    wid, name = rec["id"], rec["name"]
+    pointer = (f"<!-- media-studio: walkthrough {wid} player -->\n\n**Interactive walkthrough:** open "
+               "[walkthrough/index.html](walkthrough/index.html), in this workshop's folder, in a web browser. It runs offline.\n\n"
+               "<!-- /media-studio -->\n")
+    s["guide"].write_bytes(_crlf(GUIDE + "\n" + pointer).encode("utf-8"))
+    config._config["courses_export"] = True
+    plan = _plan(c, wid, player=True)
+    assert plan["player_block"] == {"how": "replaced", "line": GUIDE.count("\n") + 2, "heading": ""}
+    assert "-**Interactive walkthrough:** open [walkthrough/index.html]" in plan["diff"]
+    assert _write(c, wid, plan["guide_sha256"], player=True).status_code == 200
+    text = _without_step_blocks(s["guide"].read_bytes().decode("utf-8"))
+    assert text.encode("utf-8") == _crlf(GUIDE + "\n" + _block(wid, name) + "\n").encode("utf-8")
+    assert "[walkthrough/index.html](walkthrough/index.html)" not in text
+    assert _plan(c, wid, player=True)["changed"] is False
+
+
+def test_the_figures_caption_defaults_to_the_name_is_edited_in_the_dialog_and_the_guides_own_wins_a_re_export(rig, monkeypatch):
+    _needs_player()
+    s = _setup(rig, monkeypatch, _with_media(INTERACTIVE_PLACEHOLDER))
+    c, rec = s["c"], s["rec"]
+    wid = rec["id"]
+    config._config["courses_export"] = True
+    # A caption typed: the first sentence, its full stop added; the plan echoes it as typed.
+    plan = _plan(c, wid, player=True, caption="  Walkthrough:   the first win ")
+    assert plan["player_caption"] == "Walkthrough: the first win"
+    assert plan["player_lines"][4] == f"<figcaption>Walkthrough: the first win. {TAIL}</figcaption>"
+    assert _write(c, wid, plan["guide_sha256"], player=True, caption="Walkthrough: the first win").status_code == 200
+    text = s["guide"].read_bytes().decode("utf-8")
+    assert f"<figcaption>Walkthrough: the first win. {TAIL}</figcaption>" in text
+    # A re-export without a caption keeps the guide's own; the plan shows it for the dialog to edit.
+    again = _plan(c, wid, player=True)
+    assert again["player_caption"] == "Walkthrough: the first win" and again["changed"] is False
+    # One that ends its own sentence keeps that; an empty one is the default again.
+    bang = _plan(c, wid, player=True, caption="Watch the clicks!")
+    assert bang["player_lines"][4] == f"<figcaption>Watch the clicks! {TAIL}</figcaption>" and bang["changed"] is True
+    assert _plan(c, wid, player=True, caption="")["player_caption"] == "Walkthrough: the first win", "an empty caption is no caption: the guide's own stands"
+    # HTML in the name or the caption is escaped in the title and the caption; a 200-character cap on the caption.
+    rec = c.put(f"/api/walkthroughs/{wid}", json={"version": 1, "name": "A <b>bold</b> & brave", "revision": rec["revision"], "steps": rec["steps"]}).json()
+    nasty = _plan(c, wid, player=True, caption="Tags <i>here</i> & there")
+    assert nasty["player_lines"][2] == '<iframe src="walkthrough/index.html" title="Interactive walkthrough: A &lt;b&gt;bold&lt;/b&gt; &amp; brave" loading="lazy"></iframe>'
+    assert nasty["player_lines"][4] == f"<figcaption>Tags &lt;i&gt;here&lt;/i&gt; &amp; there. {TAIL}</figcaption>"
+    assert c.post(f"/api/walkthroughs/{wid}/export/course/plan", json={"player": True, "caption": "x" * 201}).status_code == 422
+    assert c.post(f"/api/walkthroughs/{wid}/export/course", json={"guide_sha256": "0" * 64, "player": True, "caption": "x" * 201}).status_code == 422
+    # The zip with the player carries the caption too; a caption without the player is ignored.
+    r = c.get(f"/api/walkthroughs/{wid}/export/course.zip?player=1&caption=Zipped")
+    assert r.status_code == 200
+    guide = zipfile.ZipFile(io.BytesIO(r.content)).read("01-first/guide.md").decode("utf-8")
+    assert f"<figcaption>Zipped. {TAIL}</figcaption>" in guide
+    assert c.get(f"/api/walkthroughs/{wid}/export/course.zip?caption=" + "x" * 201).status_code == 422
+    plain = _plan(c, wid, player=False, caption="Ignored")
+    assert plain["player_caption"] == "" and plain["player_lines"] == [] and plain["player_block"] is None
+
+
+def test_the_pure_figure_rules_find_the_placeholders_and_the_figures_outside_fences():
+    wid, name = "a" * 12, "Tour"
+    plain = _with_media(VIDEO_PLACEHOLDER, INTERACTIVE_PLACEHOLDER).split("\n")
+    assert course_export.fenced_lines(["a", "```", "b", "```", "c"]) == [False, True, True, True, False]
+    video = course_export.find_video_figure(plain)
+    assert video is not None and plain[video.start] == "<figure>" and plain[video.end] == "</figure>" and (video.start, video.end) == (4, 8)
+    walk = course_export.find_walkthrough_figure(plain)
+    assert walk is not None and (walk.start, walk.end) == (10, 14)
+    assert course_export.find_walkthrough_placeholder(plain) == walk
+    assert course_export.walkthrough_figure_anchor(plain) == 10
+    # The filled figure is a walkthrough figure, not a placeholder; the video figure of the Vimeo round is found.
+    filled = _with_media(VIDEO_FIGURE, "\n".join(_figure(name)) + "\n").split("\n")
+    assert course_export.find_walkthrough_placeholder(filled) is None
+    assert course_export.find_walkthrough_figure(filled) is not None and filled[course_export.find_walkthrough_figure(filled).start].startswith("<figure class")
+    assert course_export.find_video_figure(filled) is not None and filled[course_export.find_video_figure(filled).end] == "</figure>"
+    # Wrapped in our markers, the anchor is the opening marker - a video figure never goes inside the block.
+    wrapped = GUIDE.replace("## 1. Open it\n\n", "## 1. Open it\n\n" + _block(wid, name) + "\n\n", 1).split("\n")
+    assert wrapped[6].startswith("<!-- media-studio: walkthrough") and course_export.walkthrough_figure_anchor(wrapped) == 6
+    # Inside a fence nothing counts; a figure without its closing tag is none; a guide without any is None.
+    fenced = ["```html", *INTERACTIVE_PLACEHOLDER.split("\n"), "```"]
+    assert course_export.find_walkthrough_figure(fenced) is None and course_export.find_video_figure(["```", *VIDEO_PLACEHOLDER.split("\n"), "```"]) is None
+    assert course_export.find_walkthrough_figure(['<figure class="pcm-walkthrough">', "", "<figcaption>x</figcaption>", "", "## Next"]) is None
+    assert course_export.walkthrough_figure_anchor(GUIDE.split("\n")) is None and course_export.find_video_figure(GUIDE.split("\n")) is None
+    # The first section heading, else the title, is the export's and the Vimeo round's one rule.
+    assert course_export.first_section_heading(GUIDE.split("\n")) == 4
+    assert course_export.first_section_heading(["# Title", "", "text"]) == 0 and course_export.first_section_heading(["text"]) is None
+    # The figure's text: the default caption, a typed one with its full stop, one ending its own sentence, the escaping.
+    assert course_export.player_caption_text("Tour", "") == f"Walkthrough: Tour. {TAIL}"
+    assert course_export.player_caption_text("Tour", " the  first win ") == f"the first win. {TAIL}"
+    assert course_export.player_caption_text("Tour", "Go!") == f"Go! {TAIL}"
+    assert course_export.player_caption_text("Tour", "Why?") == f"Why? {TAIL}"
+    assert course_export.player_caption_text("Tour", "Walkthrough: v1.2.") == f"Walkthrough: v1.2. {TAIL}"
+    assert course_export.existing_player_caption(_block(wid, name, "Walkthrough: the first win.").split("\n")) == "Walkthrough: the first win"
+    assert course_export.existing_player_caption(_block(wid, name, "Go!").split("\n")) == "Go!"
+    assert course_export.existing_player_caption(_block(wid, name, "Tags &lt;i&gt; &amp; there.").split("\n")) == "Tags <i> & there"
+    assert course_export.existing_player_caption(["<!-- media-studio: walkthrough aaaaaaaaaaaa player -->", "", "**Interactive walkthrough:** open x", "", "<!-- /media-studio -->"]) is None
+    assert course_export.player_figure_lines("Tour", "") == _figure(name)
+
+
+def test_the_vimeo_rounds_video_figure_goes_above_the_walkthrough_figure_never_inside_or_below_it():
+    """V3 learns ``figure.pcm-walkthrough``: with no video placeholder and no video figure of ours, the insertion goes
+    ABOVE the walkthrough figure - above our opening marker when the markers wrap it, above the placeholder figure
+    when the guide has only that - and it never takes the walkthrough figure for the video one."""
+    from services import course_video
+
+    wid, name, link = "a" * 12, "Tour", "https://vimeo.com/123456789/abcdef12"
+    video = "\n".join(course_video.figure_block(link, "the tour"))
+    guide = GUIDE.replace("## 1. Open it\n\n", "## 1. Open it\n\n" + _block(wid, name) + "\n\n", 1)
+    plain = guide.split("\n")
+    assert course_video.find_placeholder(plain) is None and course_video.find_figure(plain) is None
+    for crlf in (False, True):
+        text = _crlf(guide) if crlf else guide
+        edit = course_video.plan_guide(text, link, "the tour", insert=True)
+        assert (edit.how, edit.above_walkthrough, edit.line, edit.heading) == ("insert", True, 7, "")
+        expected = GUIDE.replace("## 1. Open it\n\n", "## 1. Open it\n\n" + video + "\n\n" + _block(wid, name) + "\n\n", 1)
+        assert edit.new_text == (_crlf(expected) if crlf else expected)
+        # The export's block is untouched: the video figure stands before its opening marker.
+        assert edit.new_text.index(_crlf(video) if crlf else video) < edit.new_text.index(f"<!-- media-studio: walkthrough {wid} player -->")
+    # Not asked to insert: the plan says so, and where it would go.
+    none = course_video.plan_guide(guide, link, "the tour", insert=False)
+    assert (none.how, none.above_walkthrough, none.line, none.changed) == ("none", True, 7, False)
+    # The interactive placeholder alone (no video placeholder): above it.
+    only = _with_media(INTERACTIVE_PLACEHOLDER)
+    edit = course_video.plan_guide(only, link, "the tour", insert=True)
+    assert (edit.how, edit.above_walkthrough, edit.line) == ("insert", True, 5)
+    assert edit.new_text == _with_media(video + "\n", INTERACTIVE_PLACEHOLDER)
+    # Both placeholders: the video one is taken, as before; the interactive one is not mistaken for it.
+    both = _with_media(VIDEO_PLACEHOLDER, INTERACTIVE_PLACEHOLDER)
+    edit = course_video.plan_guide(both, link, "the tour", insert=False)
+    assert (edit.how, edit.above_walkthrough) == ("placeholder", False)
+    assert edit.new_text == _with_media(video + "\n", INTERACTIVE_PLACEHOLDER)
+    # A guide with neither figure: the heading rule as before, and no walkthrough flag.
+    bare = course_video.plan_guide(GUIDE, link, "the tour", insert=True)
+    assert (bare.how, bare.above_walkthrough, bare.heading, bare.line) == ("insert", False, "## 1. Open it", 5)
 
 
 def test_the_real_first_win_exports_and_still_parses_the_same(lab, rig, monkeypatch):

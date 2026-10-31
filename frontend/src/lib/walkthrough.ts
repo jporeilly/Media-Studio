@@ -87,6 +87,32 @@ export function clickLead(click: ClickKind | undefined): string {
   return click === "right" ? "Right-click" : click === "double" ? "Double-click" : "";
 }
 
+/** The mouse events the player's hotspot takes (B1, the embedded player): a click, the context menu (a right-click), a double-click. */
+export type HotspotEvent = "click" | "contextmenu" | "dblclick";
+
+/**
+ * Whether the hotspot goes on at this event for the step's click kind (B1): a left step on a click, a right step on
+ * the context menu only, a double step on the double-click only, a step of no click kind (Shift+F8) on any click -
+ * a click or the context menu; never the dblclick that follows its two clicks, which already went on twice. A step
+ * from before the field (no kind) is a left step. Next, ArrowRight and Enter are not here: they always go on.
+ */
+export function hotspotAdvances(click: ClickKind | undefined, event: HotspotEvent): boolean {
+  switch (click ?? "left") {
+    case "right": return event === "contextmenu";
+    case "double": return event === "dblclick";
+    case "none": return event !== "dblclick";
+    default: return event === "click";
+  }
+}
+
+/** What a wrong click on the hotspot says for the step's click kind (B1): the real click to make; nothing for a left click or none. */
+export function clickNudge(click: ClickKind | undefined): string {
+  return click === "right" ? "Right-click here" : click === "double" ? "Double-click here" : "";
+}
+
+/** How long the nudge stays, in milliseconds. */
+export const NUDGE_MS = 1500;
+
 export interface Hotspot { x: number; y: number; width: number; height: number }
 /** Where a step's picture came from (informational): a still, or a course workshop's guide (W2). */
 export interface CaptureSource { capture_id: string; annotated: boolean }

@@ -9,23 +9,31 @@
  * BUTTON labelled with the step's text (no pulse under prefers-reduced-motion); the tooltip sits beside it on
  * the placement asked, `auto` choosing the side with room (`tooltipPlacement`, pure, tested), never off
  * screen; a modal step - or a tooltip step without a hotspot - is a centred card over the dimmed picture (a
- * hotspot the step also has is drawn over the dim and still advances). Clicking the hotspot, Next, ArrowRight,
- * Space or Enter goes on; Back or ArrowLeft goes back; a click on the picture outside the hotspot makes it
- * pulse once more (a hint) and does not advance; Home / End go first / last. Escape closes what is open first
- * - the transcript drawer, then the Chapters menu - and leaves otherwise. The last step's Next reads Finish and
- * shows an end card with Restart and Close.
+ * hotspot the step also has is drawn over the dim and still advances). The hotspot goes on at the click the step
+ * names (B1, `hotspotAdvances`): a left step on a click, a right step on the context menu only (the browser's menu
+ * suppressed), a double step on a double-click only, a step of no click kind (Shift+F8) on any click; a wrong click
+ * pulses the hotspot once more and shows a nudge over it - "Right-click here", "Double-click here" - for 1.5 s
+ * (`clickNudge`, `NUDGE_MS`). Next, ArrowRight, Space and Enter always go on - Enter and Space on the focused hotspot
+ * are the player's own step, the button's click prevented, so a keyboard user never meets the nudge. Back or
+ * ArrowLeft goes back; a click on the picture outside the hotspot makes it pulse once more (a hint) and does not
+ * advance; Home / End go first / last. Escape closes what is open first - the transcript drawer, then the Chapters
+ * menu - and leaves otherwise. The last step's Next reads Finish and shows an end card with Restart and Close.
+ *
+ * EMBEDDED (B2, `embedded`): framed in a content manager's lesson (the exported page tells by `bundleEmbedded`),
+ * the player has nowhere to leave to: no Close button, a compact header, Escape does nothing when nothing is open,
+ * the end card offers Start again alone, and the empty card has no Close. The standalone page is unchanged.
  *
  * The TRANSCRIPT (the owner's addendum): a header button, or T, opens a drawer over the stage with the
  * walkthrough as Markdown (`transcript`, from the document the player already holds - no request), with Copy
  * and Save as… (`<name>.md`). It is the narration script of the narrated video to come.
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronLeft, ChevronRight, Copy, Download, FileText, List, RotateCcw, X } from "lucide-react";
 import type { Size } from "../../lib/annotate";
 import { copyText, downloadText } from "../../lib/files";
 import {
-  type Step, END_TITLE, NO_PICTURE_CARD, backIndex, chapterAt, chapters, clampIndex, clickLead, displayedRect, endIndex, fitRect, hasPicture, homeIndex,
-  nextIndex, shownAsModal, stepLabel, tooltipPlacement, transcript, transcriptFileName, typingIn,
+  type HotspotEvent, type Step, END_TITLE, NO_PICTURE_CARD, NUDGE_MS, backIndex, chapterAt, chapters, clampIndex, clickLead, clickNudge, displayedRect, endIndex,
+  fitRect, hasPicture, homeIndex, hotspotAdvances, nextIndex, shownAsModal, stepLabel, tooltipPlacement, transcript, transcriptFileName, typingIn,
 } from "../../lib/walkthrough";
 
 export interface PlayerProps {
@@ -34,10 +42,12 @@ export interface PlayerProps {
   imageUrl: (step: Step) => string;
   /** The step to start at (0-based; clamped). */
   initialStep?: number;
-  /** Escape (with nothing open), Close and the end card's Close. */
+  /** Escape (with nothing open), Close and the end card's Close. Never called when `embedded`. */
   onExit: () => void;
   /** Overrides the `prefers-reduced-motion` media query (the pulse is left out when true). */
   reducedMotion?: boolean;
+  /** B2: framed in a lesson - no Close, a compact header, Escape leaves nothing, the end card's Start again. */
+  embedded?: boolean;
 }
 
 function prefersReducedMotion(): boolean {
@@ -69,12 +79,15 @@ function useElementSize(ref: React.RefObject<HTMLElement | null>): Size {
   return size;
 }
 
-export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reducedMotion }: PlayerProps) {
+export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reducedMotion, embedded = false }: PlayerProps) {
   const steps = walkthrough.steps;
   const count = steps.length;
   const [index, setIndex] = useState(() => clampIndex(initialStep, count));
   const [ended, setEnded] = useState(false);
   const [hint, setHint] = useState(0);
+  // B1: the nudge a wrong click on the hotspot gets, for NUDGE_MS; gone with the step.
+  const [nudge, setNudge] = useState<string | null>(null);
+  const nudgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [chaptersOpen, setChaptersOpen] = useState(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
@@ -106,22 +119,36 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
     setTipSize((s) => (s.width === width && s.height === height ? s : { width, height }));
   }, [current, text, modal, ended, stage.width, stage.height]);
 
+  const clearNudge = useCallback(() => {
+    if (nudgeTimer.current) clearTimeout(nudgeTimer.current);
+    nudgeTimer.current = null;
+    setNudge(null);
+  }, []);
+  useEffect(() => () => { if (nudgeTimer.current) clearTimeout(nudgeTimer.current); }, []);
   const go = useCallback((i: number) => {
     setIndex(clampIndex(i, count));
     setEnded(false);
     setChaptersOpen(false);
-  }, [count]);
+    clearNudge();
+  }, [count, clearNudge]);
   const next = useCallback(() => {
     if (ended || count === 0) return;
     const n = nextIndex(current, count);
-    if (n === null) setEnded(true);
+    if (n === null) { setEnded(true); clearNudge(); }
     else go(n);
-  }, [ended, count, current, go]);
+  }, [ended, count, current, go, clearNudge]);
   const back = useCallback(() => {
     if (ended) { setEnded(false); return; }
     go(backIndex(current));
   }, [ended, current, go]);
   const restart = useCallback(() => go(homeIndex()), [go]);
+  /** B1: a wrong click on the hotspot - the hotspot pulses once more (drawn afresh, as after a click outside it) and the nudge shows for NUDGE_MS. */
+  const showNudge = useCallback((text: string) => {
+    setNudge(text);
+    setHint((h) => h + 1);
+    if (nudgeTimer.current) clearTimeout(nudgeTimer.current);
+    nudgeTimer.current = setTimeout(() => { nudgeTimer.current = null; setNudge(null); }, NUDGE_MS);
+  }, []);
 
   /** The Chapters menu's items; ArrowUp / ArrowDown move the focus among them, wrapping round. */
   const moveInMenu = useCallback((delta: 1 | -1) => {
@@ -132,9 +159,10 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
     items[to].focus();
   }, []);
 
-  // The keys. Enter and Space on a focused button are the button's own click (the hotspot's, Next's, a chapter's),
-  // so they are left alone there - handling them here as well would go two steps on. Escape closes what is open
-  // first: the transcript, then the Chapters menu; with nothing open it leaves.
+  // The keys. Enter and Space on a focused button are the button's own click (Next's, a chapter's - and the hotspot's,
+  // which handles them itself: `onHotspotKey`), so they are left alone here - handling them as well would go two steps
+  // on. Escape closes what is open first: the transcript, then the Chapters menu; with nothing open it leaves - unless
+  // the player is embedded (B2), where there is nowhere to leave to.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (typingIn(e.target) || e.altKey || e.ctrlKey || e.metaKey) return;
@@ -154,13 +182,13 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
           e.preventDefault();
           if (transcriptOpen) setTranscriptOpen(false);
           else if (chaptersOpen) setChaptersOpen(false);
-          else onExit();
+          else if (!embedded) onExit();
           break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [next, back, go, count, onExit, chaptersOpen, transcriptOpen, moveInMenu]);
+  }, [next, back, go, count, onExit, embedded, chaptersOpen, transcriptOpen, moveInMenu]);
 
   // The focus follows the step: the hotspot (a visible ring) on a tooltip step, the card's own button on a
   // modal step and on the end card - the card is what is modal, whatever else is drawn over the dim.
@@ -188,6 +216,34 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
     // Outside the hotspot: a hint, never a step on.
     if (!ended && step) setHint((h) => h + 1);
   };
+  // B1: the hotspot's mouse events. The step goes on at the click its kind names; the context menu is suppressed
+  // only where it is that click (a left step's right-click stays the browser's, as before); a wrong click nudges.
+  const onHotspot = (event: HotspotEvent) => (e: ReactMouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    if (!step) return;
+    if (hotspotAdvances(step.click, event)) {
+      if (event === "contextmenu") e.preventDefault();
+      next();
+      return;
+    }
+    if (event === "click") {
+      const text = clickNudge(step.click);
+      if (text) showNudge(text);
+    }
+  };
+  // Enter and Space on the focused hotspot are the player's own step on - the button's click is prevented, so a
+  // right or double step never nudges a keyboard user; the window's handler leaves a button's keys alone.
+  const onHotspotKey = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      next();
+    }
+  };
+  // The nudge sits over the hotspot: above it when there is room, below it otherwise; it takes no pointer.
+  const nudgeStyle = (r: { x: number; y: number; width: number; height: number }): CSSProperties =>
+    r.y >= 40
+      ? { left: r.x + r.width / 2, top: r.y - 8, transform: "translate(-50%, -100%)" }
+      : { left: r.x + r.width / 2, top: r.y + r.height + 8, transform: "translate(-50%, 0)" };
   const copyTranscript = async () => {
     setCopied((await copyText(markdown)) ? "Copied to the clipboard." : "Could not copy: the page may not write to the clipboard.");
   };
@@ -198,9 +254,9 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
   const marker = step?.marker === "beacon" ? "beacon" : "box";
 
   return (
-    <div className="ms-player" data-walkthrough-player="" data-reduced-motion={reduced ? "true" : undefined}>
+    <div className={`ms-player${embedded ? " ms-player-embedded" : ""}`} data-walkthrough-player="" data-reduced-motion={reduced ? "true" : undefined} data-embedded={embedded ? "true" : undefined}>
       <header className="ms-player-head">
-        <strong className="os-truncate" style={{ maxWidth: 320 }} title={walkthrough.name}>{walkthrough.name}</strong>
+        <strong className="os-truncate" style={{ maxWidth: embedded ? 200 : 320 }} title={walkthrough.name}>{walkthrough.name}</strong>
         <span className="os-muted" data-player-progress="">{label}</span>
         <div className="os-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)} aria-label="Progress">
           <div className="os-progress-fill" style={{ width: `${progress}%`, background: "var(--brand)" }} />
@@ -228,7 +284,7 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
         </button>
         <button className="os-btn os-btn-secondary os-btn-sm" onClick={back} disabled={current === 0 && !ended} data-player-back=""><ChevronLeft size={14} /> Back</button>
         <button className="os-btn os-btn-primary os-btn-sm" onClick={next} disabled={ended || count === 0} data-player-next="">{nextLabel} <ChevronRight size={14} /></button>
-        <button className="os-icon-btn" onClick={onExit} title="Close (Esc)" aria-label="Close"><X size={18} /></button>
+        {!embedded && <button className="os-icon-btn" onClick={onExit} title="Close (Esc)" aria-label="Close"><X size={18} /></button>}
       </header>
       <div ref={stageRef} className="ms-stage" onClick={onStageClick} data-player-stage="">
         {step && fit && pictured && <img src={imageUrl(step)} alt="" draggable={false} style={rectStyle(fit)} />}
@@ -243,10 +299,16 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
             data-marker={marker}
             aria-label={`${lead ? `${lead}: ` : ""}${step!.text || "Next step"}`}
             style={rectStyle(spot)}
-            onClick={(e) => { e.stopPropagation(); next(); }}
+            onClick={onHotspot("click")}
+            onContextMenu={onHotspot("contextmenu")}
+            onDoubleClick={onHotspot("dblclick")}
+            onKeyDown={onHotspotKey}
           >
             {marker === "beacon" && <span className="ms-beacon" data-player-beacon="" aria-hidden="true" />}
           </button>
+        )}
+        {spot && !ended && nudge && (
+          <span className="ms-nudge" role="status" data-player-nudge="" style={nudgeStyle(spot)}>{nudge}</span>
         )}
         {step && !modal && !ended && tip && (
           <div ref={tipRef} className={`ms-tooltip ms-tooltip-${tip.side}`} role="dialog" aria-label={label} aria-live="polite" data-player-tooltip="" data-side={tip.side} style={{ left: tip.x, top: tip.y }} onClick={(e) => e.stopPropagation()}>
@@ -268,17 +330,19 @@ export function Player({ walkthrough, imageUrl, initialStep = 0, onExit, reduced
             <h3 style={{ margin: 0 }}>{END_TITLE}</h3>
             <p style={{ margin: 0 }} className="os-muted">{walkthrough.name}: {count} step{count === 1 ? "" : "s"}.</p>
             <div className="os-row" style={{ justifyContent: "flex-end" }}>
-              <button ref={primaryRef} className="os-btn os-btn-primary" onClick={restart}><RotateCcw size={14} /> Restart</button>
-              <button className="os-btn os-btn-secondary" onClick={onExit}>Close</button>
+              <button ref={primaryRef} className="os-btn os-btn-primary" onClick={restart}><RotateCcw size={14} /> {embedded ? "Start again" : "Restart"}</button>
+              {!embedded && <button className="os-btn os-btn-secondary" onClick={onExit}>Close</button>}
             </div>
           </div>
         )}
         {count === 0 && (
           <div className="ms-modal" role="dialog" aria-modal="true" aria-label="No steps" data-player-empty="" onClick={(e) => e.stopPropagation()}>
             <p style={{ margin: 0 }}>This walkthrough has no steps yet.</p>
-            <div className="os-row" style={{ justifyContent: "flex-end" }}>
-              <button ref={primaryRef} className="os-btn os-btn-secondary" onClick={onExit}>Close</button>
-            </div>
+            {!embedded && (
+              <div className="os-row" style={{ justifyContent: "flex-end" }}>
+                <button ref={primaryRef} className="os-btn os-btn-secondary" onClick={onExit}>Close</button>
+              </div>
+            )}
           </div>
         )}
         {transcriptOpen && (

@@ -784,6 +784,19 @@ p { margin: 0 0 8px; }
   0% { transform: scale(1); opacity: 0.9; }
   100% { transform: scale(3.2); opacity: 0; }
 }
+/* B1: the nudge a wrong click on the hotspot gets - "Right-click here" over the hotspot for 1.5 s; it takes no pointer, so
+   the second click of a double-click reaches the hotspot under it. */
+.ms-nudge { position: absolute; z-index: 4; padding: 4px 10px; border-radius: 999px; background: var(--brand); color: #fff; font-size: 12.5px; font-weight: 600; line-height: 1.3; white-space: nowrap; box-shadow: var(--shadow-lg); pointer-events: none; animation: ms-nudge-in 0.18s ease-out; }
+@keyframes ms-nudge-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ms-nudge { animation: none; }
+}
+/* B2: the embedded player (in a content manager's lesson, an iframe over the lab's folder): a compact header, no Close. */
+.ms-player-embedded .ms-player-head { padding: 4px 8px; gap: 8px; font-size: 13px; }
+.ms-player-embedded .ms-player-head .os-progress { min-width: 80px; }
 .ms-tooltip { position: absolute; max-width: min(320px, 80vw); background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 10px 14px; white-space: pre-wrap; font-size: 14px; line-height: 1.45; }
 /* F3: the real click to make, said first in the tooltip. */
 .ms-tooltip-click { display: block; color: var(--brand); font-size: 12px; letter-spacing: 0.02em; text-transform: uppercase; margin-bottom: 2px; }

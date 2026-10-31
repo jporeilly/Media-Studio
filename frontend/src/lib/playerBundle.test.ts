@@ -3,7 +3,7 @@
  * (lib/playerBundle.ts). The built page itself is opened offline from the disk by tests/test_course_export.py.
  */
 import { describe, expect, it } from "vitest";
-import { bundleImageUrl, bundleTheme, readBundle } from "./playerBundle";
+import { bundleEmbedded, bundleImageUrl, bundleTheme, readBundle } from "./playerBundle";
 
 describe("readBundle", () => {
   it("is null for an empty slot, the template's null, text that is not JSON, or no steps", () => {
@@ -39,6 +39,18 @@ describe("readBundle", () => {
   it("points a step's picture at its file beside the page", () => {
     expect(bundleImageUrl({ image: "step-aaaaaaaaaaaa.png" })).toBe("step-aaaaaaaaaaaa.png");
     expect(bundleImageUrl({ image: null })).toBe("");
+  });
+
+  it("B2: the page knows it is framed - a window above its own, a top it may not read, or ?embed=1 - and stands alone otherwise", () => {
+    const self = {}, top = {};
+    expect(bundleEmbedded({ self, top, location: { search: "" } })).toBe(true);
+    expect(bundleEmbedded({ self, top: self, location: { search: "" } })).toBe(false);
+    expect(bundleEmbedded({ self, top: self, location: { search: "?embed=1" } })).toBe(true);
+    expect(bundleEmbedded({ self, top: self, location: { search: "?step=2&embed=1" } })).toBe(true);
+    expect(bundleEmbedded({ self, top: self, location: { search: "?embed=0" } })).toBe(false);
+    expect(bundleEmbedded({ self, top: null, location: { search: "" } })).toBe(false);
+    expect(bundleEmbedded({ self, get top(): unknown { throw new Error("cross-origin"); }, location: { search: "" } })).toBe(true);
+    expect(bundleEmbedded({ self, top: self })).toBe(false);
   });
 
   it("takes the viewer's theme, dark when it cannot tell", () => {

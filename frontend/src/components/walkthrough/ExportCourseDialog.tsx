@@ -12,6 +12,11 @@
  * W2e: a walkthrough of several workshops shows the combined line ("5 figures into 2 guides; 1 step not placed; 2
  * skipped"), the steps of no guide, and a block per guide with its own line, lists and diff (folded); the write sends
  * every guide's sha256 from the preview (`writeBody`). With one guide the dialog reads as before.
+ *
+ * B3 (the embedded player): with **Also the interactive player** ticked the player goes beside the first guide and the
+ * guide gets the walkthrough FIGURE a Content Manager from 0.7.44 renders as the player inline; the dialog shows where
+ * the figure goes (`playerWhere`), the figure itself, and the first sentence of its caption to edit - leaving the field
+ * previews again with the caption, which then travels with the write and the zip (`planBody`, `writeBody`, `courseZipUrl`).
  */
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -20,8 +25,11 @@ import { api, errorMessage } from "../../api/client";
 import { Button, ErrorBox, Modal, Spinner } from "../ui";
 import {
   type ExportPlan, type ExportResult, type GuidePlan, courseZipUrl, exportPlanQueryKey, exportPlanUrl, exportWriteUrl, filesLine, placedWhere,
-  planLine, playerZipUrl, settingLine, stepsOfNoGuide, writeBody,
+  planBody, planLine, playerWhere, playerZipUrl, settingLine, stepsOfNoGuide, writeBody,
 } from "../../lib/courseExport";
+
+/** The caption's cap, the server's (`course_export.MAX_CAPTION_CHARS`). */
+const MAX_CAPTION_CHARS = 200;
 
 interface Props {
   open: boolean;
@@ -36,15 +44,18 @@ export function ExportCourseDialog(props: Props) {
 
 function ExportCourseBody({ wid, onClose }: Props) {
   const [player, setPlayer] = useState(false);
+  // B3: the caption's first sentence as typed (null until edited: the server's own - the guide's, else the name), and the field's draft.
+  const [caption, setCaption] = useState<string | null>(null);
+  const [draft, setDraft] = useState<string | null>(null);
   const [written, setWritten] = useState<ExportResult | null>(null);
   const plan = useQuery({
-    queryKey: exportPlanQueryKey(wid, player),
-    queryFn: () => api.post<ExportPlan>(exportPlanUrl(wid), { player }),
+    queryKey: exportPlanQueryKey(wid, player, caption),
+    queryFn: () => api.post<ExportPlan>(exportPlanUrl(wid), planBody(player, caption)),
     retry: false,
     gcTime: 0,
   });
   const write = useMutation({
-    mutationFn: (p: ExportPlan) => api.post<ExportResult>(exportWriteUrl(wid), writeBody(p, player)),
+    mutationFn: (p: ExportPlan) => api.post<ExportResult>(exportWriteUrl(wid), writeBody(p, player, caption)),
     onSuccess: (r) => {
       setWritten(r);
       void plan.refetch();
@@ -58,6 +69,16 @@ function ExportCourseBody({ wid, onClose }: Props) {
     write.reset();
     setWritten(null);
     void plan.refetch();
+  };
+  /** The caption field left (blur, Enter): a changed first sentence previews again with it. */
+  const commitCaption = () => {
+    if (draft === null) return;
+    const typed = draft.trim();
+    const current = caption ?? p?.player_caption ?? "";
+    if (typed === current) return;
+    setCaption(typed);
+    setWritten(null);
+    write.reset();
   };
 
   return (
@@ -73,7 +94,7 @@ function ExportCourseBody({ wid, onClose }: Props) {
             <FileDown size={16} /> Download player
           </a>
           {p && (
-            <a className={`os-btn ${p.allowed ? "os-btn-secondary" : "os-btn-primary"}`} href={courseZipUrl(wid, player)} download data-export-zip="">
+            <a className={`os-btn ${p.allowed ? "os-btn-secondary" : "os-btn-primary"}`} href={courseZipUrl(wid, player, caption)} download data-export-zip="">
               <Download size={16} /> Download zip
             </a>
           )}
@@ -92,12 +113,35 @@ function ExportCourseBody({ wid, onClose }: Props) {
       </p>
       <p className="os-muted os-small" style={{ marginTop: 0 }} data-export-caveat="">
         The pins show in a Content Manager from 0.7.42 (a Content Editor from 1.30.0); an older one shows the picture, the pin's text as a numbered
-        line and the caption. Export into a published course once its readers have that version.
+        line and the caption. The interactive player needs a Content Manager from 0.7.44 to show the embedded player; an older one shows an empty
+        frame and the caption. Export into a published course once its readers have that version.
       </p>
       <label className="os-row" style={{ gap: 8, alignItems: "center", marginBottom: 10 }}>
         <input type="checkbox" checked={player} onChange={(e) => { setPlayer(e.target.checked); setWritten(null); write.reset(); }} data-export-with-player="" />
-        <span>Also the interactive player, in the workshop's <code>walkthrough</code> folder, with a link to it at the end of the guide</span>
+        <span>Also the interactive player, in the workshop's <code>walkthrough</code> folder, embedded in the guide as a figure (in the Interactive walkthrough placeholder's place, else below the video, else after the first section heading)</span>
       </label>
+      {player && p && (
+        <div style={{ display: "grid", gap: 6, marginBottom: 10 }} data-export-player-block="">
+          <label className="os-row" style={{ gap: 8, alignItems: "center" }}>
+            <span style={{ whiteSpace: "nowrap" }}>Caption's first sentence</span>
+            <input
+              className="os-input"
+              style={{ flex: 1 }}
+              value={draft ?? caption ?? p.player_caption}
+              maxLength={MAX_CAPTION_CHARS}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={() => { commitCaption(); setDraft(null); }}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitCaption(); setDraft(null); } }}
+              data-export-player-caption=""
+            />
+          </label>
+          <span className="os-muted os-small" data-export-player-where="">{playerWhere(p.player_block)}</span>
+          <details data-export-player-figure="">
+            <summary>The figure the guide gets (the player in a frame, the caption under it)</summary>
+            <pre className="ms-transcript" style={{ maxHeight: 200 }}>{p.player_lines.join("\n")}</pre>
+          </details>
+        </div>
+      )}
       {plan.isLoading && <Spinner label="Reading the guide…" />}
       {plan.isError && <ErrorBox message={errorMessage(plan.error)} />}
       {p && (

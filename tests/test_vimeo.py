@@ -702,6 +702,7 @@ def test_a_guide_with_neither_offers_the_insertion_after_the_first_section_headi
 
     plan = _plan(c, pid, insert=True)
     assert plan["how"] == "insert" and plan["changed"] is True and plan["line"] == 5
+    assert plan["above_walkthrough"] is False, "no interactive walkthrough in this guide: the heading rule"
     r = _place(c, pid, plan, insert=True)
     assert r.status_code == 200, r.text
     expected = BARE_GUIDE.replace(

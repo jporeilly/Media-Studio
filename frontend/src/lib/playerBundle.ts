@@ -75,6 +75,20 @@ export function bundleImageUrl(step: Pick<Step, "image">): string {
   return step.image ?? "";
 }
 
+/**
+ * Whether the page is embedded (B2): framed by another page - the content manager's lesson shows it in an iframe, so
+ * its `top` is another window, or one it may not even read (a cross-origin top throws: that too is a frame) - or
+ * opened with `?embed=1`. A page in its own tab (Download player) stands alone. Pure over what it is given.
+ */
+export function bundleEmbedded(win: { self: unknown; top?: unknown; location?: { search?: string } }): boolean {
+  try {
+    if (win.top != null && win.top !== win.self) return true;
+  } catch {
+    return true;
+  }
+  return new URLSearchParams(win.location?.search ?? "").get("embed") === "1";
+}
+
 /** The theme the page takes: the viewer's own (`prefers-color-scheme`), dark when it cannot be read. */
 export function bundleTheme(matchMedia: ((query: string) => { matches: boolean }) | undefined): "dark" | "light" {
   try {
