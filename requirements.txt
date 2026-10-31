@@ -21,7 +21,7 @@ pydub>=0.25.1
 numpy>=1.24.0
 requests>=2.31.0
 python-dotenv>=1.0.0
-edge-tts>=6.1.0
+edge-tts>=7.3.1
 faster-whisper>=1.0.0
 pymupdf>=1.24.0          # provides `fitz` for PDF import (core/pdf_reader.py, core/pptx_exporter.py)
 
