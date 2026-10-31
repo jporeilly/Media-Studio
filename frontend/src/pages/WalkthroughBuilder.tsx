@@ -47,13 +47,25 @@
  * F2: Add step… offers **Take a still now…** (the Capture dialog's still tab, from here; the still becomes a step with
  * no hotspot), and a step without a hotspot has **Add hotspot** (a 160 × 60 hotspot centred on the picture). F3, F4: the
  * step panel's **Click** (Left · Right · Double · None) and **Marker** (Beacon · Box).
+ *
+ * R1-R4: **Video to course…** beside Make a video… (saving first, asked the same way) opens `VideoToCourseDialog`: one
+ * button renders the video, publishes it to Vimeo and places the link in the course workshop's guide as ONE job, which
+ * the builder then follows under its toolbar (`useFollowedJob`, as the project page follows a render) with Cancel, and
+ * the Done line with Open the video and Copy the link (`VideoToCourseStatus`). The three steps stay as they are.
+ *
+ * C4: the builder is ONE component (`WalkthroughBuilder`, this page's body) that the Workshop video canvas renders
+ * INLINE in its Edit stage (`embedded`): the three columns and the toolbar as they are - Save, Undo, Redo, Play,
+ * Transcript - with Export to course…, Make a video…, Video to course…, Capture steps… and Record… hidden there, since
+ * the canvas's stages hold them (two paths to one job on one page would show its progress twice), the page header
+ * left to the canvas, and a **Next** button that saves first when the document is dirty (asked as Play asks).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowLeft, ArrowUp, Camera, Clapperboard, Copy, Crosshair, Disc, Download, FileText, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Share, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Camera, Clapperboard, Copy, Crosshair, Disc, Download, FileText, Film, GripVertical, ImageOff, Play, Plus, Redo2, Replace, Save, Share, Trash2, Undo2, X } from "lucide-react";
 import { ApiError, api, errorMessage } from "../api/client";
 import { useConfirm } from "../components/ConfirmDialog";
+import type { Job } from "../components/project/JobProgress";
 import { Button, Card, EmptyState, ErrorBox, Field, Input, PageHeader, Select, Spinner, Textarea } from "../components/ui";
 import { useLeaveGuard } from "../components/annotate/useLeaveGuard";
 import { CaptureDialog } from "../components/capture/CaptureDialog";
@@ -62,7 +74,10 @@ import { ExportCourseDialog } from "../components/walkthrough/ExportCourseDialog
 import { HotspotSurface } from "../components/walkthrough/HotspotSurface";
 import { MakeVideoDialog } from "../components/walkthrough/MakeVideoDialog";
 import { StillPicker } from "../components/walkthrough/StillPicker";
+import { VideoToCourseDialog } from "../components/walkthrough/VideoToCourseDialog";
+import { VideoToCourseStatus } from "../components/walkthrough/VideoToCourseStatus";
 import { useGuidedCapture } from "../components/walkthrough/useGuidedCapture";
+import { useAuth } from "../context/AuthContext";
 import { fitZoom } from "../lib/annotate";
 import type { Capture } from "../lib/capture";
 import { SAVE_BEFORE_EXPORT, exportTitle } from "../lib/courseExport";
@@ -70,6 +85,9 @@ import { copyText, downloadText } from "../lib/files";
 import { type GuidedOptions, capturedSteps, hintLine, nextLabel } from "../lib/guided";
 import { type History, canRedo, canUndo, commit, history, prune, redo, undo } from "../lib/history";
 import { useCaptureAvailable } from "../lib/useCaptureAvailable";
+import { useFollowedJob } from "../lib/useFollowedJob";
+import { SAVE_BEFORE_VIDEO_TO_COURSE, VIDEO_TO_COURSE_JOB_KIND, type VideoToCourseDefaults, videoToCourseQueryKey, videoToCourseUrl } from "../lib/videoToCourse";
+import { SAVE_BEFORE_NEXT } from "../lib/workshopVideo";
 import {
   type ClickKind, type Marker, type Placement, type Step, type StepKind, type Walkthrough, type WalkthroughDocument, CLICKS, CLICK_LABELS, EMPTY_HOW,
   GONE_MESSAGE, MARKERS, MARKER_LABELS, MAX_CHAPTER_CHARS, MAX_INSTRUCTION_CHARS, MAX_NAME_CHARS, MAX_STEP_TEXT, NO_PICTURE_HOW, NO_PICTURE_TITLE,
@@ -81,14 +99,26 @@ import {
 /** What the status line says until the next change: an event, or a failure (drawn in the warning colour). */
 interface Event { text: string; bad: boolean }
 
+/** The canvas's Edit stage (C4): the builder inline, with a Next button that saves first and no header or stage buttons. */
+export interface EmbeddedBuilder {
+  nextLabel: string;
+  onNext: () => void;
+}
+
 export default function WalkthroughBuilderPage() {
   const { id = "" } = useParams();
+  return <WalkthroughBuilder id={id} />;
+}
+
+export function WalkthroughBuilder({ id, embedded }: { id: string; embedded?: EmbeddedBuilder }) {
   const navigate = useNavigate();
   const location = useLocation();
   const qc = useQueryClient();
   const { confirm, dialog } = useConfirm();
+  const { user } = useAuth();
   const viewportRef = useRef<HTMLDivElement>(null);
   const canCapture = useCaptureAvailable();
+  const inline = !!embedded;
 
   const record = useQuery({ queryKey: walkthroughQueryKey(id), queryFn: () => api.get<Walkthrough>(`/api/walkthroughs/${id}`), retry: false });
   const rec = record.data ?? null;
@@ -114,6 +144,25 @@ export default function WalkthroughBuilderPage() {
   const [takeStillOpen, setTakeStillOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [videoOpen, setVideoOpen] = useState(false);
+  const [vtcOpen, setVtcOpen] = useState(false);
+  // Video to course (R4): the project the chain runs on (to adopt a running job after a reload) and the job as it ended.
+  const [vtcProject, setVtcProject] = useState<string | null>(null);
+  const [vtcEnded, setVtcEnded] = useState<Job | null>(null);
+  const vtcDefaults = useQuery({
+    queryKey: videoToCourseQueryKey(id), queryFn: () => api.get<VideoToCourseDefaults>(videoToCourseUrl(id)), retry: false, staleTime: 30_000, enabled: !inline,
+  });
+  const vtcProjectId = vtcProject ?? vtcDefaults.data?.project?.id ?? null;
+  const vtc = useFollowedJob({
+    activeUrl: !inline && vtcProjectId ? `/api/projects/${vtcProjectId}/job` : null,
+    viewer: user,
+    onEnded: (job) => {
+      if (job.kind !== VIDEO_TO_COURSE_JOB_KIND) return;
+      setVtcEnded(job);
+      void qc.invalidateQueries({ queryKey: videoToCourseQueryKey(id) });
+      void qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+  const vtcRunning = vtc.jobActive && vtc.activeKind === VIDEO_TO_COURSE_JOB_KIND;
 
   // The document and its history from the record once (and again on Reload); the saved baseline beside it.
   const load = useCallback((r: Walkthrough) => {
@@ -341,6 +390,25 @@ export default function WalkthroughBuilderPage() {
     setVideoOpen(true);
   }, [dirty, confirm, save]);
 
+  /** Video to course (R1): the same - the one job reads the walkthrough as it is saved. */
+  const openVideoToCourse = useCallback(async () => {
+    if (dirty) {
+      if (!(await confirm({ ...SAVE_BEFORE_VIDEO_TO_COURSE }))) return;
+      if (!(await save())) return;
+    }
+    setVtcOpen(true);
+  }, [dirty, confirm, save]);
+
+  /** The canvas's Next (C4): saves first when dirty, asked as Play asks, then hands over to the stage after. */
+  const goNext = useCallback(async () => {
+    if (!embedded) return;
+    if (dirty) {
+      if (!(await confirm({ ...SAVE_BEFORE_NEXT }))) return;
+      if (!(await save())) return;
+    }
+    embedded.onNext();
+  }, [embedded, dirty, confirm, save]);
+
   /** Capture steps, and Record (F1): the builder saves first (as Play does), then the guided capture starts. */
   const startCapture = useCallback(async (options: GuidedOptions) => {
     setCaptureOpen(false);
@@ -391,11 +459,13 @@ export default function WalkthroughBuilderPage() {
 
   return (
     <>
-      <PageHeader
-        title={doc.name.trim() || rec.name}
-        subtitle="Add stills as steps, draw a hotspot on each, write what the tooltip or the card says and what the learner does, name the chapters, then Save and Play."
-        actions={<Link to="/walkthroughs" className="os-btn os-btn-secondary os-btn-sm" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><ArrowLeft size={14} /> Walkthroughs</Link>}
-      />
+      {!inline && (
+        <PageHeader
+          title={doc.name.trim() || rec.name}
+          subtitle="Add stills as steps, draw a hotspot on each, write what the tooltip or the card says and what the learner does, name the chapters, then Save and Play."
+          actions={<Link to="/walkthroughs" className="os-btn os-btn-secondary os-btn-sm" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><ArrowLeft size={14} /> Walkthroughs</Link>}
+        />
+      )}
       {dialog}
       <Card style={{ padding: 0, overflow: "hidden" }}>
         <div className="os-row" style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", gap: 8 }} data-builder-toolbar="">
@@ -405,17 +475,41 @@ export default function WalkthroughBuilderPage() {
           <Button size="sm" variant="primary" icon={<Save size={14} />} onClick={() => void save()} disabled={!dirty || saving} title="Save (Ctrl+S)">Save</Button>
           <Button size="sm" icon={<Play size={14} />} onClick={() => void play()} disabled={doc.steps.length === 0} title="Play from the selected step">Play</Button>
           <Button size="sm" icon={<FileText size={14} />} onClick={() => setTranscriptOpen((o) => !o)} aria-expanded={transcriptOpen} title="The walkthrough as a transcript: what is said at each step" data-transcript-toggle="">Transcript</Button>
-          <Button size="sm" icon={<Share size={14} />} onClick={() => void openExport()} disabled={saving || capturing} title={exportTitle(rec.source)} data-export-course="">Export to course…</Button>
-          <Button size="sm" icon={<Clapperboard size={14} />} onClick={() => void openVideo()} disabled={doc.steps.length === 0 || saving || capturing} title={doc.steps.length === 0 ? "Add a step first" : "Compile the walkthrough into a narrated video: a project whose Generate card renders it, each step a slide"} data-make-video="">Make a video…</Button>
-          {canCapture && (
+          {!inline && (
+            <Button size="sm" icon={<Share size={14} />} onClick={() => void openExport()} disabled={saving || capturing} title={exportTitle(rec.source)} data-export-course="">Export to course…</Button>
+          )}
+          {!inline && (
+            <Button size="sm" icon={<Clapperboard size={14} />} onClick={() => void openVideo()} disabled={doc.steps.length === 0 || saving || capturing} title={doc.steps.length === 0 ? "Add a step first" : "Compile the walkthrough into a narrated video: a project whose Generate card renders it, each step a slide"} data-make-video="">Make a video…</Button>
+          )}
+          {!inline && (
+            <Button size="sm" icon={<Film size={14} />} onClick={() => void openVideoToCourse()} disabled={doc.steps.length === 0 || saving || capturing || vtcRunning} title={doc.steps.length === 0 ? "Add a step first" : vtcRunning ? "The video is being made: follow it below" : "One job: render the video, publish it to Vimeo and place the link in the course workshop's guide"} data-video-to-course="">Video to course…</Button>
+          )}
+          {canCapture && !inline && (
             <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={doc.steps.length === 0 || capturing || saving} title={missingCount ? `${missingCount} step${missingCount === 1 ? " has" : "s have"} no picture yet: capture them in order` : "Capture every step again, in order"} data-capture-steps="">Capture steps…</Button>
           )}
-          {canCapture && (
+          {canCapture && !inline && (
             <Button size="sm" icon={<Disc size={14} />} onClick={() => setRecordOpen(true)} disabled={capturing || saving || !canAddStep(doc)} title={canAddStep(doc) ? "Record: click through the application and every click, typed pause or Shift+F8 becomes a step after the last" : TOO_MANY_STEPS_MESSAGE} data-record="">Record…</Button>
+          )}
+          {embedded && (
+            <Button size="sm" variant="primary" icon={<ArrowRight size={14} />} onClick={() => void goNext()} disabled={saving || capturing} title={dirty ? "Saves the walkthrough first (asked), then goes on" : "Go on to the next stage"} data-builder-next="">{embedded.nextLabel}</Button>
           )}
           <span role="status" aria-live="polite" style={{ color: event?.bad ? "var(--bad)" : "var(--muted)", fontSize: 12.5 }} data-builder-status="">{statusText}</span>
           {stale && <Button size="sm" onClick={() => void reload()} data-builder-reload="">Reload</Button>}
         </div>
+        {!inline && (
+          <VideoToCourseStatus
+            job={vtc.job}
+            jobActive={vtc.jobActive}
+            activeKind={vtc.activeKind}
+            mayCancel={vtc.mayCancel}
+            onCancel={vtc.cancel}
+            cancelPending={vtc.cancelPending}
+            cancelError={vtc.cancelError ? errorMessage(vtc.cancelError) : null}
+            ended={vtcEnded}
+            onDismiss={() => setVtcEnded(null)}
+            projectId={vtcProjectId}
+          />
+        )}
         {(capturing || guided.message) && (
           <div className="ms-capture-line" role="status" aria-live="polite" data-capture-line="">
             {capturing && guided.bar && (
@@ -503,7 +597,7 @@ export default function WalkthroughBuilderPage() {
                 <strong>No steps yet</strong>
                 <p>{EMPTY_HOW}</p>
                 <div className="os-row" style={{ gap: 6 }}>
-                  {canCapture && <Button size="sm" variant="primary" icon={<Disc size={14} />} onClick={() => setRecordOpen(true)} disabled={capturing || saving} data-record="">Record…</Button>}
+                  {canCapture && !inline && <Button size="sm" variant="primary" icon={<Disc size={14} />} onClick={() => setRecordOpen(true)} disabled={capturing || saving} data-record="">Record…</Button>}
                   <Button size="sm" icon={<Plus size={14} />} onClick={() => setPicker("add")} data-add-step="">Add step…</Button>
                 </div>
               </div>
@@ -513,7 +607,7 @@ export default function WalkthroughBuilderPage() {
                 <strong>{NO_PICTURE_TITLE}</strong>
                 <p>{NO_PICTURE_HOW}</p>
                 <div className="os-row" style={{ gap: 6 }}>
-                  {canCapture && <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={capturing || saving}>Capture steps…</Button>}
+                  {canCapture && !inline && <Button size="sm" icon={<Camera size={14} />} onClick={() => setCaptureOpen(true)} disabled={capturing || saving}>Capture steps…</Button>}
                   <Button size="sm" icon={<Replace size={14} />} onClick={() => setPicker("replace")}>Replace picture…</Button>
                 </div>
               </div>
@@ -594,6 +688,16 @@ export default function WalkthroughBuilderPage() {
       )}
       <ExportCourseDialog open={exportOpen} wid={id} onClose={() => setExportOpen(false)} />
       <MakeVideoDialog open={videoOpen} wid={id} doc={saved ?? doc} onClose={() => setVideoOpen(false)} />
+      {!inline && (
+        <VideoToCourseDialog
+          open={vtcOpen}
+          wid={id}
+          doc={saved ?? doc}
+          busy={vtcRunning}
+          onClose={() => setVtcOpen(false)}
+          onStarted={(r) => { setVtcEnded(null); setVtcProject(r.project_id); vtc.follow(r.job_id, VIDEO_TO_COURSE_JOB_KIND); }}
+        />
+      )}
       <StillPicker
         open={picker !== null}
         title={picker === "replace" ? "Replace picture" : "Add step"}

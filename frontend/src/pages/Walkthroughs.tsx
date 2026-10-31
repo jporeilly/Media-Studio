@@ -9,7 +9,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, Footprints, Play, Plus, Trash2 } from "lucide-react";
+import { Copy, Download, Footprints, Play, Plus, Route as RouteIcon, Trash2 } from "lucide-react";
 import { api, errorMessage } from "../api/client";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Button, Card, EmptyState, ErrorBox, Field, Input, Modal, PageHeader, Spinner } from "../components/ui";
@@ -75,7 +75,11 @@ export default function WalkthroughsPage() {
   const importButton = (
     <Button icon={<Download size={14} />} onClick={() => setImporting(true)} title="Make a walkthrough from a course workshop" data-import-workshop="">Import workshop…</Button>
   );
-  const actions = <div className="os-row" style={{ gap: 8 }}>{importButton}{newButton}</div>;
+  // Workshop video (C1): the one canvas - pick a workshop, capture, edit, make the video, publish the course.
+  const canvasButton = (
+    <Button icon={<RouteIcon size={14} />} onClick={() => navigate("/walkthroughs/workshop")} title="One canvas: pick a workshop, capture it, edit, make the video, publish the course" data-workshop-video="">Workshop video…</Button>
+  );
+  const actions = <div className="os-row" style={{ gap: 8 }}>{canvasButton}{importButton}{newButton}</div>;
 
   return (
     <>

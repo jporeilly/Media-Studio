@@ -416,6 +416,13 @@ def compute(record: dict, *, caption: str, welcome: bool, insert: bool) -> Place
     source, name = snapshot_source(record)
     if not source:
         raise NotFromCourse(NOT_FROM_COURSE_MESSAGE)
+    return compute_for_source(source, name, video_link(vimeo), caption=caption, welcome=welcome, insert=insert)
+
+
+def compute_for_source(source: dict, name: str, link: str, *, caption: str, welcome: bool, insert: bool) -> PlacePlan:
+    """:func:`compute` over a walkthrough's ``source`` and name directly - the one plan routine, which Video to course
+    also asks before any project exists (where the link WOULD go, with the link it will have or a stand-in); the same
+    refusals as :func:`compute` past the two it checks first."""
     course_id = str(source["course"])
     slug = course_export.source_slugs(source)[0]
     root = workshops.courses_root()
@@ -430,7 +437,6 @@ def compute(record: dict, *, caption: str, welcome: bool, insert: bool) -> Place
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise workshops.UnreadableCourse(f"{course_id}/{slug}/{workshops.GUIDE_FILE} cannot be read as UTF-8 text.") from None
-    link = video_link(vimeo)
     plain = [line for line, _e in split_lines(text)]
     figure = find_figure(plain) if find_placeholder(plain) is None else None
     found = None
@@ -469,6 +475,12 @@ def compute(record: dict, *, caption: str, welcome: bool, insert: bool) -> Place
         except (ValueError, UnicodeDecodeError, AttributeError):
             raise course_export.ExportRefused(f"{course_id}/{COURSE_FILE} is not a JSON object: nothing is written.") from None
     return plan
+
+
+def is_placed(plan: PlacePlan) -> bool:
+    """Whether the guide already holds THIS link as the video figure of ours: the plan finds the figure and would
+    change nothing (the canvas's "placed in the guide" status, derived from the course's files, never stored)."""
+    return plan.edit.how == "figure" and not plan.changed
 
 
 def file_actions(plan: PlacePlan) -> list[dict]:

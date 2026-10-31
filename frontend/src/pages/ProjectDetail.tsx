@@ -9,7 +9,7 @@ import { TranscriptCard } from "../components/project/TranscriptCard";
 import { VimeoPanel } from "../components/project/VimeoPanel";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Spinner } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
-import { GENERATE_JOB_KIND, canCancel, cancelTitle } from "../lib/ai";
+import { GENERATE_JOB_KIND, VIDEO_TO_COURSE_KIND, canCancel, cancelTitle } from "../lib/ai";
 import { renderSummary } from "../lib/edit";
 import { duration, relativeTime } from "../lib/format";
 import { REVOICE_CANCEL_TITLE, noticeCard, type JobCard } from "../lib/jobs";
@@ -270,8 +270,10 @@ export default function ProjectDetailPage() {
   const generateNotice = noticeFor("generate");
   const revoiceNotice = noticeFor("revoice");
   const vimeoNotice = noticeFor("vimeo");
-  const running = generate.isPending || (jobActive && activeKind === "generate");
-  const jobError = generate.isError ? errorMessage(generate.error) : activeKind === "generate" ? jobErrText : null;
+  // Video to course's one job (R2) runs on the project and is a render first: the Generate card shows it as one.
+  const renderKind = activeKind === GENERATE_JOB_KIND || activeKind === VIDEO_TO_COURSE_KIND;
+  const running = generate.isPending || (jobActive && renderKind);
+  const jobError = generate.isError ? errorMessage(generate.error) : renderKind ? jobErrText : null;
   // The Vimeo panel's job (a publish) shows its error on the panel, not on the Generate card.
   const vimeoError = activeKind === VIMEO_JOB_KIND ? jobErrText ?? null : null;
 
@@ -406,7 +408,7 @@ export default function ProjectDetailPage() {
                   slides it narrates, while ffmpeg encodes, before the subtitles and during the extra formats
                   (services/processing.py); its closing line then stays on this card as the notice above. The
                   same look and rule as the Slides and Re-voice cards' Cancel: the starter or an administrator. */}
-              {jobData && activeKind === GENERATE_JOB_KIND && canCancel(jobData.kind) && mayCancel && (
+              {jobData && renderKind && canCancel(jobData.kind) && mayCancel && (
                 <CancelJobButton
                   job={jobData}
                   pending={followedJob.cancelPending}
@@ -414,7 +416,7 @@ export default function ProjectDetailPage() {
                   onCancel={followedJob.cancel}
                 />
               )}
-              {activeKind === GENERATE_JOB_KIND && cancelErrorText && <ErrorBox message={cancelErrorText} />}
+              {renderKind && cancelErrorText && <ErrorBox message={cancelErrorText} />}
             </div>
           ) : (
             <div style={{ display: "grid", gap: 16 }}>

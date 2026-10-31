@@ -828,6 +828,23 @@ p { margin: 0 0 8px; }
 .ms-surface-handle { position: absolute; width: 8px; height: 8px; background: #fff; border: 1px solid #1e293b; transform: translate(-50%, -50%); pointer-events: none; }
 /* F4: a beacon step's dot at the hotspot's centre, as the player will draw it. */
 .ms-surface-beacon { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 2px #fff, 0 0 0 4px color-mix(in srgb, var(--brand) 45%, transparent); transform: translate(-50%, -50%); pointer-events: none; }
+/* C1: the Workshop video canvas's five stages across the top - the current one open below, the others one line each. */
+.ms-stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; margin: 0; padding: 0; list-style: none; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.ms-stage { display: grid; gap: 2px; padding: 10px 12px; min-width: 0; border-right: 1px solid var(--border); }
+.ms-stage:last-child { border-right: 0; }
+.ms-stage-current { background: var(--surface); box-shadow: inset 0 -2px 0 var(--brand); }
+.ms-stage-button { display: inline-flex; align-items: center; gap: 8px; background: transparent; border: 0; padding: 0; font: inherit; font-weight: 600; color: var(--text); cursor: pointer; text-align: left; }
+.ms-stage-button:disabled { color: var(--muted); cursor: default; }
+.ms-stage-number { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: var(--surface-3); color: var(--text-2); font-size: 12px; }
+.ms-stage-current .ms-stage-number { background: var(--brand); color: #fff; }
+.ms-stage-reached .ms-stage-number { background: color-mix(in srgb, var(--brand) 25%, var(--surface-3)); }
+.ms-stage-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ms-canvas-steps { margin: 0; padding: 0 0 0 4px; list-style: none; display: grid; gap: 4px; font-size: 13px; max-height: 50vh; overflow: auto; }
+.ms-canvas-steps li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+@media (max-width: 900px) {
+  .ms-stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ms-stage { border-bottom: 1px solid var(--border); }
+}
 @media (max-width: 1100px) {
   .ms-builder { grid-template-columns: 180px minmax(0, 1fr); }
   .ms-builder-props { grid-column: 1 / -1; }

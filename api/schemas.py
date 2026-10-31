@@ -67,6 +67,8 @@ class StudioSettingsIn(BaseModel):
     # Write-only (the GET answers ``vimeo_token_set``); "" clears it.
     vimeo_token: str | None = None
     vimeo_privacy: str | None = None
+    # The Content Editor backend's address the Workshop video canvas publishes through; "" = its default.
+    content_editor_url: str | None = None
 
 
 class LoginRequest(BaseModel):

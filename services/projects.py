@@ -359,6 +359,58 @@ def create_walkthrough_project(
     return record
 
 
+def refresh_walkthrough_project(record: dict, *, name: str, notes: bool, zoom: bool) -> dict:
+    """Video to course's **run again** (R3): the walkthrough project ``record`` made again from its walkthrough AS
+    IT IS SAVED NOW, in place - the project is reused, so the video stays under one project and its Vimeo panel shows
+    the chain's result. Under the project's lock: the pictures copied again (the old ``steps`` folder removed first),
+    a new snapshot written over the record's ``source_filename`` (the file name kept, so the rendered video keeps
+    its name and the render replaces it), the inner engine project REMOVED and made again (``materialise`` keeps an
+    existing project and composes only a missing still, and every still may have changed), and the record's name,
+    counts, ``walkthrough_name`` and ``images_rendered_at`` updated. ``vimeo`` stays (the publish moves its id into
+    ``previous``) and so does ``output_video`` (the render overwrites the file). ``LookupError`` for no such
+    walkthrough, ``ValueError`` (:data:`NO_STEPS_MESSAGE`) for one with no steps - nothing changed in either."""
+    from services import walkthroughs
+    from services.file_item import FileItem
+    from services.walkthrough_video import PICTURES_DIR, make_snapshot
+
+    pid = record["id"]
+    wid = str(record.get("walkthrough_id") or "")
+    rec = walkthroughs.get_walkthrough(wid)
+    if rec is None:
+        raise LookupError("No such walkthrough.")
+    if not rec.get("steps"):
+        raise ValueError(NO_STEPS_MESSAGE)
+    title = (name or "").strip() or rec.get("name") or record.get("name") or "Walkthrough"
+    pdir = PROJECTS_DIR / pid
+    with project_lock(pid):
+        pictures = pdir / PICTURES_DIR
+        shutil.rmtree(pictures, ignore_errors=True)
+        rec, size = walkthroughs.copy_for_video(wid, pictures)
+        if not rec.get("steps"):
+            raise ValueError(NO_STEPS_MESSAGE)
+        source = pdir / record["source_filename"]
+        source.write_text(json.dumps(make_snapshot(rec, name=title, notes=notes, zoom=zoom), indent=2), encoding="utf-8")
+        size += source.stat().st_size
+        inner = record.get("engine_project_dir")
+        if inner and (pdir / inner).is_dir():
+            shutil.rmtree(pdir / inner, ignore_errors=True)
+        item = FileItem(source, projects_base=pdir)
+        if not item.load_walkthrough() or item.project_manager is None or item.project_manager.state is None:
+            raise RuntimeError("The walkthrough's stills could not be composed; the server log has the reason.")
+        current = get_project(pid) or dict(record)
+        current.update({
+            "name": title,
+            "size_bytes": size,
+            "slide_count": item.slide_count,
+            "walkthrough_name": rec.get("name") or "",
+            "engine_project_dir": item.project_manager.project_dir.name,
+            "images_source": "walkthrough",
+            "images_rendered_at": datetime.now(timezone.utc).isoformat(),
+        })
+        save_project(current)
+    return current
+
+
 class ProjectDeleteError(RuntimeError):
     """A project could not be fully deleted. It is still listed, so it can be
     retried once whatever held the file has let go."""

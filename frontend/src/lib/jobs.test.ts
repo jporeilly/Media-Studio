@@ -202,6 +202,8 @@ describe("cardForJob", () => {
     expect(cardForJob("render-slides", "deck")).toBe("slides");
     expect(cardForJob("ai-enhance", "pdf")).toBe("slides");
     expect(cardForJob("vimeo_publish", "walkthrough")).toBe("vimeo");
+    // Video to course (R2): the one job runs on the project; the Generate card shows it as a render in flight.
+    expect(cardForJob("video_to_course", "walkthrough")).toBe("generate");
   });
 
   it("sends a kind not known yet to the card that starts such jobs", () => {

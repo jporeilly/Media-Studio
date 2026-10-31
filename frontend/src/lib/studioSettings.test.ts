@@ -21,6 +21,7 @@ const SAVED: StudioSettings = {
   vimeo_token_set: false,
   vimeo_token_env: false,
   vimeo_privacy: "unlisted",
+  content_editor_url: "http://localhost:8000",
 };
 
 const VOICES: Voice[] = [

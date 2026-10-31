@@ -104,6 +104,12 @@ PROJECT_SCOPED_ROUTES: dict[tuple[str, str], dict | None] = {
 STUDIO_WIDE_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/courses"),
     ("GET", "/api/courses/{course}/workshops/{slug}/preview"),
+    # The Workshop video canvas (C2, C6): the per-workshop status over the caller's own records, and the course
+    # published through the Content Editor's own API - the course is the studio's, the editor is the publisher.
+    ("GET", "/api/courses/{course}/workshop-status"),
+    ("GET", "/api/courses/publish/config"),
+    ("GET", "/api/courses/{course}/publish/diff"),
+    ("POST", "/api/courses/{course}/publish"),
     ("GET", "/api/music"),
     ("POST", "/api/music"),
     ("GET", "/api/music/{name}"),

@@ -44,6 +44,12 @@ Each setting maps to ONE config key - the key the engine reads:
   starts with: ``unlisted`` (the default), ``private`` or ``anybody``
   (``services.vimeo.PRIVACIES``; :func:`vimeo_privacy`). Unlisted and Private need Vimeo
   Plus or higher; the publish says so when Vimeo refuses them.
+- ``content_editor_url``  ``config._config["content_editor_url"]`` - the address of the Content
+  Editor's backend, which the Workshop video canvas publishes a course through
+  (``services.content_editor``). "" = the editor's own default, ``http://localhost:8000``
+  (``CONTENT_EDITOR_DEFAULT_URL``: the uvicorn port its ``start-editor.ps1`` and its UI's
+  ``VITE_EDITOR_API`` fall back to); anything else an ``http`` or ``https`` address with a host
+  and no path (:func:`content_editor_url` answers the one in force, without a trailing slash).
 
 The transition, pause and watermark values are the *defaults* of a generate
 job: the Generate card prefills them and every generate request may override
@@ -57,6 +63,7 @@ import math
 import os
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from services.vimeo import DEFAULT_PRIVACY as VIMEO_DEFAULT_PRIVACY, PRIVACIES as VIMEO_PRIVACIES
 from utils.config import config
@@ -101,6 +108,11 @@ WATERMARK_OPACITY_RANGE = {"min": 0.1, "max": 1.0, "step": 0.05}
 VIMEO_TOKEN_ENV = "MEDIA_STUDIO_VIMEO_TOKEN"
 #: A token is one word: no white space inside, and no longer than this (a personal access token is 32 characters).
 MAX_VIMEO_TOKEN_CHARS = 200
+#: The Content Editor backend's own default address: uvicorn on port 8000 (``Pentaho-Content-Editor/start-editor.ps1``
+#: ``$apiPort = 8000``; its UI's ``VITE_EDITOR_API`` falls back to the same). Its Vite UI is 5273 and is not the API.
+CONTENT_EDITOR_DEFAULT_URL = "http://localhost:8000"
+#: An address is bounded like any other text setting.
+MAX_CONTENT_EDITOR_URL_CHARS = 200
 
 # The visual transitions core/video_creator.py renders, with the labels the
 # desktop edition's settings tab used. "none" keeps the render at its static
@@ -132,6 +144,7 @@ FIELDS = (
     "watermark_text", "watermark_position", "watermark_opacity",
     "courses_folder", "courses_export",
     "vimeo_token", "vimeo_privacy",
+    "content_editor_url",
 )
 
 # The settings a generate request may override per job (GenerateRequest sends
@@ -191,6 +204,14 @@ def vimeo_privacy() -> str:
     return stored if stored in VIMEO_PRIVACIES else VIMEO_DEFAULT_PRIVACY
 
 
+def content_editor_url() -> str:
+    """The Content Editor backend's address the course publish calls: the stored one (without a trailing slash),
+    else the editor's own default, ``http://localhost:8000``."""
+    stored = config._config.get("content_editor_url")
+    text = stored.strip().rstrip("/") if isinstance(stored, str) else ""
+    return text or CONTENT_EDITOR_DEFAULT_URL
+
+
 # -- read ------------------------------------------------------------------
 
 def get_settings() -> dict:
@@ -216,6 +237,8 @@ def get_settings() -> dict:
         "vimeo_token_set": bool(vimeo_token()),
         "vimeo_token_env": vimeo_token_from_env(),
         "vimeo_privacy": vimeo_privacy(),
+        # The address in force: the stored one, else the editor's default (never "").
+        "content_editor_url": content_editor_url(),
     }
 
 
@@ -509,6 +532,22 @@ def _vimeo_privacy(value) -> str:
     return value
 
 
+def _content_editor_url(value) -> str:
+    """"" (the editor's default) or an ``http``/``https`` address with a host and nothing after it; a trailing
+    slash is dropped. Nothing is called here: the Publish stage asks the editor when it opens."""
+    if not isinstance(value, str):
+        raise ValueError("The Content Editor address must be text (leave it empty for the editor's default, http://localhost:8000).")
+    text = value.strip().rstrip("/")
+    if not text:
+        return ""
+    if len(text) > MAX_CONTENT_EDITOR_URL_CHARS:
+        raise ValueError(f"The Content Editor address is longer than {MAX_CONTENT_EDITOR_URL_CHARS} characters.")
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https") or not parts.netloc or parts.path or parts.query or parts.fragment or any(ch.isspace() for ch in text):
+        raise ValueError("The Content Editor address must be an http or https address with a host and nothing after it (for example http://localhost:8000).")
+    return text
+
+
 _VALIDATORS = {
     "tts_provider": _provider,
     "edge_tts_voice": _edge_voice,
@@ -528,6 +567,7 @@ _VALIDATORS = {
     "courses_export": _courses_export,
     "vimeo_token": _vimeo_token,
     "vimeo_privacy": _vimeo_privacy,
+    "content_editor_url": _content_editor_url,
 }
 
 

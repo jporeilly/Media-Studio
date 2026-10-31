@@ -33,6 +33,7 @@ const PAYLOAD: StudioPayload = {
     transition_duration: 0.5, watermark_text: "", watermark_position: "bottom-right", watermark_opacity: 0.5,
     courses_folder: "C:\\Courses", courses_export: false,
     vimeo_token_set: false, vimeo_token_env: false, vimeo_privacy: "unlisted",
+    content_editor_url: "http://localhost:8000",
   },
   options: {
     tts_provider: { options: [{ value: "edge_tts", label: "Edge TTS" }] },

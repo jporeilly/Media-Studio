@@ -131,6 +131,9 @@ export function StudioCard() {
                 <span>Allow export into the Courses folder</span>
               </label>
             </Field>
+            <Field label="Content Editor address" hint="The Content Editor's backend, which the Workshop video page publishes a course through (its uvicorn, not its Vite UI on 5273). Leave it empty for the editor's own default, http://localhost:8000; an http or https address with a host and nothing after it otherwise.">
+              <Input value={form.content_editor_url ?? ""} disabled={readOnly} placeholder="http://localhost:8000" onChange={(e) => update({ content_editor_url: e.target.value })} data-content-editor-url="" />
+            </Field>
 
             <Field label="Vimeo access token" hint={VIMEO_TOKEN_HINT}>
               <div style={{ display: "grid", gap: 6 }}>

@@ -647,6 +647,10 @@ WALKTHROUGH_ROUTES: dict[tuple[str, str], dict | None] = {
     ("GET", "/api/walkthroughs/{wid}/export/player.zip"): None,
     # W3: Make a video - the project and its generate job (tests/test_walkthrough_video.py holds the rest).
     ("POST", "/api/walkthroughs/{wid}/video"): {"name": "x"},
+    # R1-R3: Video to course - the dialog's facts and the one job (tests/test_video_to_course.py holds the rest);
+    # the owner's check comes before the token's, so another editor's 403 needs no token.
+    ("GET", "/api/walkthroughs/{wid}/video-to-course"): None,
+    ("POST", "/api/walkthroughs/{wid}/video-to-course"): {"name": "x"},
 }
 
 

@@ -151,6 +151,9 @@ export type JobCard = "slides" | "generate" | "transcript" | "revoice" | "vimeo"
  */
 export function cardForJob(kind: string | null | undefined, projectKind: string | null | undefined): JobCard {
   if (kind === "generate") return "generate";
+  // Video to course (R2): the one job that renders, publishes and places runs on the project; its render half is
+  // the Generate card's business, and the card shows it as a render in flight.
+  if (kind === "video_to_course") return "generate";
   if (kind === "vimeo_publish") return "vimeo";
   if (kind === "transcribe") return "transcript";
   if (kind === "revoice") return "revoice";

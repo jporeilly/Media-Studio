@@ -5,7 +5,7 @@
 
 from api.routers import (
     admin, ai, auth, capture, captures, courses, docs, edit, health, jobs, media, music, narration, projects, recordings,
-    settings, slides, updates, users, vimeo, walkthroughs,
+    settings, slides, updates, users, video_to_course, vimeo, walkthroughs,
 )
 
 API_ROUTERS = [
@@ -21,4 +21,6 @@ API_ROUTERS = [
     walkthroughs.router, courses.router,
     # Vimeo (V2, V3): a rendered project video published to Vimeo, and its link placed in the course workshop's guide.
     vimeo.router,
+    # Video to course (R1-R4): the one job that renders a walkthrough's video, publishes it and places the link.
+    video_to_course.router,
 ]

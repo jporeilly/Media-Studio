@@ -16,6 +16,7 @@ const AnnotatePage = lazy(() => import("./pages/Annotate"));
 const WalkthroughsPage = lazy(() => import("./pages/Walkthroughs"));
 const WalkthroughBuilderPage = lazy(() => import("./pages/WalkthroughBuilder"));
 const WalkthroughPlayPage = lazy(() => import("./pages/WalkthroughPlay"));
+const WorkshopVideoPage = lazy(() => import("./pages/WorkshopVideo"));
 
 function RequireAuth({ children }: { children: React.ReactElement }) {
   const { user, loading } = useAuth();
@@ -46,6 +47,8 @@ export default function App() {
         <Route path="/captures/:id/annotate" element={<Lazy><AnnotatePage /></Lazy>} />
         {/* Walkthroughs (W1): the list and the builder; pure web too, the browser edition has them. */}
         <Route path="/walkthroughs" element={<Lazy><WalkthroughsPage /></Lazy>} />
+        {/* Workshop video (C1): the one canvas - a static segment, so it wins over the builder's :id. */}
+        <Route path="/walkthroughs/workshop" element={<Lazy><WorkshopVideoPage /></Lazy>} />
         <Route path="/walkthroughs/:id" element={<Lazy><WalkthroughBuilderPage /></Lazy>} />
         {/* The splat carries the document's own path (`docs/guides/timeline`),
             so every document is a link anyone can send. */}

@@ -119,6 +119,11 @@ WALKTHROUGH_MAKE_VIDEO = "walkthrough.make_video"
 # "<course>/<slug>: vimeo <id>", ", welcome tour" when course.json took it too. The plan is a read.
 WALKTHROUGH_PLACE_VIDEO = "walkthrough.place_video"
 
+# A course published through the Content Editor's own publish API (``services.content_editor``, the Workshop video
+# canvas's last stage): "<course>: <message> -> <the editor's answer: committed abc1234 and pushed>". Media Studio
+# runs no git on the courses itself; the editor is the one publisher. The config and the diff are reads.
+COURSE_PUBLISH = "course.publish"
+
 # The music library (``services.music``): studio-wide, so the row is what says
 # who put a file there or took it away. The detail carries the name and the
 # size, no more.
@@ -162,12 +167,12 @@ ACTIONS: tuple[str, ...] = (
     CAPTURE_REFUSED, CAPTURE_ANNOTATE, CAPTURE_REVERT,
     WALKTHROUGH_CREATE, WALKTHROUGH_UPDATE, WALKTHROUGH_ADD_STEP, WALKTHROUGH_REPLACE_PICTURE, WALKTHROUGH_DUPLICATE,
     WALKTHROUGH_DELETE, WALKTHROUGH_IMPORT, WALKTHROUGH_GUIDED_CAPTURE, WALKTHROUGH_EXPORT_COURSE, WALKTHROUGH_MAKE_VIDEO,
-    WALKTHROUGH_PLACE_VIDEO,
+    WALKTHROUGH_PLACE_VIDEO, COURSE_PUBLISH,
 )
 
 # What the action was done to (the ``entity`` column).
 ENTITIES: tuple[str, ...] = (
-    "auth", "user", "settings", "project", "music", "job", "system", "audit", "recording", "capture", "walkthrough",
+    "auth", "user", "settings", "project", "music", "job", "system", "audit", "recording", "capture", "walkthrough", "course",
 )
 
 

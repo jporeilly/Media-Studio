@@ -40,6 +40,7 @@ async function mount() {
           createElement(Routes, null,
             createElement(Route, { path: "/", element: createElement(DashboardPage) }),
             createElement(Route, { path: "/walkthroughs", element: createElement(Probe) }),
+            createElement(Route, { path: "/walkthroughs/workshop", element: createElement(Probe) }),
             createElement(Route, { path: "/projects", element: createElement(Probe) }),
           ),
         ),
@@ -71,17 +72,17 @@ afterEach(async () => {
 });
 
 describe("the Dashboard's Walkthroughs tile", () => {
-  it("is there in a browser, with its wording, as the fifth tile of a three-a-row grid", async () => {
+  it("is there in a browser, with its wording, as the fifth tile of a three-a-row grid (Workshop video the sixth)", async () => {
     await mount();
-    expect(titles()).toHaveLength(5);
+    expect(titles()).toHaveLength(6);
     expect(walkthroughsTile().textContent).toContain("Turn stills into a click-through walkthrough");
     expect(host!.querySelector(".os-grid")!.className).toContain("os-grid-3");
   });
 
-  it("is there inside the desktop shell too, beside Capture, six tiles three a row", async () => {
+  it("is there inside the desktop shell too, beside Capture, seven tiles three a row", async () => {
     inShell();
     await mount();
-    expect(titles()).toHaveLength(6);
+    expect(titles()).toHaveLength(7);
     expect(titles().some((t) => t.startsWith("Capture"))).toBe(true);
     expect(walkthroughsTile()).toBeDefined();
     expect(host!.querySelector(".os-grid")!.className).toContain("os-grid-3");
@@ -91,5 +92,18 @@ describe("the Dashboard's Walkthroughs tile", () => {
     await mount();
     await act(async () => { (walkthroughsTile().querySelector("button") as HTMLButtonElement).click(); });
     expect(seen).toEqual({ pathname: "/walkthroughs", state: null });
+  });
+});
+
+describe("the Dashboard's Workshop video tile (C1)", () => {
+  const tile = () => tiles().find((t) => (t.textContent || "").startsWith("Workshop video"))!;
+
+  it("is there everywhere, beside Walkthroughs, with its wording, and opens the canvas", async () => {
+    await mount();
+    const names = titles().map((t) => t.split(/(?<=[a-z])(?=[A-Z])/)[0]);
+    expect(names.indexOf(names.find((n) => n.startsWith("Workshop video"))!)).toBe(names.findIndex((n) => n.startsWith("Walkthroughs")) + 1);
+    expect(tile().textContent).toContain("Pick a workshop, capture it, edit, make the video, publish.");
+    await act(async () => { (tile().querySelector("button") as HTMLButtonElement).click(); });
+    expect(seen).toEqual({ pathname: "/walkthroughs/workshop", state: null });
   });
 });

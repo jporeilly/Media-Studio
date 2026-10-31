@@ -49,6 +49,7 @@ def test_defaults_when_nothing_is_stored():
         "vimeo_token_set": False,  # V1: write-only - the token itself is never answered
         "vimeo_token_env": False,
         "vimeo_privacy": "unlisted",
+        "content_editor_url": "http://localhost:8000",  # C6: the Content Editor backend's own default address
     }
     assert DEFAULT_CONFIG["courses_folder"] == ""
     # The generation defaults are the engine's own (utils/config.py DEFAULT_CONFIG).
@@ -161,6 +162,9 @@ def test_empty_update_writes_nothing(monkeypatch):
         ("vimeo_token", "x" * 201, "longer than 200"),
         ("vimeo_privacy", "password", "Unknown Vimeo privacy 'password'"),
         ("vimeo_privacy", None, "Unknown Vimeo privacy"),
+        ("content_editor_url", "localhost:8000", "http or https"),
+        ("content_editor_url", "http://localhost:8000/api", "nothing after it"),
+        ("content_editor_url", 8000, "must be text"),
         ("brand_colour", "red", "Unknown setting: brand_colour"),
     ],
 )

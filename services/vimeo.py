@@ -34,6 +34,7 @@ from typing import Callable
 
 import httpx
 
+from utils.httpx_ssl import shared_ssl_context
 from utils.logger import get_logger
 
 log = get_logger("VIMEO")
@@ -182,7 +183,7 @@ class VimeoClient:
         self._token = token
         self._sleep = sleep or SLEEP
         self._client = httpx.Client(
-            transport=transport, timeout=httpx.Timeout(VIMEO_API_TIMEOUT_S),
+            transport=transport, timeout=httpx.Timeout(VIMEO_API_TIMEOUT_S), verify=shared_ssl_context(),
             headers={"Authorization": f"bearer {token}", "Accept": VIMEO_ACCEPT},
         )
 

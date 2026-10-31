@@ -49,7 +49,9 @@ the whole app suite looks and feels the same.
   the walkthrough downloads as an interactive player that opens offline in a web browser. Make a
   video compiles it into a narrated MP4, Publish to Vimeo hosts that video (any project's) on
   Vimeo, and Place in the course writes the Vimeo link into the workshop's guide, where the
-  Content Manager embeds it.
+  Content Manager embeds it. Video to course does the three as one job from one button, and the
+  Workshop video page is the whole path on one canvas - pick a workshop, capture, edit, make the
+  video, publish the course through the Content Editor's own publish.
 - **An AI assistant on the slides.** A local Ollama model writes and rewrites speaker
   notes, reviews them for grammar, tone, flow and transitions and fixes what it finds,
   adapts them to an audience, translates them, paces them, scores the deck for video and

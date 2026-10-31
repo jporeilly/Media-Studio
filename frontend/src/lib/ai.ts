@@ -142,8 +142,14 @@ export const GENERATE_JOB_KIND = "generate";
  * does a render (the full video and the preview) at every stage; the Q&A document (one prompt) does not.
  */
 export function canCancel(kind: string | null | undefined): boolean {
-  return kind === GENERATE_JOB_KIND || (isAiJob(kind) && kind !== "ai-qa-doc");
+  return kind === GENERATE_JOB_KIND || kind === VIDEO_TO_COURSE_KIND || (isAiJob(kind) && kind !== "ai-qa-doc");
 }
+
+/** Video to course (R2): the one job - render, publish, place - run on the project; the Generate card shows it as a render. */
+export const VIDEO_TO_COURSE_KIND = "video_to_course";
+/** What the Generate card's Cancel does for it: the render's rules, then the upload's, then nothing half-written. */
+export const VIDEO_TO_COURSE_CANCEL_TITLE =
+  "Stops the chain at its next check: during the render as a render's Cancel does; during the upload to Vimeo the unfinished video is removed from Vimeo; before the link is placed in the course nothing is written.";
 
 /** What the Generate card's Cancel does (api/routers/projects.py `generate`): the render and the preview alike. */
 export const RENDER_CANCEL_TITLE =
@@ -152,6 +158,7 @@ export const RENDER_CANCEL_TITLE =
 /** What Cancel does, per kind. */
 export function cancelTitle(kind: string | null | undefined): string {
   if (kind === GENERATE_JOB_KIND) return RENDER_CANCEL_TITLE;
+  if (kind === VIDEO_TO_COURSE_KIND) return VIDEO_TO_COURSE_CANCEL_TITLE;
   if (kind === "ai-qa") return "Stops between review passes; nothing is saved until every pass is done.";
   return "Stops after the slide the model is working on; what is written so far is kept.";
 }

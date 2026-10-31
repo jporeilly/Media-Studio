@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 import mimetypes
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -297,6 +297,16 @@ def generate_detail(started: StartedGenerate) -> str:
     return f"job {started.job_id}, {'preview' if started.preview else started.preset}, {started.provider}/{started.voice_id}"
 
 
+class PreparedGenerate(NamedTuple):
+    """A render ready to run: its ``work`` (the job's function) and what it was pinned to."""
+
+    work: Callable[[Callable[[float, str], None]], dict]
+    provider: str
+    voice_id: str
+    preset: str
+    preview: bool
+
+
 def start_generate(record: dict, body: GenerateRequest, user: dict) -> StartedGenerate:
     """Start the generate job of ``record`` (a deck, a PDF or a walkthrough
     project the caller may act on; the route has checked) with ``body``'s
@@ -306,7 +316,21 @@ def start_generate(record: dict, body: GenerateRequest, user: dict) -> StartedGe
     share, so the video a walkthrough makes is exactly the one its project
     page would. Each route writes the ``project.generate`` row itself
     (``generate_detail``): the audit guard reads an endpoint's own source.
-    The job's own course is the route's docstring above."""
+    The job's own course is the route's docstring above. Video to course
+    (``api.routers.video_to_course``) runs the same render INSIDE its one job:
+    it takes :func:`prepare_generate`'s ``work`` and calls it itself."""
+    prepared = prepare_generate(record, body)
+    # One job per project: a render over a running AI job would save its own
+    # stale copy of the notes over everything the AI loop wrote (409 meanwhile).
+    job_id = jobs.start("generate", prepared.work, project_id=record["id"], user_id=user["id"])
+    return StartedGenerate(job_id, prepared.provider, prepared.voice_id, prepared.preset, prepared.preview)
+
+
+def prepare_generate(record: dict, body: GenerateRequest) -> PreparedGenerate:
+    """The render of ``record`` with ``body``'s options and the studio's defaults
+    as they are now, as a job's ``work`` function - NOT started. The narration
+    and the defaults are resolved here, so a refusal (an unknown provider, a
+    voice from the other provider) is raised before anything runs."""
     pid = record["id"]
     preset = get_preset(body.preset)
     provider, voice_id = _narration(body.provider, body.voice_id)
@@ -462,10 +486,7 @@ def start_generate(record: dict, body: GenerateRequest, user: dict) -> StartedGe
             return _cancelled(stage, line, video=video_path.name, outputs=current["outputs"])
         return _with_failed({"video": video_path.name, "outputs": current["outputs"]})
 
-    # One job per project: a render over a running AI job would save its own
-    # stale copy of the notes over everything the AI loop wrote (409 meanwhile).
-    job_id = jobs.start("generate", work, project_id=pid, user_id=user["id"])
-    return StartedGenerate(job_id, provider, voice_id, body.preset, preview)
+    return PreparedGenerate(work, provider, voice_id, body.preset, preview)
 
 
 @router.post("/{pid}/revoice")

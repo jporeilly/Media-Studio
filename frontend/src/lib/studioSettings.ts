@@ -31,6 +31,8 @@ export interface StudioSettings {
   vimeo_token_env: boolean;
   /** The privacy a published video starts with: unlisted (the default), private or anybody. */
   vimeo_privacy: string;
+  /** The Content Editor backend's address the Workshop video canvas publishes a course through (C6); the editor's own default, http://localhost:8000, unless set. */
+  content_editor_url: string;
 }
 
 /** The PUT body: the changed settings, and the write-only token when it is being set ("" clears it). */

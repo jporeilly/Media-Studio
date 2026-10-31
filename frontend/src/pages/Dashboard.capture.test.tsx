@@ -77,11 +77,11 @@ afterEach(async () => {
 });
 
 describe("the Dashboard's Capture tile", () => {
-  // Five tiles without Capture since W1 added Walkthroughs (shown everywhere); six with it.
-  it("is absent in a browser: five tiles, none of them Capture", async () => {
+  // Six tiles without Capture since W1 added Walkthroughs and C1 Workshop video (both shown everywhere); seven with it.
+  it("is absent in a browser: six tiles, none of them Capture", async () => {
     await mount();
     const titles = tileTitles();
-    expect(titles).toHaveLength(5);
+    expect(titles).toHaveLength(6);
     expect(titles.some((t) => t.startsWith("Capture"))).toBe(false);
   });
 
@@ -89,7 +89,7 @@ describe("the Dashboard's Capture tile", () => {
     inShell();
     await mount();
     const titles = tileTitles();
-    expect(titles).toHaveLength(6);
+    expect(titles).toHaveLength(7);
     const tile = titles.find((t) => t.startsWith("Capture"));
     expect(tile).toContain("Record your screen with sound, or grab a still; a recording becomes a video project.");
   });
@@ -97,13 +97,13 @@ describe("the Dashboard's Capture tile", () => {
   it("is absent in a shell whose capability refuses the page, as the Projects page's button is", async () => {
     inShell(false);
     await mount();
-    expect(tileTitles()).toHaveLength(5);
+    expect(tileTitles()).toHaveLength(6);
   });
 
   it("is absent in a shell whose capability refuses the page although the bridge is there", async () => {
     inShell("refused");
     await mount();
-    expect(tileTitles()).toHaveLength(5);
+    expect(tileTitles()).toHaveLength(6);
   });
 
   it("opens Projects with the state that asks for the Capture dialog", async () => {
